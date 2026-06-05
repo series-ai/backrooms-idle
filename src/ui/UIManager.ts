@@ -476,7 +476,7 @@ export class UIManager {
     panel.add([durBg, this.durFill]);
 
     // Persistent hint under the icon.
-    this.hintText = makeText(this.scene, cx, iconCy + 196, 'Tap or hold to mine', 18, '#FFFFFF')
+    this.hintText = makeText(this.scene, cx, iconCy + 196, 'Tap or hold to explore', 18, '#FFFFFF')
       .setOrigin(0.5).setDepth(16);
     panel.add(this.hintText);
 
@@ -1512,7 +1512,7 @@ export class UIManager {
     const progW = BAR_WIDTH * Math.max(0, s.explorationPct / 100);
     this.progFill.width = Phaser.Math.Linear(this.progFill.width, progW, 0.15);
     this.progFill.x = BAR_X;
-    this.progLabel.setText(done ? `${oreName} — DESCEND!` : `Mining ${oreName}`);
+    this.progLabel.setText(done ? `${oreName} — DESCEND!` : `Exploring for ${oreName}`);
     this.roomsLabel.setText(`${Math.min(ore.required, Math.floor(s.exploration))} / ${ore.required}`);
 
     // Durability fill toward the next ore node.
