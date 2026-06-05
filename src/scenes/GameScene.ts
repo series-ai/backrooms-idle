@@ -239,11 +239,6 @@ export default class GameScene extends Phaser.Scene {
     // Update resource display and ability cooldowns
     this.ui.updateResourceBar();
     this.ui.refreshAbilities();
-
-    // Auto-escape: if enabled and conditions met, advance to next level
-    if (this.state.autoEscape && this.state.canEscape()) {
-      this.handleEscape();
-    }
   }
 
   /* ================================================================ */

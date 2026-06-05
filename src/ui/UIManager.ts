@@ -98,17 +98,10 @@ export class UIManager {
   private progFill!: Phaser.GameObjects.Rectangle;
   private progLabel!: Phaser.GameObjects.Text;
 
-  // Log
-  private logContainer!: Phaser.GameObjects.Container;
-  private logEntries: Phaser.GameObjects.Text[] = [];
-  private logMaskGfx!: Phaser.GameObjects.Graphics;
-  private logNextY = 0; // tracks next available Y inside logContainer
-
-  // Showcase icon — large watermark behind the log
-  private showcaseIcon: Phaser.GameObjects.Image | null = null;
-  private showcaseTween: Phaser.Tweens.Tween | null = null;
-  private activeShowcaseKey: string | null = null;
-  private showcaseFadeTimer: Phaser.Time.TimerEvent | null = null;
+  // Focal "showcase" presentation (replaces the scrolling text log)
+  private showcaseBig: Phaser.GameObjects.Image | null = null;
+  private showcaseKey: string | null = null;
+  private captionText!: Phaser.GameObjects.Text;
 
   // Resource bar
   private resTexts: Map<string, Phaser.GameObjects.Text> = new Map();
@@ -197,77 +190,37 @@ export class UIManager {
   }
 
   /* ================================================================ */
-  /*  Showcase icon — large watermark behind the log                   */
+  /*  Focal showcase — big icon that pops in as events happen          */
   /* ================================================================ */
 
-  private showShowcaseIcon(iconId: string): void {
+  private showcaseCenterY(): number {
+    return (LAYOUT.CONTENT_TOP + this.logBottom) / 2;
+  }
+
+  /** Swap/pop the big focal icon. */
+  private popShowcase(iconId: string): void {
     const key = `icon_${iconId}`;
     if (!this.scene.textures.exists(key)) return;
+    const targetScale = 320 / ICON_NATIVE;
 
-    // If same icon already showing, just reset the fade timer
-    if (this.activeShowcaseKey === iconId && this.showcaseIcon) {
-      this.resetShowcaseFadeTimer();
+    if (this.showcaseBig && this.showcaseKey === iconId) {
+      // Same icon — just re-pop it.
+      this.showcaseBig.setScale(targetScale * 0.85);
+      this.scene.tweens.add({ targets: this.showcaseBig, scale: targetScale, duration: 200, ease: 'Back.easeOut' });
       return;
     }
 
-    // Remove any existing showcase
-    this.destroyShowcase();
-
-    const logCenterY = (LAYOUT.CONTENT_TOP + this.logBottom) / 2;
-    this.showcaseIcon = this.scene.add.image(LAYOUT.CENTER_X, logCenterY, key);
-    this.showcaseIcon.setScale(550 / ICON_NATIVE);
-    this.showcaseIcon.setAlpha(0);
-    this.showcaseIcon.setDepth(14); // behind log text (depth 15)
-
-    // Mask to the log region so it doesn't bleed outside
-    this.showcaseIcon.setMask(this.logMaskGfx.createGeometryMask());
-
-    // Hide if not on explore tab
-    if (this.activeTab !== 'explore') this.showcaseIcon.setVisible(false);
-
-    this.activeShowcaseKey = iconId;
-
-    this.showcaseTween = this.scene.tweens.add({
-      targets: this.showcaseIcon,
-      alpha: 0.15,
-      duration: 400,
-      ease: 'Power2',
-    });
+    if (this.showcaseBig) this.showcaseBig.destroy();
+    this.showcaseBig = this.scene.add.image(LAYOUT.CENTER_X, this.showcaseCenterY(), key).setDepth(14);
+    this.showcaseBig.setScale(targetScale * 0.6).setAlpha(0);
+    if (this.activeTab !== 'explore') this.showcaseBig.setVisible(false);
+    this.showcaseKey = iconId;
+    this.scene.tweens.add({ targets: this.showcaseBig, scale: targetScale, alpha: 1, duration: 260, ease: 'Back.easeOut' });
   }
 
-  private fadeShowcaseIcon(): void {
-    if (this.showcaseTween) {
-      this.showcaseTween.destroy();
-      this.showcaseTween = null;
-    }
-    if (!this.showcaseIcon) return;
-
-    const icon = this.showcaseIcon;
-    this.showcaseIcon = null;
-    this.activeShowcaseKey = null;
-
-    this.scene.tweens.add({
-      targets: icon,
-      alpha: 0,
-      duration: 600,
-      ease: 'Power2',
-      onComplete: () => icon.destroy(),
-    });
-  }
-
-  private destroyShowcase(): void {
-    if (this.showcaseTween) { this.showcaseTween.destroy(); this.showcaseTween = null; }
-    if (this.showcaseFadeTimer) { this.showcaseFadeTimer.destroy(); this.showcaseFadeTimer = null; }
-    if (this.showcaseIcon) { this.showcaseIcon.destroy(); this.showcaseIcon = null; }
-    this.activeShowcaseKey = null;
-  }
-
-  private resetShowcaseFadeTimer(): void {
-    if (this.showcaseFadeTimer) this.showcaseFadeTimer.destroy();
-    this.showcaseFadeTimer = this.scene.time.delayedCall(3000, () => {
-      this.fadeShowcaseIcon();
-      this.showcaseFadeTimer = null;
-    });
+  private clearShowcase(): void {
+    if (this.showcaseBig) { this.showcaseBig.destroy(); this.showcaseBig = null; }
+    this.showcaseKey = null;
   }
 
   /* ================================================================ */
@@ -402,16 +355,6 @@ export class UIManager {
     this.progFill = this.scene.add.rectangle(BAR_X, y, 0, BAR_HEIGHT, 0xffcc00).setOrigin(0, 0).setDepth(11);
     this.progLabel = makeText(this.scene, BAR_X + 6, y + 1, 'EXPLORING: 0%', 16, '#FFFFFF').setDepth(12);
 
-    // Auto-descend toggle — small button right of the exploration bar
-    const autoX = BAR_X + BAR_WIDTH + 35;
-    const autoY = y + BAR_HEIGHT / 2;
-    const isOn = this.state.autoEscape;
-    this.autoEscBg = this.scene.add.rectangle(autoX, autoY, 56, BAR_HEIGHT, isOn ? 0x336633 : 0x333333)
-      .setDepth(12).setStrokeStyle(1, isOn ? 0x66aa66 : 0x444444).setInteractive({ useHandCursor: true });
-    this.autoEscTxt = makeText(this.scene, autoX, autoY, 'AUTO', 12, isOn ? '#88FF88' : '#666666', {
-      fontStyle: 'bold',
-    }).setOrigin(0.5).setDepth(13);
-    this.autoEscBg.on('pointerdown', () => this.cb.onToggleAutoEscape());
   }
 
   /* ---- Resource bar ---- */
@@ -507,16 +450,14 @@ export class UIManager {
     this.exploreDescendTxt = descendBtn.getAt(1) as Phaser.GameObjects.Text;
     panel.add([searchBtn, descendBtn]);
 
-    // Log container with mask — fills the area above the action buttons.
+    // Focal showcase fills the space above the buttons: a big icon (created on
+    // demand at scene depth 14) plus a caption that pops as events happen.
     this.logBottom = btnY - 56;
-    const logVisibleH = this.logBottom - LAYOUT.CONTENT_TOP;
-    this.logContainer = this.scene.add.container(0, 0);
-    this.logMaskGfx = this.scene.add.graphics();
-    this.logMaskGfx.setVisible(false);
-    this.logMaskGfx.fillRect(20, LAYOUT.CONTENT_TOP, 680, logVisibleH);
-    this.logContainer.setMask(this.logMaskGfx.createGeometryMask());
-    this.logNextY = LAYOUT.CONTENT_TOP + 10;
-    panel.add(this.logContainer);
+    const capY = this.logBottom - 60;
+    this.captionText = makeText(this.scene, LAYOUT.CENTER_X, capY, 'Searching the rooms...', 24, '#d6d6d6', {
+      align: 'center', wordWrap: { width: 640 },
+    }).setOrigin(0.5).setDepth(16);
+    panel.add(this.captionText);
 
     this.panels.set('explore', panel);
   }
@@ -1474,7 +1415,7 @@ export class UIManager {
     if (tab === 'shop') this.refreshShopPanel();
 
     // Toggle showcase icon visibility with explore tab
-    if (this.showcaseIcon) this.showcaseIcon.setVisible(tab === 'explore');
+    if (this.showcaseBig) this.showcaseBig.setVisible(tab === 'explore');
 
     // Hide void notification dot when viewing VOID tab
     if (tab === 'void' && this.voidNotifDot) this.voidNotifDot.setVisible(false);
@@ -1485,50 +1426,14 @@ export class UIManager {
   /* ================================================================ */
 
   addLogMessage(evt: GameEvent): void {
-    const maxEntries = 60;
-    const logBottom = this.logBottom || (LAYOUT.CONTENT_BOTTOM - 80);
+    // Big focal icon pops in for events that carry one (resources, entities, items).
+    if (evt.iconKey) this.popShowcase(evt.iconKey);
 
-    // Trigger showcase background icon if event has an iconKey
-    if (evt.iconKey) {
-      this.showShowcaseIcon(evt.iconKey);
-      this.resetShowcaseFadeTimer();
+    // Caption pops as it updates — no wall of scrolling text.
+    if (this.captionText) {
+      this.captionText.setText(evt.message).setColor(evt.color).setScale(0.92).setAlpha(1);
+      this.scene.tweens.add({ targets: this.captionText, scale: 1, duration: 180, ease: 'Back.easeOut' });
     }
-
-    // Create text entry (full width, no inline icon)
-    const txt = this.scene.add.text(40, this.logNextY, evt.message, {
-      fontFamily: FONT_FAMILY,
-      fontSize: '17px',
-      color: evt.color,
-      wordWrap: { width: 620 },
-    }).setAlpha(0);
-
-    const entryH = txt.height + 8;
-    this.logNextY += entryH;
-
-    this.logContainer.add(txt);
-    this.logEntries.push(txt);
-
-    // If the new entry goes past the visible area, scroll everything up
-    const overflow = this.logNextY - logBottom;
-    if (overflow > 0) {
-      for (const entry of this.logEntries) {
-        entry.y -= overflow;
-      }
-      this.logNextY -= overflow;
-    }
-
-    // Remove entries that scrolled off the top
-    while (this.logEntries.length > maxEntries) {
-      const old = this.logEntries.shift();
-      if (old) old.destroy();
-    }
-
-    // Fade in
-    this.scene.tweens.add({
-      targets: txt,
-      alpha: 1,
-      duration: 300,
-    });
   }
 
   /* ================================================================ */
@@ -1846,19 +1751,12 @@ export class UIManager {
       this.depthText.setText(`DEPTH: ${this.state.totalDepth}`);
     }
 
-    // Clear showcase icon
-    this.destroyShowcase();
+    // Reset focal showcase for the new level
+    this.clearShowcase();
 
     // Clear void prompt banner + dot (conditions may have changed after rewind)
     if (this.voidPromptBanner) { this.voidPromptBanner.destroy(); this.voidPromptBanner = null; }
     if (this.voidNotifDot) { this.voidNotifDot.destroy(); this.voidNotifDot = null; }
-
-    // Clear log entries
-    for (const e of this.logEntries) {
-      e.destroy();
-    }
-    this.logEntries = [];
-    this.logNextY = LAYOUT.CONTENT_TOP + 10;
 
     this.addLogMessage({
       type: 'system',
