@@ -1482,8 +1482,9 @@ export class UIManager {
   /* ================================================================ */
 
   addLogMessage(evt: GameEvent): void {
-    // Big focal icon pops in for events that carry one (resources, entities, items).
-    if (evt.iconKey) this.popShowcase(evt.iconKey);
+    // The focal explore icon is ALWAYS the floor's resource — never a monster.
+    // Only resource events re-pop it; entities/ambient are flavor text only.
+    if (evt.iconKey && evt.type === 'resource') this.popShowcase(evt.iconKey);
 
     // Floating feedback that pops up from the icon and fades — no wall of text.
     if (this.activeTab === 'explore') {
