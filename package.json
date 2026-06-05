@@ -1,0 +1,36 @@
+{
+  "name": "run-template-2d-phaser-suika",
+  "version": "1.0.0",
+  "description": "Suika-style fruit merge game - Phaser 3 + Vite + TypeScript",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "_build": "tsc && vite build",
+    "build": "npm run _build",
+    "build:bundled": "cross-env RUNDOT_GAME_DISABLE_EMBEDDED_LIBS=true npm run _build",
+    "preview": "vite preview",
+    "deploy": "npm run build && rundot deploy"
+  },
+  "keywords": [
+    "phaser",
+    "vite",
+    "typescript",
+    "game",
+    "suika"
+  ],
+  "author": "",
+  "license": "SEE LICENSE IN LICENSE.txt",
+  "devDependencies": {
+    "@babel/parser": "^7.26.3",
+    "@types/node": "^24.3.0",
+    "cross-env": "^7.0.3",
+    "firebase": "^12.12.1",
+    "magic-string": "^0.30.11",
+    "typescript": "^5.9.2",
+    "vite": "^6.3.5"
+  },
+  "dependencies": {
+    "@series-inc/rundot-game-sdk": "^5.17.0",
+    "phaser": "^3.90.0"
+  }
+}
