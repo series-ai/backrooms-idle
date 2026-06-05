@@ -161,8 +161,10 @@ export class UIManager {
   private abilityBtns: Map<string, Phaser.GameObjects.Container> = new Map();
   private abilityLabels: Map<string, Phaser.GameObjects.Text> = new Map();
   private logBottom = 0;
-  private exploreDescendBg?: Phaser.GameObjects.Rectangle;
+  private exploreDescendBg?: Phaser.GameObjects.Rectangle;   // right arrow (go deeper)
   private exploreDescendTxt?: Phaser.GameObjects.Text;
+  private leftArrowBg?: Phaser.GameObjects.Rectangle;        // left arrow (go back up)
+  private leftArrowTxt?: Phaser.GameObjects.Text;
 
   // Void prompt (stuck at max level)
   private voidPromptBanner: Phaser.GameObjects.Container | null = null;
@@ -450,24 +452,26 @@ export class UIManager {
 
     const cx = LAYOUT.CENTER_X;
 
-    // DESCEND button at the bottom (lights up green when the level is fully explored).
-    const btnY = LAYOUT.CONTENT_BOTTOM - 44;
-    const descendBtn = makeBtn(this.scene, cx, btnY, '⬇ DESCEND DEEPER', 440, 72, 0x333355, () => this.cb.onEscape());
-    this.exploreDescendBg = descendBtn.getAt(0) as Phaser.GameObjects.Rectangle;
-    this.exploreDescendTxt = descendBtn.getAt(1) as Phaser.GameObjects.Text;
-    panel.add(descendBtn);
-
-    this.logBottom = btnY - 56;
+    this.logBottom = LAYOUT.CONTENT_BOTTOM - 56;
     const iconCy = this.showcaseCenterY();
 
     // The big focal icon doubles as the explore BUTTON: tap or hold to explore.
     // A transparent hit zone sits on top of the swappable showcase icon.
-    this.exploreBtnZone = this.scene.add.rectangle(cx, iconCy, 360, 360, 0xffffff, 0)
+    this.exploreBtnZone = this.scene.add.rectangle(cx, iconCy, 320, 320, 0xffffff, 0)
       .setDepth(17).setInteractive({ useHandCursor: true });
     this.exploreBtnZone.on('pointerdown', () => this.startHoldExplore());
     this.exploreBtnZone.on('pointerup', () => this.stopHoldExplore());
     this.exploreBtnZone.on('pointerout', () => this.stopHoldExplore());
     panel.add(this.exploreBtnZone);
+
+    // Navigation arrows flanking the icon: ◀ go back a floor, ▶ descend deeper.
+    const left = makeBtn(this.scene, cx - 250, iconCy, '◀', 92, 132, 0x2a2a3a, () => this.goShallower());
+    this.leftArrowBg = left.getAt(0) as Phaser.GameObjects.Rectangle;
+    this.leftArrowTxt = left.getAt(1) as Phaser.GameObjects.Text;
+    const right = makeBtn(this.scene, cx + 250, iconCy, '▶', 92, 132, 0x333355, () => this.goDeeper());
+    this.exploreDescendBg = right.getAt(0) as Phaser.GameObjects.Rectangle;
+    this.exploreDescendTxt = right.getAt(1) as Phaser.GameObjects.Text;
+    panel.add([left, right]);
 
     // Durability bar under the icon — fills as you chip the current ore node.
     const durW = 240;
@@ -508,6 +512,20 @@ export class UIManager {
   private stopHoldExplore(): void {
     this.holdTimer?.remove();
     this.holdTimer = undefined;
+  }
+
+  /* ---- Floor navigation (the ◀ ▶ arrows) ---- */
+
+  private goShallower(): void {
+    const prev = this.state.currentLevel - 1;
+    if (prev >= 0 && this.state.unlockedLevels.includes(prev)) this.cb.onTravel(prev);
+  }
+
+  private goDeeper(): void {
+    const s = this.state;
+    const next = s.currentLevel + 1;
+    if (s.unlockedLevels.includes(next)) this.cb.onTravel(next);   // already-unlocked deeper floor
+    else if (s.canEscape()) this.cb.onEscape();                    // explored enough → descend to new floor
   }
 
   private pulseShowcase(): void {
@@ -1521,11 +1539,22 @@ export class UIManager {
       this.durFill.width = 240 * Math.max(0, Math.min(1, s.nodeDamage / s.nodeDurabilityMax));
     }
 
+    // Right arrow (go deeper): green/ready when you can descend to NEW territory;
+    // plain-enabled when a deeper floor is already unlocked; dim when neither.
     if (this.exploreDescendBg && this.exploreDescendTxt) {
-      const can = s.canEscape();
-      this.exploreDescendBg.setFillStyle(can ? 0x2c6a3c : 0x2a2a3a);
-      this.exploreDescendBg.setStrokeStyle(3, can ? 0x66cc88 : 0x44445a);
-      this.exploreDescendTxt.setColor(can ? '#FFFFFF' : '#7a7a90');
+      const nextUnlocked = s.unlockedLevels.includes(s.currentLevel + 1);
+      const newReady = s.canEscape();
+      const enabled = nextUnlocked || newReady;
+      this.exploreDescendBg.setFillStyle(newReady ? 0x2c6a3c : enabled ? 0x333355 : 0x232330);
+      this.exploreDescendBg.setStrokeStyle(3, newReady ? 0x66cc88 : enabled ? 0x55557a : 0x35353f);
+      this.exploreDescendTxt.setColor(enabled ? '#FFFFFF' : '#555566');
+    }
+    // Left arrow (go back up): enabled whenever you're below floor 0.
+    if (this.leftArrowBg && this.leftArrowTxt) {
+      const canBack = s.currentLevel > 0;
+      this.leftArrowBg.setFillStyle(canBack ? 0x2a2a3a : 0x232330);
+      this.leftArrowBg.setStrokeStyle(3, canBack ? 0x55557a : 0x35353f);
+      this.leftArrowTxt.setColor(canBack ? '#FFFFFF' : '#555566');
     }
   }
 
