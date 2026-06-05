@@ -1,83 +1,98 @@
-# Backrooms Idle — Redesign Plan (design-panel synthesis)
+# Backrooms Idle — Design (Explorer / "Idle Miner" model)
 
-> **Evolve, don't rewrite.** Keep every resource, entity, level, lore line, boss, gear
-> piece, and the Rewind/Void prestige. The content is the strength and the moat. The
-> problems are (1) the numbers don't compound and (2) the game doesn't explain itself —
-> both fixable *on top of* what exists. Protect the theme; fix the math and the clarity.
-
-This is a synthesis of three independent expert passes (idle-systems designer, Backrooms
-creative director, adversarial critic). They agreed on almost everything below.
+> The proven idle loop (à la Cavern Idle Miner), reskinned as **exploring the Backrooms
+> instead of mining**. Keep all the content that gives this game identity — the resources,
+> the entities, the levels, the lore. Cut the survival-sim baggage (HP/Sanity/death/combat).
+> Make the numbers compound so it's actually fun.
 
 ---
 
-## The verdict all three reached
-- **Content stays 100%.** 8 resources, 9 entities, hand-crafted levels, lore, gear, bosses,
-  Rewind/Void — sacred. Merging/deleting content is what killed the last attempt.
-- **Two real problems:** nothing compounds (upgrades are additive & hard-capped, so the
-  "big number" never accelerates), and the game is invisible/confusing to a new player
-  (auto-runs with nothing obvious to tap; jargon dumped all at once).
-- **Most fixes are math + UI layered onto existing systems.** Small approved increments,
-  game always runs, commit each step.
+## The core loop
+
+```
+EXPLORE the current level (idle, automatic)
+        ↓  passively find this level's RESOURCES   ← your "ore"
+SPEND resources on UPGRADES (explore faster, find more, dig deeper)
+        ↓  upgrades compound → exploration accelerates
+DESCEND to the next level when ready
+        ↓  each new level = a new, rarer RESOURCE TIER that gates better upgrades
+…repeat, deeper and richer each time…
+        ↓
+REWIND (prestige) = reset the run for permanent multipliers, climb back faster
+```
+
+**Depth is the main axis of progress** — "how deep have I gotten" is the big number you
+always chase. Going deeper unlocks the next resource, which unlocks the next upgrades.
 
 ---
 
-## A. Make the numbers compound  *(the "it's finally an idle game" fix)*
-- Convert the headline upgrades (Quick Feet, Sharp Eyes, Scavenger, defense) from
-  **additive+capped → multiplicative + uncapped**. The cost curve is already exponential;
-  the `maxLevel` was just throttling it. Buying upgrade #14 should still move the needle.
-- Stack multiplier sources as a **product, not a sum**: run-upgrades × gear × void × depth × milestones.
-- Give **Total Depth real teeth**: every level ever cleared = a permanent ×production
-  ("DepthMult"). The "big number always going up" finally *does* something.
-- Reward re-clearing a level ("Familiarity" stacks) — gives cleared levels a purpose.
+## Resources = infinite tiers from finite art  *(player's idea)*
 
-## B. Turn prestige into the long-term engine
-- Rewind payout should scale with the **deepest level reached** (exponential), not with
-  exploration-grinding or deaths (the current formula literally pays you to die).
-- Add **2–3 uncapped multiplicative Void nodes** — the thing you pour 50 prestiges into.
-  Keep all 8 existing Void upgrades as the cheap early tier.
-- Infinite procedural depth is already built; just make the rewards keep pace → truly infinite.
-
-## C. Make it legible in the first 30 seconds  *(the onboarding fix — the critic's #1)*
-- Visible, filling exploration bar + counters from second 1 ("Exploring The Lobby…").
-- **One obvious, bright primary action to tap** (never gray). Teaches "tapping = stuff happens."
-- A persistent one-line goal banner: "Find a Level Key → fill the bar → ESCAPE deeper."
-- Reveal advanced tabs (Void / Gear / Craft / Shop) only when first relevant — not all at once.
-- First entity = a **taught moment** (explain avoid → firesalt → damage), not a surprise.
-
-## D. Turn "taxes" into decisions
-- Telegraph penalties; give agency. Soften death's 30% exploration hit. Surface the
-  Lucky-Coin insurance choice *before* death. Make sanity drain a visible budget the player
-  weighs ("push for the key, or retreat to recover?").
-
-## E. Kill the small confusions
-- **Rename the currency collision:** "Void Fragments" (earned) vs "Void Shards" (paid) —
-  players will confuse them. Rename the paid one.
-- Tooltips everywhere (the data already carries `description` fields — just surface them).
+- A fixed base list of resource types (reuse the existing icons: cloth scraps, batteries,
+  scrap metal, almond water, canned food, firesalt, lucky coins…).
+- You unlock them in sequence as you descend. When the list runs out, it **repeats at the
+  next tier**: same icons, but with a **colored outline** marking the tier
+  (Tier 1 = none, Tier 2 = red, Tier 3 = next color, … forever).
+- Higher tier = rarer, worth more, and required by the next band of upgrades.
+- Net: endless resource progression with no new art. Deeper is always "unlock the next one."
 
 ---
 
-## THE ONE OPEN DESIGN DECISION → I need your call
-**HP vs Sanity.** The experts split:
-- **Idle designer:** *merge* them into a single bar ("Resolve"). In the code they're
-  mechanically identical — both drain, both auto-heal at 25%, either hitting 0 = death.
-  The player makes no distinct decision between them. Merging is cleaner and creates real
-  risk/reward.
-- **Backrooms director:** *keep both.* Entities threaten the **body** (Hound: 12 dmg) vs the
-  **mind** (Ink Crawler: 30 sanity) differently, and that duality is deeply thematic. The fix
-  isn't deleting Sanity — it's making it a *real* threat instead of an auto-managed leak.
+## Upgrades = the compounding engine
 
-Both agree the current **auto-heal makes them meaningless**. So the fork is: **merge to one
-bar**, or **keep two but make each genuinely matter** (and remove the auto-heal either way).
+- Spend resources on upgrades that make exploring **faster / find more / reach deeper**.
+- Upgrades are **multiplicative and effectively uncapped** (cost curve does the pacing, not a
+  hard maxLevel), so buying the next one always matters — the "numbers accelerate" feeling.
+- Deeper upgrades cost deeper-tier resources → the reason to keep descending.
+- Reuse the existing upgrade ideas (Quick Feet = explore speed, Sharp Eyes = find rate,
+  Scavenger = double find…). The old combat/defense upgrades get repurposed into useful idle
+  ones (e.g. deeper-find chance, offline yield, auto-explore).
+
+## Prestige = the long-term engine (kept)
+
+- **Rewind the Tape** stays: reset the run for **Void Fragments**, a permanent currency that
+  buys global multipliers. Payout scales with the **deepest level reached**.
+- Procedural infinite depth already exists in code; rewards just need to keep pace.
+- Theme intact: waking back in the Lobby, "the carpet is the same."
 
 ---
 
-## How we build it (so this never wastes your time again)
-Smallest high-leverage slice first. You approve each one. We commit each one. The game runs
-end-to-end after every step. No big-bang anything.
+## Entities = clickable bonuses, NOT threats  *(player's idea)*
 
-1. **Compounding math (A)** — the single change that makes it *feel* like an idle game.
-2. **Onboarding / clarity (C)** — make it legible in 30 seconds.
-3. **Prestige engine (B).**
-4. **Decisions-not-taxes + confusions (D, E).**
+- No HP, no Sanity, no death, no combat. Those are cut.
+- Instead, an entity (Smiler, Hound, Skin-Stealer…) **drifts across the screen** now and
+  then. **Tap it for a temporary bonus** — a speed surge, double finds, or a resource burst.
+- Ignore it → nothing bad happens. Pure upside for paying attention (like golden cookies,
+  but it's the Backrooms creatures). Keeps the monsters cool and the active layer fun.
 
-(Reasonable to start with #1 *or* #2 — your call.)
+---
+
+## Onboarding / clarity (first 30 seconds must work)
+
+- Visible, filling exploration bar + resource counters from second 1 ("Exploring The Lobby…").
+- One obvious, bright thing to tap (never gray/disabled-looking).
+- A one-line goal: "Find resources → upgrade → descend deeper."
+- Reveal advanced systems (Prestige/Void) only when first relevant — not all at once.
+- Tooltips everywhere (the data already has description fields).
+
+---
+
+## What we KEEP vs CUT
+
+**Keep:** all resources (now tiered), all entities (now clickable buffs), all levels (now
+depth/tiers), the lore + ambient writing, the Rewind/Void prestige, the procedural infinite
+depth.
+
+**Cut:** HP, Sanity, death/respawn, the firesalt-block combat resolution, gear/equipment,
+crafting, the old shop (revisit later if wanted). Anything that served the survival sim.
+
+---
+
+## Build order (small, approved, committed slices — game runs after each)
+
+1. **Core loop** — explore → find tiered resources → buy compounding upgrades → descend.
+   Clarity/onboarding built in from the start. (No HP/Sanity; entities not yet interactive.)
+2. **Resource tiers + colored outlines** — the infinite-cycle resource system.
+3. **Entities as clickable drifting bonuses.**
+4. **Prestige (Rewind/Void) wired to the new loop.**
+5. **Tuning pass** (headless sim for pacing).
