@@ -3,6 +3,7 @@ import RundotGameAPI from '@series-inc/rundot-game-sdk/api';
 import { TICK_INTERVAL_MS, SAVE_INTERVAL_MS } from '../config';
 import { GameState } from '../GameState';
 import { UIManager } from '../ui/UIManager';
+import { ORE_SEQUENCE } from '../data/GameData';
 
 /* ------------------------------------------------------------------ */
 /*  Lifecycle telemetry (module scope — runs once per import)          */
@@ -42,15 +43,13 @@ export default class GameScene extends Phaser.Scene {
     this.load.image('wallpaper', 'wallpaper.png');
 
     // --- Icon assets ---
-    // Resources (8)
-    this.load.image('icon_almond_water', 'icons/resources/almond_water.png');
-    this.load.image('icon_batteries', 'icons/resources/batteries.png');
-    this.load.image('icon_canned_food', 'icons/resources/canned_food.png');
-    this.load.image('icon_cloth_scraps', 'icons/resources/cloth_scraps.png');
-    this.load.image('icon_firesalt', 'icons/resources/firesalt.png');
-    this.load.image('icon_level_keys', 'icons/resources/level_keys.png');
-    this.load.image('icon_lucky_coins', 'icons/resources/lucky_coins.png');
-    this.load.image('icon_scrap_metal', 'icons/resources/scrap_metal.png');
+    // Resources — all 31 explorable resources (one per floor, cycling by tier)
+    for (const id of ORE_SEQUENCE) {
+      this.load.image(`icon_${id}`, `icons/resources/${id}.png`);
+    }
+    // Dormant currencies — firesalt/keys moved out of the resources folder
+    this.load.image('icon_firesalt', 'icons/equipment/firesalt.png');
+    this.load.image('icon_level_keys', 'icons/equipment/level_keys.png');
 
     // Upgrades (8)
     this.load.image('icon_quick_feet', 'icons/upgrades/quick_feet.png');
@@ -86,7 +85,6 @@ export default class GameScene extends Phaser.Scene {
     this.load.image('icon_void_fragment', 'icons/prestige/void_fragment.png');
     this.load.image('icon_void_shard', 'icons/prestige/void_shard.png');
     this.load.image('icon_rewind_button', 'icons/prestige/rewind_button.png');
-    this.load.image('icon_vhs_tape', 'icons/prestige/vhs_tape.png');
     this.load.image('icon_depth_counter', 'icons/prestige/depth_counter.png');
   }
 

@@ -45,23 +45,70 @@ export type UpgradeEffect = 'cooldown' | 'power' | 'autoMine' | 'bonusOre';
 /*  Floor ores — each level is ONE ore you mine toward a target.       */
 /* ------------------------------------------------------------------ */
 
-/** The ore each floor yields, in descend order (cycles for deeper floors). */
+/**
+ * The resource each floor yields, in descend order. There are 31 distinct
+ * resources; floors 0-30 use them at Tier 1. Floor 31 loops back to the start
+ * at Tier 2 (red outline), floor 62 at Tier 3, and so on forever.
+ */
 export const ORE_SEQUENCE = [
-  'almond_water', 'batteries', 'cloth_scraps', 'scrap_metal', 'canned_food', 'firesalt', 'lucky_coins',
+  'almond_water', 'wallpaper_strip', 'carpet_swatch', 'ceiling_tile', 'fluorescent_tube',
+  'cloth_scraps', 'scrap_wood', 'scrap_metal', 'copper_wire', 'duct_tape',
+  'glass_shard', 'batteries', 'lamp', 'radio', 'CCTV_camera',
+  'computer', 'vhs_tape', 'notebook_page', 'maps', 'canned_food',
+  'mre', 'energy_bar', 'bandage', 'anti_anxiety_pills', 'anti_radiation_pills',
+  'charcoal', 'bone_fragments', 'mannequin', 'pool_water', 'liquid_pain',
+  'lucky_coins',
 ];
 
 export interface FloorOre {
   resource: string;
+  tier: number;       // 1 for floors 0-30, 2 for 31-61, ... (visual outline + name suffix)
   required: number;   // ore needed to unlock descend
   durability: number; // taps to break ONE ore node (before Mining Power)
 }
 
 export function getFloorOre(levelId: number): FloorOre {
+  const n = ORE_SEQUENCE.length;
   return {
-    resource: ORE_SEQUENCE[levelId % ORE_SEQUENCE.length],
+    resource: ORE_SEQUENCE[levelId % n],
+    tier: Math.floor(levelId / n) + 1,  // every full lap of the list bumps the tier
     required: 10 + levelId * 20,        // Floor 0: 10, Floor 1: 30, Floor 2: 50, ...
     durability: 3 + levelId,            // deeper nodes are tougher
   };
+}
+
+/**
+ * Outline color for a resource tier. Tier 1 = no outline (null). Tier 2+ cycles
+ * through this palette so depth always re-skins the same icons in a new color.
+ */
+export const TIER_OUTLINE_COLORS: number[] = [
+  0xff4444, // Tier 2 — red
+  0xffa726, // Tier 3 — orange
+  0x66bb6a, // Tier 4 — green
+  0x29b6f6, // Tier 5 — cyan
+  0xab47bc, // Tier 6 — purple
+  0xec407a, // Tier 7 — pink
+  0xffd54f, // Tier 8 — gold
+];
+
+export function getTierColor(tier: number): number | null {
+  if (tier <= 1) return null;
+  return TIER_OUTLINE_COLORS[(tier - 2) % TIER_OUTLINE_COLORS.length];
+}
+
+/** Roman-numeral suffix for a tier (Tier 1 = '', Tier 2 = ' II', ...). */
+export function tierSuffix(tier: number): string {
+  if (tier <= 1) return '';
+  const numerals: [number, string][] = [
+    [1000, 'M'], [900, 'CM'], [500, 'D'], [400, 'CD'], [100, 'C'], [90, 'XC'],
+    [50, 'L'], [40, 'XL'], [10, 'X'], [9, 'IX'], [5, 'V'], [4, 'IV'], [1, 'I'],
+  ];
+  let n = tier;
+  let out = '';
+  for (const [val, sym] of numerals) {
+    while (n >= val) { out += sym; n -= val; }
+  }
+  return ` ${out}`;
 }
 
 export interface UpgradeDef {
@@ -146,16 +193,38 @@ export const RESOURCES: Record<string, ResourceDef> = {
     description: 'Needed to escape to the next level.',
     usable: false,
   },
+
+  // ---- Additional explorable resources (Tier 1 across floors 5-30) ----
+  wallpaper_strip: { id: 'wallpaper_strip', name: 'Wallpaper Strip', icon: '\u{1F7E8}', description: 'A peeling curl of the endless yellow wallpaper.', usable: false },
+  carpet_swatch: { id: 'carpet_swatch', name: 'Carpet Swatch', icon: '\u{1F7EB}', description: 'A damp scrap torn from the mono-yellow carpet.', usable: false },
+  ceiling_tile: { id: 'ceiling_tile', name: 'Ceiling Tile', icon: '⬜', description: 'A water-stained panel pried from the drop ceiling.', usable: false },
+  fluorescent_tube: { id: 'fluorescent_tube', name: 'Fluorescent Tube', icon: '\u{1F4A1}', description: 'A humming light tube, still faintly buzzing.', usable: false },
+  scrap_wood: { id: 'scrap_wood', name: 'Scrap Wood', icon: '\u{1FAB5}', description: 'Splintered planks salvaged from the structure.', usable: false },
+  copper_wire: { id: 'copper_wire', name: 'Copper Wire', icon: '\u{1F50C}', description: 'A coiled bundle of stripped wiring.', usable: false },
+  duct_tape: { id: 'duct_tape', name: 'Duct Tape', icon: '\u{1F9F7}', description: 'The universal fix. Half a roll left.', usable: false },
+  glass_shard: { id: 'glass_shard', name: 'Glass Shard', icon: '\u{1F537}', description: 'A jagged sliver of broken glass.', usable: false },
+  lamp: { id: 'lamp', name: 'Lamp', icon: '\u{1FA94}', description: 'A flickering lamp scavenged from an office.', usable: false },
+  radio: { id: 'radio', name: 'Radio', icon: '\u{1F4FB}', description: 'A handheld radio crackling with dead static.', usable: false },
+  CCTV_camera: { id: 'CCTV_camera', name: 'CCTV Camera', icon: '\u{1F4F9}', description: 'A salvaged surveillance camera. Still warm.', usable: false },
+  computer: { id: 'computer', name: 'Computer', icon: '\u{1F4BB}', description: 'An old terminal humming with a frozen prompt.', usable: false },
+  notebook_page: { id: 'notebook_page', name: 'Notebook Page', icon: '\u{1F4C4}', description: 'A torn page covered in someone’s frantic notes.', usable: false },
+  maps: { id: 'maps', name: 'Maps', icon: '\u{1F5FA}\u{FE0F}', description: 'Hand-drawn charts of routes that may not exist.', usable: false },
+  mre: { id: 'mre', name: 'MRE', icon: '\u{1F371}', description: 'A military meal-ready-to-eat. Tastes of cardboard.', usable: false },
+  energy_bar: { id: 'energy_bar', name: 'Energy Bar', icon: '\u{1F36B}', description: 'A crushed protein bar, two years past date.', usable: false },
+  bandage: { id: 'bandage', name: 'Bandage', icon: '\u{1FA79}', description: 'A roll of gauze for the inevitable scrapes.', usable: false },
+  anti_anxiety_pills: { id: 'anti_anxiety_pills', name: 'Anti-Anxiety Pills', icon: '\u{1F48A}', description: 'Takes the edge off the endless hum.', usable: false },
+  anti_radiation_pills: { id: 'anti_radiation_pills', name: 'Anti-Radiation Pills', icon: '☢\u{FE0F}', description: 'Iodine tablets for the glowing deep levels.', usable: false },
+  charcoal: { id: 'charcoal', name: 'Charcoal', icon: '⚫', description: 'Lumps of charcoal for fire and filtering.', usable: false },
+  bone_fragments: { id: 'bone_fragments', name: 'Bone Fragments', icon: '\u{1F9B4}', description: 'Pale fragments best not thought about.', usable: false },
+  mannequin: { id: 'mannequin', name: 'Mannequin', icon: '\u{1F9CD}', description: 'A featureless figure. It was facing you before.', usable: false },
+  pool_water: { id: 'pool_water', name: 'Pool Water', icon: '\u{1F4A7}', description: 'Warm, chlorine-tinged water from the Poolrooms.', usable: false },
+  liquid_pain: { id: 'liquid_pain', name: 'Liquid Pain', icon: '\u{1FA78}', description: 'A vial of deep red fluid. It pulses faintly.', usable: false },
+  vhs_tape: { id: 'vhs_tape', name: 'VHS Tape', icon: '\u{1F4FC}', description: 'An unlabeled tape. You don’t want to watch it.', usable: false },
 };
 
 export const RESOURCE_ORDER = [
-  'almond_water',
-  'canned_food',
-  'batteries',
-  'cloth_scraps',
-  'scrap_metal',
+  ...ORE_SEQUENCE,
   'firesalt',
-  'lucky_coins',
   'level_keys',
 ];
 

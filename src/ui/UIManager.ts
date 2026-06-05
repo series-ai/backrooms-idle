@@ -1,7 +1,7 @@
 import Phaser from 'phaser';
 import RundotGameAPI from '@series-inc/rundot-game-sdk/api';
 import { LAYOUT } from '../config';
-import { UPGRADES, RESOURCES, RESOURCE_ORDER, VOID_UPGRADES, PRESTIGE_TIERS, ABILITIES, EQUIP_SLOTS, EQUIP_SLOT_ICONS, GEAR_POOL, GEAR_TIER_COLORS, RECIPES, SHOP_ITEMS, SHARD_MILESTONES } from '../data/GameData';
+import { UPGRADES, RESOURCES, RESOURCE_ORDER, VOID_UPGRADES, PRESTIGE_TIERS, ABILITIES, EQUIP_SLOTS, EQUIP_SLOT_ICONS, GEAR_POOL, GEAR_TIER_COLORS, RECIPES, SHOP_ITEMS, SHARD_MILESTONES, getTierColor, tierSuffix } from '../data/GameData';
 import type { GameEvent, OfflineSummary } from '../GameState';
 import { GameState } from '../GameState';
 
@@ -101,6 +101,7 @@ export class UIManager {
   // Focal "showcase" presentation (replaces the scrolling text log)
   private showcaseBig: Phaser.GameObjects.Image | null = null;
   private showcaseKey: string | null = null;
+  private showcaseTier = 1;
   private hintText!: Phaser.GameObjects.Text;
   private roomsLabel!: Phaser.GameObjects.Text;
   private exploreBtnZone?: Phaser.GameObjects.Rectangle;
@@ -120,17 +121,6 @@ export class UIManager {
   private upgCostLabels: Map<string, Phaser.GameObjects.Text> = new Map();
   private upgLvlLabels: Map<string, Phaser.GameObjects.Text> = new Map();
   private upgBuyBtns: Map<string, Phaser.GameObjects.Container> = new Map();
-
-  // Escape panel refs
-  private escInfoText!: Phaser.GameObjects.Text;
-  private escBtn!: Phaser.GameObjects.Container;
-  private escBtnBg!: Phaser.GameObjects.Rectangle;
-  private travelContainer!: Phaser.GameObjects.Container;
-  private travelLevelName!: Phaser.GameObjects.Text;
-  private travelLevelSub!: Phaser.GameObjects.Text;
-  private travelPrevBg!: Phaser.GameObjects.Rectangle;
-  private travelNextBg!: Phaser.GameObjects.Rectangle;
-  private travelHomeBg!: Phaser.GameObjects.Rectangle;
 
   // Void panel refs
   private voidFragLabel!: Phaser.GameObjects.Text;
@@ -205,13 +195,13 @@ export class UIManager {
   }
 
   /** Swap/pop the big focal icon. */
-  private popShowcase(iconId: string): void {
+  private popShowcase(iconId: string, tier: number = 1): void {
     const key = `icon_${iconId}`;
     if (!this.scene.textures.exists(key)) return;
     const targetScale = 320 / ICON_NATIVE;
 
-    if (this.showcaseBig && this.showcaseKey === iconId) {
-      // Same icon — just re-pop it.
+    if (this.showcaseBig && this.showcaseKey === iconId && this.showcaseTier === tier) {
+      // Same icon + tier — just re-pop it.
       this.showcaseBig.setScale(targetScale * 0.85);
       this.scene.tweens.add({ targets: this.showcaseBig, scale: targetScale, duration: 200, ease: 'Back.easeOut' });
       return;
@@ -222,7 +212,17 @@ export class UIManager {
     this.showcaseBig.setScale(targetScale * 0.6).setAlpha(0);
     if (this.activeTab !== 'explore') this.showcaseBig.setVisible(false);
     this.showcaseKey = iconId;
+    this.showcaseTier = tier;
+    this.applyTierGlow(this.showcaseBig, tier);
     this.scene.tweens.add({ targets: this.showcaseBig, scale: targetScale, alpha: 1, duration: 260, ease: 'Back.easeOut' });
+  }
+
+  /** Colored outline glow marking the resource's tier (tier 1 = none). */
+  private applyTierGlow(img: Phaser.GameObjects.Image, tier: number): void {
+    if (!img.preFX) return;            // WebGL-only; canvas fallback skips the glow
+    img.preFX.clear();
+    const color = getTierColor(tier);
+    if (color !== null) img.preFX.addGlow(color, 8, 0, false, 0.1, 18);
   }
 
   private clearShowcase(): void {
@@ -243,7 +243,6 @@ export class UIManager {
     this.createExplorePanel();
     this.createItemsPanel();
     this.createUpgradePanel();
-    this.createEscapePanel();
     this.createVoidPanel();
     this.createGearPanel();
     this.createShopPanel();
@@ -401,12 +400,12 @@ export class UIManager {
     const showVoid = this.state.prestigeCount > 0 || this.state.canRewind();
 
     // Two-row layout with full labels
-    const row1: { id: string; label: string }[] = showVoid
-      ? [{ id: 'explore', label: 'EXPLORE' }, { id: 'items', label: 'ITEMS' }, { id: 'upgrades', label: 'UPGRADES' }, { id: 'escape', label: 'ESCAPE' }]
-      : [{ id: 'explore', label: 'EXPLORE' }, { id: 'items', label: 'ITEMS' }, { id: 'upgrades', label: 'UPGRADES' }];
+    const row1: { id: string; label: string }[] = [
+      { id: 'explore', label: 'EXPLORE' }, { id: 'items', label: 'ITEMS' }, { id: 'upgrades', label: 'UPGRADES' },
+    ];
     const row2: { id: string; label: string }[] = showVoid
       ? [{ id: 'void', label: 'VOID' }, { id: 'gear', label: 'GEAR' }, { id: 'shop', label: 'SHOP' }]
-      : [{ id: 'escape', label: 'ESCAPE' }, { id: 'gear', label: 'GEAR' }, { id: 'shop', label: 'SHOP' }];
+      : [{ id: 'gear', label: 'GEAR' }, { id: 'shop', label: 'SHOP' }];
 
     const rowH = 42;
     const rowGap = 8;
@@ -487,7 +486,7 @@ export class UIManager {
     this.panels.set('explore', panel);
 
     // Initial focal icon = this floor's ore.
-    this.popShowcase(this.state.floorOre.resource);
+    this.popShowcase(this.state.floorOre.resource, this.state.floorOre.tier);
   }
 
   /* ---- Tap / hold to mine (cooldown-gated) ---- */
@@ -540,11 +539,16 @@ export class UIManager {
   private createItemsPanel(): void {
     const panel = this.scene.add.container(0, 0).setDepth(15);
     const startY = LAYOUT.CONTENT_TOP + 10;
+    const rowH = 75;
+
+    // Scrollable container — the resource list is far taller than the screen now.
+    const scrollContainer = this.scene.add.container(0, 0);
+    const contentH = LAYOUT.CONTENT_BOTTOM - LAYOUT.CONTENT_TOP - 10;
 
     for (let i = 0; i < RESOURCE_ORDER.length; i++) {
       const resId = RESOURCE_ORDER[i];
       const res = RESOURCES[resId];
-      const y = startY + i * 75;
+      const y = startY + i * rowH;
       const row = this.scene.add.container(0, 0);
 
       // Resource icon + name (left) + count (right) — same line
@@ -576,7 +580,42 @@ export class UIManager {
         row.add(btn);
       }
 
-      panel.add(row);
+      scrollContainer.add(row);
+    }
+
+    panel.add(scrollContainer);
+
+    // Clip to the content area so scrolled rows don't bleed over the tab bar.
+    const maskGfx = this.scene.add.graphics();
+    maskGfx.setVisible(false);
+    maskGfx.fillRect(0, LAYOUT.CONTENT_TOP, LAYOUT.GAME_WIDTH, contentH);
+    panel.setMask(maskGfx.createGeometryMask());
+
+    // Drag to scroll when the list overflows.
+    const totalH = RESOURCE_ORDER.length * rowH;
+    if (totalH > contentH) {
+      const dragZone = this.scene.add.rectangle(
+        LAYOUT.CENTER_X, LAYOUT.CONTENT_TOP + contentH / 2,
+        LAYOUT.GAME_WIDTH, contentH, 0x000000, 0,
+      ).setDepth(16).setInteractive();
+
+      let dragging = false;
+      let lastY = 0;
+      const minScroll = -(totalH - contentH);
+
+      dragZone.on('pointerdown', (_p: Phaser.Input.Pointer) => {
+        dragging = true;
+        lastY = _p.y;
+      });
+      this.scene.input.on('pointermove', (_p: Phaser.Input.Pointer) => {
+        if (!dragging || !this.panels.get('items')?.visible) return;
+        const dy = _p.y - lastY;
+        lastY = _p.y;
+        scrollContainer.y = Phaser.Math.Clamp(scrollContainer.y + dy, minScroll, 0);
+      });
+      this.scene.input.on('pointerup', () => { dragging = false; });
+
+      panel.add(dragZone);
     }
 
     this.panels.set('items', panel);
@@ -675,143 +714,6 @@ export class UIManager {
     }
 
     this.panels.set('upgrades', panel);
-  }
-
-  /* ---- Escape / Levels panel ---- */
-
-  private createEscapePanel(): void {
-    const panel = this.scene.add.container(0, 0).setDepth(15);
-    const cx = LAYOUT.CENTER_X;
-    const gap = 16; // spacing between sections
-    let curY = LAYOUT.CONTENT_TOP + 10;
-
-    // Current level label
-    const currentLvlLabel = makeText(this.scene, cx, curY, 'CURRENT LEVEL', 16, '#AAAAAA', {
-      fontStyle: 'bold',
-    }).setOrigin(0.5, 0);
-    panel.add(currentLvlLabel);
-    curY += currentLvlLabel.height + 8;
-
-    // Level description (variable height)
-    const descTxt = makeText(this.scene, cx, curY, this.state.level.description, 18, this.state.level.textColor, {
-      align: 'center',
-      wordWrap: { width: 600 },
-    }).setOrigin(0.5, 0);
-    panel.add(descTxt);
-    curY += descTxt.height + gap;
-
-    // Progress info (variable height — 3 lines)
-    this.escInfoText = makeText(this.scene, cx, curY, '', 20, '#CCCCCC', {
-      align: 'center',
-      wordWrap: { width: 600 },
-    }).setOrigin(0.5, 0);
-    panel.add(this.escInfoText);
-    curY += 80 + gap; // reserve ~3 lines worth of space
-
-    // Escape button
-    const canEsc = this.state.canEscape();
-    const escBtnBg = this.scene.add.rectangle(0, 0, 400, 60, canEsc ? 0x446644 : 0x333333)
-      .setOrigin(0.5).setStrokeStyle(2, canEsc ? 0x66aa66 : 0x444444);
-    const escBtnTxt = this.scene.add.text(0, 0, '\u{1F511} ESCAPE TO NEXT LEVEL', {
-      fontFamily: FONT_FAMILY,
-      fontSize: '22px',
-      color: canEsc ? '#FFFFFF' : '#666666',
-      fontStyle: 'bold',
-    }).setOrigin(0.5);
-    this.escBtn = this.scene.add.container(cx, curY + 30, [escBtnBg, escBtnTxt]);
-    this.escBtn.setSize(400, 60);
-    this.escBtn.setInteractive({ useHandCursor: true });
-    this.escBtn.on('pointerdown', () => this.cb.onEscape());
-    this.escBtnBg = escBtnBg;
-    panel.add(this.escBtn);
-    curY += 60 + gap * 2;
-
-    // Travel label
-    const travelLabel = makeText(this.scene, cx, curY, 'TRAVEL', 16, '#AAAAAA', {
-      fontStyle: 'bold',
-    }).setOrigin(0.5, 0);
-    panel.add(travelLabel);
-    curY += travelLabel.height + gap;
-
-    // Travel navigation container
-    this.travelContainer = this.scene.add.container(0, 0);
-    panel.add(this.travelContainer);
-
-    const navY = curY + 30;
-
-    // Previous button
-    this.travelPrevBg = this.scene.add.rectangle(cx - 220, navY, 70, 60, 0x2a2a2a)
-      .setOrigin(0.5).setStrokeStyle(1, 0x444444).setInteractive({ useHandCursor: true });
-    this.travelPrevBg.on('pointerdown', () => this.travelPrev());
-    const prevTxt = makeText(this.scene, cx - 220, navY, '\u25C0', 28, '#CCCCCC').setOrigin(0.5);
-    this.travelContainer.add([this.travelPrevBg, prevTxt]);
-
-    // Level name display (center)
-    this.travelLevelName = makeText(this.scene, cx, navY - 12, '', 20, '#FFFFFF', {
-      fontStyle: 'bold', align: 'center',
-    }).setOrigin(0.5);
-    this.travelLevelSub = makeText(this.scene, cx, navY + 14, '', 14, '#AAAAAA', {
-      align: 'center',
-    }).setOrigin(0.5);
-    this.travelContainer.add([this.travelLevelName, this.travelLevelSub]);
-
-    // Next button
-    this.travelNextBg = this.scene.add.rectangle(cx + 220, navY, 70, 60, 0x2a2a2a)
-      .setOrigin(0.5).setStrokeStyle(1, 0x444444).setInteractive({ useHandCursor: true });
-    this.travelNextBg.on('pointerdown', () => this.travelNext());
-    const nextTxt = makeText(this.scene, cx + 220, navY, '\u25B6', 28, '#CCCCCC').setOrigin(0.5);
-    this.travelContainer.add([this.travelNextBg, nextTxt]);
-
-    // Home button (go to Level 0)
-    this.travelHomeBg = this.scene.add.rectangle(cx, navY + 70, 200, 44, 0x2a2a2a)
-      .setOrigin(0.5).setStrokeStyle(1, 0x444444).setInteractive({ useHandCursor: true });
-    this.travelHomeBg.on('pointerdown', () => {
-      if (this.state.currentLevel !== 0) this.cb.onTravel(0);
-    });
-    const homeTxt = makeText(this.scene, cx, navY + 70, '\u{1F3E0} BACK TO LEVEL 0', 16, '#AAAAAA').setOrigin(0.5);
-    this.travelContainer.add([this.travelHomeBg, homeTxt]);
-
-    this.refreshTravelNav();
-
-    this.panels.set('escape', panel);
-  }
-
-  private travelPrev(): void {
-    const sorted = this.state.unlockedLevels.slice().sort((a, b) => a - b);
-    const idx = sorted.indexOf(this.state.currentLevel);
-    if (idx > 0) this.cb.onTravel(sorted[idx - 1]);
-  }
-
-  private travelNext(): void {
-    const sorted = this.state.unlockedLevels.slice().sort((a, b) => a - b);
-    const idx = sorted.indexOf(this.state.currentLevel);
-    if (idx < sorted.length - 1) this.cb.onTravel(sorted[idx + 1]);
-  }
-
-  private refreshTravelNav(): void {
-    const sorted = this.state.unlockedLevels.slice().sort((a, b) => a - b);
-    const idx = sorted.indexOf(this.state.currentLevel);
-    const lvl = this.state.level;
-
-    // Update level display
-    this.travelLevelName.setText(lvl.name);
-    this.travelLevelSub.setText(lvl.subtitle);
-    this.travelLevelSub.setColor(lvl.textColor);
-
-    // Enable/disable prev
-    const hasPrev = idx > 0;
-    this.travelPrevBg.setFillStyle(hasPrev ? 0x2a2a2a : 0x1a1a1a);
-    this.travelPrevBg.setStrokeStyle(1, hasPrev ? 0x444444 : 0x2a2a2a);
-
-    // Enable/disable next
-    const hasNext = idx < sorted.length - 1;
-    this.travelNextBg.setFillStyle(hasNext ? 0x2a2a2a : 0x1a1a1a);
-    this.travelNextBg.setStrokeStyle(1, hasNext ? 0x444444 : 0x2a2a2a);
-
-    // Enable/disable home
-    const notHome = this.state.currentLevel !== 0;
-    this.travelHomeBg.setFillStyle(notHome ? 0x2a2a2a : 0x1a1a1a);
-    this.travelHomeBg.setStrokeStyle(1, notHome ? 0x444444 : 0x2a2a2a);
   }
 
   /* ---- Void panel (prestige upgrades + rewind) ---- */
@@ -1481,7 +1383,6 @@ export class UIManager {
     }
 
     if (tab === 'upgrades') this.refreshUpgradePanel();
-    if (tab === 'escape') this.refreshEscapePanel();
     if (tab === 'items') this.refreshItemCounts();
     if (tab === 'void') this.refreshVoidPanel();
     if (tab === 'gear') this.refreshGearPanel();
@@ -1502,7 +1403,7 @@ export class UIManager {
   addLogMessage(evt: GameEvent): void {
     // The focal explore icon is ALWAYS the floor's resource — never a monster.
     // Only resource events re-pop it; entities/ambient are flavor text only.
-    if (evt.iconKey && evt.type === 'resource') this.popShowcase(evt.iconKey);
+    if (evt.iconKey && evt.type === 'resource') this.popShowcase(evt.iconKey, this.state.floorOre.tier);
 
     // Floating feedback that pops up from the icon and fades — no wall of text.
     if (this.activeTab === 'explore') {
@@ -1525,7 +1426,7 @@ export class UIManager {
     const { BAR_WIDTH, BAR_X } = LAYOUT;
     const s = this.state;
     const ore = s.floorOre;
-    const oreName = RESOURCES[ore.resource]?.name ?? ore.resource;
+    const oreName = (RESOURCES[ore.resource]?.name ?? ore.resource) + tierSuffix(ore.tier);
     const done = s.exploration >= ore.required;
 
     const progW = BAR_WIDTH * Math.max(0, s.explorationPct / 100);
@@ -1658,38 +1559,6 @@ export class UIManager {
         }
       }
     }
-  }
-
-  refreshEscapePanel(): void {
-    const s = this.state;
-    const lines = [
-      `Exploration: ${Math.floor(s.explorationPct)}% / 100%`,
-      `Level Keys: ${s.resources['level_keys'] ?? 0}`,
-      `Danger: ${'!'.repeat(s.level.danger)}`,
-    ];
-
-    // Hint when the player is at the max unlocked level
-    const atMaxLevel = s.currentLevel >= s.maxLevelUnlocked && s.currentLevel < 9;
-    if (atMaxLevel && s.canRewind()) {
-      lines.push('');
-      lines.push('You\'ve reached the deepest level.');
-      lines.push('Use REWIND in the VOID tab to prestige');
-      lines.push('and unlock more levels!');
-    } else if (atMaxLevel) {
-      lines.push('');
-      lines.push('You\'ve reached the deepest level.');
-      lines.push('Keep exploring to unlock Rewind.');
-    }
-
-    this.escInfoText.setText(lines.join('\n'));
-
-    const canEsc = s.canEscape();
-    this.escBtnBg.setFillStyle(canEsc ? 0x446644 : 0x333333);
-    this.escBtnBg.setStrokeStyle(2, canEsc ? 0x66aa66 : 0x444444);
-    const btnTxt = this.escBtn.getAt(1) as Phaser.GameObjects.Text;
-    btnTxt.setColor(canEsc ? '#FFFFFF' : '#666666');
-
-    this.refreshTravelNav();
   }
 
   /* ---- Visual effects ---- */
@@ -1854,7 +1723,7 @@ export class UIManager {
 
     // New floor's ore becomes the focal node.
     this.clearShowcase();
-    this.popShowcase(this.state.floorOre.resource);
+    this.popShowcase(this.state.floorOre.resource, this.state.floorOre.tier);
     this.lastMineTime = 0;
 
     // Clear void prompt banner + dot (conditions may have changed after rewind)

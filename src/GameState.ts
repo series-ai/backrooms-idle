@@ -14,6 +14,7 @@ import {
   SHARD_MILESTONES,
   getLevel,
   getFloorOre,
+  tierSuffix,
   type LevelDef,
   type EquipSlot,
   type GearDef,
@@ -341,7 +342,7 @@ export class GameState {
       this.resources[ore.resource] = (this.resources[ore.resource] ?? 0) + gain;   // inventory (uncapped)
       this.stats.resourcesFound += gain;
       this.exploration = Math.min(ore.required, this.exploration + gain);           // descend progress (capped)
-      events.push({ type: 'resource', message: `+${gain} ${RESOURCES[ore.resource].name}`, color: '#7CFF7C', iconKey: ore.resource });
+      events.push({ type: 'resource', message: `+${gain} ${RESOURCES[ore.resource].name}${tierSuffix(ore.tier)}`, color: '#7CFF7C', iconKey: ore.resource });
     }
   }
 
