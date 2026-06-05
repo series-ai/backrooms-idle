@@ -1,5 +1,4 @@
 import {
-  LEVELS,
   ENTITIES,
   UPGRADES,
   RESOURCES,
@@ -17,7 +16,6 @@ import {
   SHOP_ITEMS,
   SHARD_MILESTONES,
   getLevel,
-  getBoss,
   type LevelDef,
   type EquipSlot,
   type GearDef,
@@ -213,13 +211,6 @@ export class GameState {
     if (!def || !this.canAffordUpgrade(id)) return false;
     this.resources[def.costResource] -= this.getUpgradeCost(id);
     this.upgrades[id] = this.getUpgradeLevel(id) + 1;
-
-    // Apply max HP/Sanity upgrades immediately
-    if (id === 'tough_body') {
-      this.maxHealth = this.baseMaxHealth + this.getUpgradeLevel('tough_body') * 10;
-    } else if (id === 'strong_mind') {
-      this.maxSanity = this.baseMaxSanity + this.getUpgradeLevel('strong_mind') * 10;
-    }
     return true;
   }
 
@@ -241,18 +232,22 @@ export class GameState {
     return total;
   }
 
-  get explorationSpeed(): number {
-    return 1 + this.getUpgradeLevel('quick_feet') * 0.15
-      + this.getVoidLevel('speed_runner') * 0.05
-      + this.getGearBonus('exploreSpeed') * 0.01
-      + (this.explorersKitOwned ? 0.15 : 0);
+  // Multiplicative + uncapped: each level multiplies, so the next purchase always
+  // matters and exploration visibly accelerates.
+  private upgradeMult(effect: string): number {
+    let m = 1;
+    for (const u of UPGRADES) {
+      if (u.effect === effect) {
+        const lvl = this.getUpgradeLevel(u.id);
+        if (lvl > 0) m *= Math.pow(1 + u.effectPerLevel / 100, lvl);
+      }
+    }
+    return m;
   }
-  get findRateBonus(): number {
-    return 1 + this.getUpgradeLevel('sharp_eyes') * 0.20
-      + this.getVoidLevel('keen_senses') * 0.05
-      + this.getGearBonus('findRate') * 0.01
-      + (this.scavengersKitOwned ? 0.15 : 0);
-  }
+
+  get explorationSpeed(): number { return this.upgradeMult('exploreSpeed'); }
+  get findRateBonus(): number { return this.upgradeMult('findRate'); }
+  get findAmountMult(): number { return this.upgradeMult('findAmount'); }
   get damageReduction(): number {
     return Math.min(0.85, this.getUpgradeLevel('thick_skin') * 0.10
       + this.getVoidLevel('thick_hide') * 0.03
@@ -268,7 +263,11 @@ export class GameState {
       + this.getGearBonus('entityAvoidance') * 0.01);
   }
   get doubleResourceChance(): number {
-    return Math.min(0.50, this.getUpgradeLevel('scavenger') * 0.07);
+    let c = 0;
+    for (const u of UPGRADES) {
+      if (u.effect === 'doubleChance') c += (u.effectPerLevel / 100) * this.getUpgradeLevel(u.id);
+    }
+    return Math.min(0.9, c);
   }
   get healthRegen(): number {
     return this.getUpgradeLevel('regeneration') * 0.5;
@@ -307,20 +306,31 @@ export class GameState {
     return true;
   }
 
+  /** Manual active search — instantly attempts a resource find (the clicker beat). */
+  manualSearch(): GameEvent[] {
+    const events: GameEvent[] = [];
+    const found = this.rollResourceDrop(this.level);
+    if (found) {
+      let amount = Math.max(1, Math.round(found.amount * this.findAmountMult));
+      if (Math.random() < this.doubleResourceChance) amount *= 2;
+      this.resources[found.resourceId] = (this.resources[found.resourceId] ?? 0) + amount;
+      this.stats.resourcesFound += amount;
+      events.push({ type: 'resource', message: `Searched: +${amount} ${RESOURCES[found.resourceId].name}`, color: '#7CFF7C', iconKey: found.resourceId });
+    } else {
+      events.push({ type: 'ambient', message: 'You search the area, but find nothing.', color: '#888888' });
+    }
+    return events;
+  }
+
   /* ---- Level escape / travel ---- */
 
   canEscape(): boolean {
-    if (this.resources['level_keys'] <= 0 || this.explorationPct < 100) return false;
-    // Within hand-crafted levels: respect prestige-gating
-    if (this.currentLevel < this.maxLevelUnlocked) return true;
-    // Past the last hand-crafted level: infinite depth unlocked
-    if (this.currentLevel >= LEVELS.length - 1) return true;
-    return false;
+    // Descend as soon as the level is fully explored — no key, no combat gate.
+    return this.explorationPct >= 100;
   }
 
   escape(): boolean {
     if (!this.canEscape()) return false;
-    this.resources['level_keys']--;
     // Save current level's exploration before moving
     this.explorationPerLevel[this.currentLevel] = this.exploration;
     this.currentLevel++;
@@ -343,50 +353,6 @@ export class GameState {
     // Restore destination level's exploration
     this.exploration = this.explorationPerLevel[levelId] ?? 0;
     return true;
-  }
-
-  /* ---- Death ---- */
-
-  private die(events: GameEvent[]): void {
-    this.stats.deaths++;
-
-    // Check for coin insurance (5 lucky coins to keep all resources)
-    const hasInsurance = (this.resources['lucky_coins'] ?? 0) >= 5;
-    if (hasInsurance) {
-      this.resources['lucky_coins'] -= 5;
-      events.push({
-        type: 'system',
-        message: 'Your lucky coins shimmer... resources protected! (-5 coins)',
-        color: '#FFD700',
-      });
-    }
-
-    // Respawn at 50% HP/Sanity
-    this.health = Math.floor(this.maxHealth * 0.5);
-    this.sanity = Math.floor(this.maxSanity * 0.5);
-
-    // Exploration penalty: lose 30%
-    this.exploration = Math.max(0, Math.floor(this.exploration * 0.7));
-
-    // Resource penalty: lose 15% (reduced from 30%) — unless insured
-    if (!hasInsurance) {
-      for (const key of Object.keys(this.resources)) {
-        if (key !== 'level_keys' && key !== 'lucky_coins') {
-          this.resources[key] = Math.floor(this.resources[key] * 0.85);
-        }
-      }
-      events.push({ type: 'system', message: 'You wake up dazed. Some supplies are gone.', color: '#AAAAAA' });
-    } else {
-      events.push({ type: 'system', message: 'You wake up dazed... but your supplies are intact.', color: '#AAAAAA' });
-    }
-
-    // Ghost Walk: 10 ticks of entity immunity
-    this.ghostWalkTicks = 10;
-    events.push({ type: 'system', message: 'Ghost Walk: entities cannot touch you for a while.', color: '#8888FF' });
-
-    // Adrenaline Rush: +25% find rate for 20 ticks
-    this.adrenalineTicks = 20;
-    events.push({ type: 'system', message: 'Adrenaline Rush: finding more resources!', color: '#FF8844' });
   }
 
   /* ---- Abilities ---- */
@@ -456,16 +422,6 @@ export class GameState {
     const events: GameEvent[] = [];
     const lvl = this.level;
 
-    // Tick down temporary buffs
-    if (this.ghostWalkTicks > 0) this.ghostWalkTicks--;
-    if (this.adrenalineTicks > 0) this.adrenalineTicks--;
-    if (this.barricadeTicks > 0) this.barricadeTicks--;
-    if (this.signalFlareTicks > 0) this.signalFlareTicks--;
-    if (this.torchTicks > 0) this.torchTicks--;
-    for (const a of ABILITIES) {
-      if ((this.abilityCooldowns[a.id] ?? 0) > 0) this.abilityCooldowns[a.id]--;
-    }
-
     // 1. Exploration progress
     const exploreAmt = 1 * this.explorationSpeed;
     this.exploration = Math.min(lvl.explorationRequired, this.exploration + exploreAmt);
@@ -474,44 +430,16 @@ export class GameState {
     // 1b. Check milestones
     this.checkMilestones(events);
 
-    // 2. Passive regen
-    if (this.healthRegen > 0) {
-      this.health = Math.min(this.maxHealth, this.health + this.healthRegen);
-    }
-    if (this.sanityRegen > 0) {
-      this.sanity = Math.min(this.maxSanity, this.sanity + this.sanityRegen);
-    }
-
-    // 3. Environmental sanity drain
-    const envDrain = lvl.danger * 0.3;
-    this.sanity = Math.max(0, this.sanity - envDrain * (1 - this.sanityDrainReduction));
-
-    // 4. Auto-use consumables at low thresholds
-    if (this.health < this.maxHealth * 0.25 && this.resources['almond_water'] > 0) {
-      this.useAlmondWater();
-      events.push({ type: 'system', message: 'Auto: Drank almond water (+15 HP)', color: '#44FF44' });
-    }
-    if (this.sanity < this.maxSanity * 0.25 && this.resources['canned_food'] > 0) {
-      this.useCannedFood();
-      events.push({ type: 'system', message: 'Auto: Ate canned food (+20 Sanity)', color: '#4488FF' });
-    }
-
-    // 5. Random events
+    // 2. Random events
     const roll = Math.random();
-    const torchMod = this.torchTicks > 0 ? 0.7 : 1;
-    const entityChance = 0.25 + lvl.danger * 0.04 * torchMod;
-
-    // Adrenaline rush boosts find rate after dying
-    const adrenalineBonus = this.adrenalineTicks > 0 ? 0.25 : 0;
+    const entityChance = 0.25 + lvl.danger * 0.04;
 
     if (roll < 0.25) {
       // Resource find attempt
-      if (Math.random() < 0.5 * (this.findRateBonus + adrenalineBonus)) {
+      if (Math.random() < 0.5 * this.findRateBonus) {
         const found = this.rollResourceDrop(lvl);
         if (found) {
-          let amount = found.amount;
-          // Signal flare: double all drops
-          if (this.signalFlareTicks > 0) amount *= 2;
+          let amount = Math.max(1, Math.round(found.amount * this.findAmountMult));
           if (Math.random() < this.doubleResourceChance) {
             amount *= 2;
             events.push({
@@ -524,60 +452,21 @@ export class GameState {
             events.push({
               type: 'resource',
               message: `Found +${amount} ${RESOURCES[found.resourceId].name}`,
-              color: this.signalFlareTicks > 0 ? '#FF8844' : '#44FF44',
+              color: '#44FF44',
               iconKey: found.resourceId,
             });
           }
           this.resources[found.resourceId] = (this.resources[found.resourceId] ?? 0) + amount;
           this.stats.resourcesFound += amount;
-
-          // Chance for gear drop alongside resource find (1.5%)
-          if (Math.random() < 0.015) {
-            const gear = this.rollGearDrop();
-            if (gear) this.tryEquipGear(gear, events);
-          }
         }
       }
     } else if (roll < entityChance) {
-      // Entity encounter — ghost walk, barricade, and firesalt bomb make you immune
-      if (this.ghostWalkTicks > 0) {
-        events.push({ type: 'entity', message: 'Something lurks nearby... but it passes through you.', color: '#888888' });
-      } else if (this.barricadeTicks > 0) {
-        events.push({ type: 'entity', message: 'Something claws at your barricade... but cannot get in.', color: '#8888FF' });
-      } else if (this.firesaltBombActive) {
-        this.firesaltBombActive = false;
-        const entityId = lvl.entityIds[Math.floor(Math.random() * lvl.entityIds.length)];
-        const entity = ENTITIES[entityId];
-        if (entity) {
-          this.stats.entitiesEncountered++;
-          events.push({ type: 'entity', message: entity.encounterMessage, color: '#FF8800', iconKey: entityId });
-          events.push({ type: 'entity', message: `Your firesalt bomb detonates! ${entity.name} is obliterated!`, color: '#FF4444', iconKey: entityId });
-        }
-      } else {
-        const entityId = lvl.entityIds[Math.floor(Math.random() * lvl.entityIds.length)];
-        const entity = ENTITIES[entityId];
-        if (entity) {
-          this.stats.entitiesEncountered++;
-          events.push({ type: 'entity', message: entity.encounterMessage, color: '#FF8800', iconKey: entityId });
-
-          if (Math.random() < this.entityAvoidChance) {
-            events.push({ type: 'entity', message: entity.surviveMessage, color: '#88FF88', iconKey: entityId });
-          } else if (this.resources['firesalt'] > 0) {
-            this.resources['firesalt']--;
-            events.push({ type: 'entity', message: `${entity.defeatMessage} (-1 Firesalt)`, color: '#FF8800', iconKey: entityId });
-          } else {
-            const dmg = Math.max(1, Math.floor(entity.damage * (1 - this.damageReduction)));
-            const sanDmg = Math.max(1, Math.floor(entity.sanityDamage * (1 - this.sanityDrainReduction)));
-            this.health -= dmg;
-            this.sanity -= sanDmg;
-            events.push({
-              type: 'damage',
-              message: `${entity.name} attacks! -${dmg} HP, -${sanDmg} Sanity`,
-              color: '#FF0000',
-              iconKey: entityId,
-            });
-          }
-        }
+      // Entity drifts past — pure atmosphere for now (clickable bonus comes in a later slice)
+      const entityId = lvl.entityIds[Math.floor(Math.random() * lvl.entityIds.length)];
+      const entity = ENTITIES[entityId];
+      if (entity) {
+        this.stats.entitiesEncountered++;
+        events.push({ type: 'entity', message: entity.encounterMessage, color: '#FF8800', iconKey: entityId });
       }
     } else if (roll < 0.6) {
       // Ambient message
@@ -589,52 +478,15 @@ export class GameState {
       });
     }
 
-    // 5b. Auto-Scavenge shop buff
-    if (this.autoScavengeActive && this.canUseAbility('scavenge')) {
-      const scavEvents = this.useAbility('scavenge');
-      for (const e of scavEvents) events.push(e);
-    }
-
-    // 5c. Rare events (independent roll)
+    // 3. Rare events (hidden rooms, caches, wanderers, memory fragments)
     this.rollRareEvent(events);
 
-    // 6. Check death
-    if (this.health <= 0 || this.sanity <= 0) {
-      const cause = this.health <= 0 ? 'Your body gives out.' : 'Your mind shatters.';
-      events.push({ type: 'death', message: `${cause} You noclip back...`, color: '#FF0000' });
-      this.die(events);
-    }
-
-    // 7. Exploration complete hint
-    if (
-      this.explorationPct >= 100 &&
-      this.resources['level_keys'] <= 0 &&
-      Math.random() < 0.08
-    ) {
+    // 4. Nudge to descend once the level is fully explored
+    if (this.explorationPct >= 100 && Math.random() < 0.05) {
       events.push({
         type: 'system',
-        message: 'You sense an exit nearby... but you need a Level Key.',
+        message: 'You\'ve explored this level. An exit waits deeper...',
         color: '#FFD700',
-      });
-    }
-
-    // 8. Stuck at max level — nudge player toward VOID / Rewind
-    if (
-      this.explorationPct >= 100 &&
-      !this.canEscape() &&
-      this.canRewind() &&
-      Math.random() < 0.05
-    ) {
-      const hints = [
-        'You\'ve explored everything here. The VOID calls to you...',
-        'There is nothing left to find. Only the VOID remains.',
-        'The walls whisper: "Rewind the tape..."',
-        'You feel the pull of the VOID. It\'s time to let go.',
-      ];
-      events.push({
-        type: 'system',
-        message: hints[Math.floor(Math.random() * hints.length)],
-        color: '#CC88FF',
       });
     }
 
@@ -689,12 +541,6 @@ export class GameState {
       color: '#FFD700',
     });
 
-    // At 100%, trigger boss encounter
-    if (threshold === 100 && !this.defeatedBosses[this.currentLevel]) {
-      this.triggerBoss(events);
-      return; // boss handles all 100% rewards
-    }
-
     // Standard milestone rewards
     let dropCount: number;
     switch (threshold) {
@@ -721,129 +567,11 @@ export class GameState {
       events.push({ type: 'resource', message: `Milestone bonus: +${bonus} Firesalt`, color: '#FF8844', iconKey: 'firesalt' });
     }
 
-    if (threshold === 100) {
-      // Boss already defeated — give key directly
-      this.resources['level_keys'] = (this.resources['level_keys'] ?? 0) + 1;
-      events.push({ type: 'resource', message: 'Milestone reward: +1 Level Key!', color: '#FFD700', iconKey: 'level_keys' });
-    }
-
     events.push({
       type: 'resource',
       message: `Supply cache found! (+${totalFound} resources)`,
       color: '#88FF88',
     });
-  }
-
-  /* ---- Boss encounters ---- */
-
-  private triggerBoss(events: GameEvent[]): void {
-    const boss = getBoss(this.currentLevel);
-
-    // Prestige scaling: bosses get harder each prestige
-    const scale = 1 + this.prestigeCount * 0.1;
-    const rawDmg = Math.floor(boss.damage * scale);
-    const rawSan = Math.floor(boss.sanityDamage * scale);
-
-    events.push({ type: 'event', message: `BOSS: ${boss.name}`, color: '#FF4444' });
-    events.push({ type: 'event', message: boss.encounterMessage, color: '#FF8844' });
-
-    // Firesalt bomb auto-wins the firesalt check
-    const hasFiresalt = this.firesaltBombActive
-      || (this.resources['firesalt'] ?? 0) >= boss.firesaltCost;
-
-    let defeated = false;
-
-    if (hasFiresalt && boss.firesaltCost > 0) {
-      // Consume firesalt (or bomb)
-      if (this.firesaltBombActive) {
-        this.firesaltBombActive = false;
-        events.push({ type: 'event', message: 'Your firesalt bomb explodes!', color: '#FF8844' });
-      } else {
-        this.resources['firesalt'] -= boss.firesaltCost;
-        events.push({ type: 'event', message: `Used ${boss.firesaltCost} Firesalt`, color: '#FF8844' });
-      }
-      // Reduced damage when using firesalt
-      const dmg = Math.max(1, Math.floor(rawDmg * 0.5 * (1 - this.damageReduction)));
-      const san = Math.max(1, Math.floor(rawSan * 0.5 * (1 - this.sanityDrainReduction)));
-      this.health = Math.max(1, this.health - dmg);
-      this.sanity = Math.max(1, this.sanity - san);
-      defeated = true;
-    } else if (boss.firesaltCost === 0) {
-      // Boss doesn't require firesalt — pure survival check
-      const dmg = Math.max(1, Math.floor(rawDmg * (1 - this.damageReduction)));
-      const san = Math.max(1, Math.floor(rawSan * (1 - this.sanityDrainReduction)));
-      if (this.health > dmg && this.sanity > san) {
-        this.health -= dmg;
-        this.sanity -= san;
-        defeated = true;
-      } else {
-        // Failed
-        this.bossFailed(events, boss);
-        return;
-      }
-    } else {
-      // No firesalt — take full damage, check survival
-      const dmg = Math.max(1, Math.floor(rawDmg * (1 - this.damageReduction)));
-      const san = Math.max(1, Math.floor(rawSan * (1 - this.sanityDrainReduction)));
-      if (this.health > dmg && this.sanity > san) {
-        this.health -= dmg;
-        this.sanity -= san;
-        defeated = true;
-      } else {
-        this.bossFailed(events, boss);
-        return;
-      }
-    }
-
-    if (defeated) {
-      this.defeatedBosses[this.currentLevel] = true;
-      events.push({ type: 'event', message: boss.defeatMessage, color: '#88FF88' });
-
-      // Award Level Key
-      this.resources['level_keys'] = (this.resources['level_keys'] ?? 0) + 1;
-      events.push({ type: 'resource', message: '+1 Level Key!', color: '#FFD700', iconKey: 'level_keys' });
-
-      // Bonus resource drops
-      const drops = 5 + Math.floor(Math.random() * 5);
-      let totalFound = 0;
-      for (let i = 0; i < drops; i++) {
-        const found = this.rollResourceDrop(this.level);
-        if (found) {
-          this.resources[found.resourceId] = (this.resources[found.resourceId] ?? 0) + found.amount;
-          this.stats.resourcesFound += found.amount;
-          totalFound += found.amount;
-        }
-      }
-      events.push({ type: 'resource', message: `Boss loot: +${totalFound} resources!`, color: '#88FF88' });
-
-      // Guaranteed gear drop from bosses
-      const gearTier = this.bossGearTier();
-      const gear = this.rollGearDrop(gearTier);
-      if (gear) this.tryEquipGear(gear, events);
-    }
-  }
-
-  private bossFailed(events: GameEvent[], boss: { failMessage: string }): void {
-    this.health = Math.max(Math.floor(this.maxHealth * 0.5), 1);
-    this.sanity = Math.max(Math.floor(this.maxSanity * 0.5), 1);
-    this.exploration = Math.floor(this.level.explorationRequired * 0.9);
-    events.push({ type: 'event', message: boss.failMessage, color: '#FF4444' });
-    events.push({ type: 'system', message: 'Exploration reset to 90%.', color: '#FF8888' });
-    // Un-claim 100% milestone so it retriggers
-    const claimed = this.claimedMilestones[this.currentLevel];
-    if (claimed) {
-      const idx = claimed.indexOf(100);
-      if (idx >= 0) claimed.splice(idx, 1);
-    }
-  }
-
-  private bossGearTier(): GearTier {
-    if (this.currentLevel >= 6) {
-      return Math.random() < 0.5 ? 'legendary' : 'rare';
-    } else if (this.currentLevel >= 3) {
-      return Math.random() < 0.3 ? 'legendary' : 'rare';
-    }
-    return 'rare';
   }
 
   /* ---- Gear drops & equipping ---- */

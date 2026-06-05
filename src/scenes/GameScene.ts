@@ -109,6 +109,7 @@ export default class GameScene extends Phaser.Scene {
     this.ui = new UIManager(this, this.state, {
       onHeal: () => this.handleHeal(),
       onEat: () => this.handleEat(),
+      onSearch: () => this.handleSearch(),
       onBuyUpgrade: (id) => this.handleBuyUpgrade(id),
       onEscape: () => this.handleEscape(),
       onTravel: (lvl) => this.handleTravel(lvl),
@@ -273,6 +274,13 @@ export default class GameScene extends Phaser.Scene {
       RundotGameAPI.analytics.recordCustomEvent('item_used', { item: 'canned_food' });
       RundotGameAPI.triggerHapticAsync('light' as never);
     }
+  }
+
+  private handleSearch(): void {
+    const events = this.state.manualSearch();
+    for (const evt of events) this.ui.addLogMessage(evt);
+    this.ui.updateResourceBar();
+    RundotGameAPI.triggerHapticAsync('light' as never);
   }
 
   private handleBuyUpgrade(id: string): void {

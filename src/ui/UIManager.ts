@@ -65,6 +65,7 @@ const ICON_NATIVE = 170;
 export interface UICallbacks {
   onHeal: () => void;
   onEat: () => void;
+  onSearch: () => void;
   onBuyUpgrade: (id: string) => void;
   onEscape: () => void;
   onTravel: (levelId: number) => void;
@@ -94,10 +95,6 @@ export class UIManager {
   private subtitleText!: Phaser.GameObjects.Text;
 
   // Status bars
-  private hpFill!: Phaser.GameObjects.Rectangle;
-  private hpLabel!: Phaser.GameObjects.Text;
-  private sanFill!: Phaser.GameObjects.Rectangle;
-  private sanLabel!: Phaser.GameObjects.Text;
   private progFill!: Phaser.GameObjects.Rectangle;
   private progLabel!: Phaser.GameObjects.Text;
 
@@ -166,6 +163,8 @@ export class UIManager {
   private abilityBtns: Map<string, Phaser.GameObjects.Container> = new Map();
   private abilityLabels: Map<string, Phaser.GameObjects.Text> = new Map();
   private logBottom = 0;
+  private exploreDescendBg?: Phaser.GameObjects.Rectangle;
+  private exploreDescendTxt?: Phaser.GameObjects.Text;
 
   // Void prompt (stuck at max level)
   private voidPromptBanner: Phaser.GameObjects.Container | null = null;
@@ -392,39 +391,20 @@ export class UIManager {
 
   private createStatusBars(): void {
     const { BAR_X, BAR_WIDTH, BAR_HEIGHT } = LAYOUT;
-    const barConf: Array<{ y: number; label: string; color: number }> = [
-      { y: 100, label: 'HP', color: 0x44cc44 },
-      { y: 132, label: 'SAN', color: 0x4488ff },
-      { y: 164, label: 'EXPL', color: 0xffcc00 },
-    ];
 
-    for (const { y, label, color } of barConf) {
-      // Background
-      this.scene.add.rectangle(BAR_X + BAR_WIDTH / 2, y + BAR_HEIGHT / 2, BAR_WIDTH, BAR_HEIGHT, 0x222222)
-        .setDepth(10);
-      // Fill
-      const fill = this.scene.add.rectangle(BAR_X, y, 0, BAR_HEIGHT, color)
-        .setOrigin(0, 0)
-        .setDepth(11);
-      // Label
-      const lbl = makeText(this.scene, BAR_X + 6, y + 1, `${label}: 100/100`, 16, '#FFFFFF')
-        .setDepth(12);
+    // Goal line — so a new player always knows the loop.
+    makeText(this.scene, BAR_X, 96, 'Explore to find resources → buy upgrades → descend deeper.', 15, '#9aa6c0')
+      .setDepth(12);
 
-      if (label === 'HP') {
-        this.hpFill = fill;
-        this.hpLabel = lbl;
-      } else if (label === 'SAN') {
-        this.sanFill = fill;
-        this.sanLabel = lbl;
-      } else {
-        this.progFill = fill;
-        this.progLabel = lbl;
-      }
-    }
+    // Single EXPLORATION bar (the thing that fills as you explore the level).
+    const y = 140;
+    this.scene.add.rectangle(BAR_X + BAR_WIDTH / 2, y + BAR_HEIGHT / 2, BAR_WIDTH, BAR_HEIGHT, 0x222222).setDepth(10);
+    this.progFill = this.scene.add.rectangle(BAR_X, y, 0, BAR_HEIGHT, 0xffcc00).setOrigin(0, 0).setDepth(11);
+    this.progLabel = makeText(this.scene, BAR_X + 6, y + 1, 'EXPLORING: 0%', 16, '#FFFFFF').setDepth(12);
 
-    // Auto-escape toggle — small button right of the exploration bar
+    // Auto-descend toggle — small button right of the exploration bar
     const autoX = BAR_X + BAR_WIDTH + 35;
-    const autoY = 164 + BAR_HEIGHT / 2;
+    const autoY = y + BAR_HEIGHT / 2;
     const isOn = this.state.autoEscape;
     this.autoEscBg = this.scene.add.rectangle(autoX, autoY, 56, BAR_HEIGHT, isOn ? 0x336633 : 0x333333)
       .setDepth(12).setStrokeStyle(1, isOn ? 0x66aa66 : 0x444444).setInteractive({ useHandCursor: true });
@@ -442,7 +422,7 @@ export class UIManager {
     this.scene.add.rectangle(LAYOUT.CENTER_X, y + 20, 700, 44, 0x111111, 0.8)
       .setDepth(10);
 
-    const show = ['almond_water', 'canned_food', 'firesalt', 'level_keys'];
+    const show = ['cloth_scraps', 'batteries', 'scrap_metal', 'lucky_coins'];
     const startX = 50;
     const gap = 170;
 
@@ -518,87 +498,17 @@ export class UIManager {
   private createExplorePanel(): void {
     const panel = this.scene.add.container(0, 0).setDepth(15);
 
-    // Ability buttons row (above consumable buttons)
-    // Icons were designed to fill 90% of the button — they contain their own labels
-    const abilityY = LAYOUT.CONTENT_BOTTOM - 120;
-    const abilityW = 220;
-    const abilityH = 150;
-    const abilityGap = 230;
-    const abilityStartX = 130;
+    // Action buttons at the bottom: SEARCH (manual find) + DESCEND.
+    const btnY = LAYOUT.CONTENT_BOTTOM - 44;
+    const searchBtn = makeBtn(this.scene, 198, btnY, '\u{1F50D} SEARCH', 300, 72, 0x2c6a3c, () => this.cb.onSearch());
+    (searchBtn.getAt(0) as Phaser.GameObjects.Rectangle).setStrokeStyle(3, 0x66cc88);
+    const descendBtn = makeBtn(this.scene, 522, btnY, '⬇ DESCEND', 300, 72, 0x333355, () => this.cb.onEscape());
+    this.exploreDescendBg = descendBtn.getAt(0) as Phaser.GameObjects.Rectangle;
+    this.exploreDescendTxt = descendBtn.getAt(1) as Phaser.GameObjects.Text;
+    panel.add([searchBtn, descendBtn]);
 
-    for (let i = 0; i < ABILITIES.length; i++) {
-      const ab = ABILITIES[i];
-      const x = abilityStartX + i * abilityGap;
-      const canUse = this.state.canUseAbility(ab.id);
-      const cd = this.state.getAbilityCooldown(ab.id);
-
-      const container = this.scene.add.container(x, abilityY);
-      const bg = this.scene.add.rectangle(0, 0, abilityW, abilityH, canUse ? 0x2a3a2a : 0x1a1a1a, 1)
-        .setOrigin(0.5).setStrokeStyle(2, canUse ? 0x448844 : 0x333333);
-
-      // Add bg first so it's behind everything
-      container.add(bg);
-
-      // Title at the top of the button
-      const nameTxt = this.scene.add.text(0, -abilityH / 2 + 10, ab.name, {
-        fontFamily: FONT_FAMILY, fontSize: '16px',
-        color: canUse ? '#FFFFFF' : '#666666', fontStyle: 'bold', align: 'center',
-      }).setOrigin(0.5, 0);
-      container.add(nameTxt);
-      this.abilityLabels.set(`name_${ab.id}`, nameTxt);
-
-      // Icon fills most of the button below the title
-      const abIcon = this.createIcon(0, 0, ab.id, 130);
-      if (abIcon) {
-        container.add(abIcon);
-      } else {
-        // Fallback: show emoji if no PNG icon
-        const emojiTxt = this.scene.add.text(0, 0, ab.icon, {
-          fontFamily: FONT_FAMILY, fontSize: '48px', align: 'center',
-        }).setOrigin(0.5);
-        container.add(emojiTxt);
-      }
-
-      // Cost / cooldown status at the bottom of the button
-      const statusY = 58;
-      const costResIcon = this.createIcon(-22, statusY, ab.costResource, 40);
-      const statusStr = cd > 0 ? `${Math.ceil(cd * 1.5)}s` : `${ab.costAmount}`;
-      const statusTxt = this.scene.add.text(costResIcon ? 6 : 0, statusY, statusStr, {
-        fontFamily: FONT_FAMILY, fontSize: '15px',
-        color: cd > 0 ? '#FF8888' : canUse ? '#88FF88' : '#888888', align: 'center',
-        fontStyle: 'bold',
-      }).setOrigin(0.5);
-
-      container.add(statusTxt);
-      if (costResIcon) {
-        container.add(costResIcon);
-        if (cd > 0) costResIcon.setVisible(false);
-        (container as unknown as Record<string, Phaser.GameObjects.Image>).__costIcon = costResIcon;
-      }
-
-      container.setSize(abilityW, abilityH);
-      container.setInteractive({ useHandCursor: true });
-      container.on('pointerdown', () => this.cb.onUseAbility(ab.id));
-
-      this.abilityBtns.set(ab.id, container);
-      this.abilityLabels.set(ab.id, statusTxt);
-      (container as unknown as Record<string, Phaser.GameObjects.Rectangle>).__bg = bg;
-
-      panel.add(container);
-    }
-
-    // Action buttons (at the bottom of the content area)
-    const btnY = LAYOUT.CONTENT_BOTTOM - 20;
-    const healBtn = makeBtn(this.scene, 200, btnY, 'Drink (+15 HP)', 280, 48, 0x225522, () => this.cb.onHeal());
-    const healIcon = this.createIcon(-120, 0, 'almond_water', 80);
-    if (healIcon) healBtn.add(healIcon);
-    const eatBtn = makeBtn(this.scene, 520, btnY, 'Eat (+20 San)', 280, 48, 0x222255, () => this.cb.onEat());
-    const eatIcon = this.createIcon(-110, 0, 'canned_food', 80);
-    if (eatIcon) eatBtn.add(eatIcon);
-    panel.add([healBtn, eatBtn]);
-
-    // Log container with mask — sits above the ability buttons
-    this.logBottom = abilityY - abilityH / 2 - 10;
+    // Log container with mask — fills the area above the action buttons.
+    this.logBottom = btnY - 56;
     const logVisibleH = this.logBottom - LAYOUT.CONTENT_TOP;
     this.logContainer = this.scene.add.container(0, 0);
     this.logMaskGfx = this.scene.add.graphics();
@@ -1628,77 +1538,22 @@ export class UIManager {
   updateStatusBars(): void {
     const { BAR_WIDTH, BAR_X } = LAYOUT;
     const s = this.state;
-
-    const hpW = BAR_WIDTH * Math.max(0, s.health / s.maxHealth);
-    this.hpFill.width = Phaser.Math.Linear(this.hpFill.width, hpW, 0.15);
-    this.hpFill.x = BAR_X;
-    this.hpLabel.setText(`HP: ${Math.floor(s.health)}/${s.maxHealth}`);
-
-    const sanW = BAR_WIDTH * Math.max(0, s.sanity / s.maxSanity);
-    this.sanFill.width = Phaser.Math.Linear(this.sanFill.width, sanW, 0.15);
-    this.sanFill.x = BAR_X;
-    this.sanLabel.setText(`SAN: ${Math.floor(s.sanity)}/${s.maxSanity}`);
-
     const progW = BAR_WIDTH * Math.max(0, s.explorationPct / 100);
     this.progFill.width = Phaser.Math.Linear(this.progFill.width, progW, 0.15);
     this.progFill.x = BAR_X;
-    this.progLabel.setText(`EXPL: ${Math.floor(s.explorationPct)}%`);
+    const pct = Math.floor(s.explorationPct);
+    this.progLabel.setText(pct >= 100 ? 'EXPLORED — ready to descend' : `EXPLORING: ${pct}%`);
 
-    // "ENTER THE VOID" banner when stuck at max level
-    const stuck = s.explorationPct >= 100 && !s.canEscape() && s.canRewind();
-    if (stuck && !this.voidPromptBanner) {
-      const bannerY = 164;
-      const bannerW = BAR_WIDTH + 40;
-      const bannerH = 32;
-      const banner = this.scene.add.container(BAR_X + BAR_WIDTH / 2, bannerY);
-      const bg = this.scene.add.rectangle(0, 0, bannerW, bannerH, 0x442266, 0.95)
-        .setOrigin(0.5).setStrokeStyle(2, 0x8855CC);
-      const txt = this.scene.add.text(0, 0, 'ENTER THE VOID TO CONTINUE', {
-        fontFamily: FONT_FAMILY, fontSize: '16px', color: '#FFFFFF',
-        fontStyle: 'bold', align: 'center',
-      }).setOrigin(0.5);
-      banner.add([bg, txt]);
-      banner.setSize(bannerW, bannerH);
-      banner.setDepth(50);
-      banner.setInteractive({ useHandCursor: true });
-      banner.on('pointerdown', () => {
-        this.showTab('void');
-        this.cb.onTabChanged('void');
-      });
-      this.scene.tweens.add({
-        targets: banner, alpha: { from: 0.7, to: 1 },
-        duration: 800, yoyo: true, repeat: -1, ease: 'Sine.easeInOut',
-      });
-      this.voidPromptBanner = banner;
-    } else if (!stuck && this.voidPromptBanner) {
-      this.voidPromptBanner.destroy();
-      this.voidPromptBanner = null;
-    }
-
-    // Notification dot on VOID tab
-    if (stuck) {
-      if (!this.voidNotifDot && this.tabBGs.has('void')) {
-        const voidBg = this.tabBGs.get('void')!;
-        const dotX = voidBg.x + voidBg.width / 2 - 4;
-        const dotY = voidBg.y - voidBg.height / 2 + 4;
-        const dot = this.scene.add.container(dotX, dotY);
-        const circle = this.scene.add.circle(0, 0, 10, 0xFF2222).setDepth(20);
-        const bang = this.scene.add.text(0, 0, '!', {
-          fontFamily: FONT_FAMILY, fontSize: '14px', color: '#FFFFFF', fontStyle: 'bold',
-        }).setOrigin(0.5).setDepth(21);
-        dot.add([circle, bang]);
-        dot.setDepth(20);
-        this.voidNotifDot = dot;
-      }
-      if (this.voidNotifDot) this.voidNotifDot.setVisible(this.activeTab !== 'void');
-    } else if (this.voidNotifDot) {
-      this.voidNotifDot.destroy();
-      this.voidNotifDot = null;
+    if (this.exploreDescendBg && this.exploreDescendTxt) {
+      const can = s.canEscape();
+      this.exploreDescendBg.setFillStyle(can ? 0x2c6a3c : 0x2a2a3a);
+      this.exploreDescendBg.setStrokeStyle(3, can ? 0x66cc88 : 0x44445a);
+      this.exploreDescendTxt.setColor(can ? '#FFFFFF' : '#7a7a90');
     }
   }
 
   updateResourceBar(): void {
-    const show = ['almond_water', 'canned_food', 'firesalt', 'level_keys'];
+    const show = ['cloth_scraps', 'batteries', 'scrap_metal', 'lucky_coins'];
     for (const id of show) {
       const txt = this.resTexts.get(id);
       if (txt) {

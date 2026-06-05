@@ -39,6 +39,8 @@ export interface EntityDef {
   defeatMessage: string;
 }
 
+export type UpgradeEffect = 'exploreSpeed' | 'findRate' | 'findAmount' | 'doubleChance';
+
 export interface UpgradeDef {
   id: string;
   name: string;
@@ -47,9 +49,10 @@ export interface UpgradeDef {
   baseCost: number;
   costMultiplier: number;
   maxLevel: number;
-  effectPerLevel: number;
+  effectPerLevel: number;   // percent per level (also used for the multiplicative math)
   effectUnit: string;
   costResource: string;
+  effect: UpgradeEffect;
 }
 
 export interface VoidUpgradeDef {
@@ -68,19 +71,15 @@ export const RESOURCES: Record<string, ResourceDef> = {
     id: 'almond_water',
     name: 'Almond Water',
     icon: '\u{1F4A7}',
-    description: 'Drink for +15 HP. Upgrades Regeneration.',
-    usable: true,
-    useLabel: 'Drink',
-    useEffect: '+15 HP',
+    description: 'Upgrades Sharp Instinct (find more often).',
+    usable: false,
   },
   canned_food: {
     id: 'canned_food',
     name: 'Canned Food',
     icon: '\u{1F96B}',
-    description: 'Eat for +20 Sanity. Upgrades Iron Will & Meditation.',
-    usable: true,
-    useLabel: 'Eat',
-    useEffect: '+20 Sanity',
+    description: 'Upgrades Clear Head (explore faster).',
+    usable: false,
   },
   batteries: {
     id: 'batteries',
@@ -93,21 +92,21 @@ export const RESOURCES: Record<string, ResourceDef> = {
     id: 'cloth_scraps',
     name: 'Cloth Scraps',
     icon: '\u{1F9F5}',
-    description: 'Upgrades Quick Feet & Quiet Steps.',
+    description: 'Upgrades Quick Feet (explore faster).',
     usable: false,
   },
   scrap_metal: {
     id: 'scrap_metal',
     name: 'Scrap Metal',
     icon: '\u{2699}\u{FE0F}',
-    description: 'Upgrades Thick Skin (take less damage).',
+    description: 'Upgrades Heavy Hauls (bigger stacks).',
     usable: false,
   },
   firesalt: {
     id: 'firesalt',
     name: 'Firesalt',
     icon: '\u{1F525}',
-    description: 'Blocks a monster attack. Used automatically.',
+    description: 'Upgrades Firesalt Charm (bigger stacks).',
     usable: false,
   },
   lucky_coins: {
@@ -529,126 +528,50 @@ export const LEVELS: LevelDef[] = [
   },
 ];
 
+// Every collectible resource feeds an upgrade. All effects are MULTIPLICATIVE and
+// uncapped — the escalating cost paces you, not a hard maxLevel.
 export const UPGRADES: UpgradeDef[] = [
   {
-    id: 'quick_feet',
-    name: 'Quick Feet',
-    icon: '\u{1F45F}',
+    id: 'quick_feet', name: 'Quick Feet', icon: '\u{1F45F}',
     description: 'Explore faster',
-    baseCost: 5,
-    costMultiplier: 1.8,
-    maxLevel: 20,
-    effectPerLevel: 15,
-    effectUnit: '% speed',
-    costResource: 'cloth_scraps',
+    baseCost: 5, costMultiplier: 1.8, maxLevel: 9999,
+    effectPerLevel: 15, effectUnit: '% speed', costResource: 'cloth_scraps', effect: 'exploreSpeed',
   },
   {
-    id: 'sharp_eyes',
-    name: 'Sharp Eyes',
-    icon: '\u{1F441}',
-    description: 'Find more resources',
-    baseCost: 3,
-    costMultiplier: 1.8,
-    maxLevel: 20,
-    effectPerLevel: 20,
-    effectUnit: '% find rate',
-    costResource: 'batteries',
+    id: 'sharp_eyes', name: 'Sharp Eyes', icon: '\u{1F441}',
+    description: 'Find resources more often',
+    baseCost: 3, costMultiplier: 1.8, maxLevel: 9999,
+    effectPerLevel: 18, effectUnit: '% find rate', costResource: 'batteries', effect: 'findRate',
   },
   {
-    id: 'thick_skin',
-    name: 'Thick Skin',
-    icon: '\u{1F6E1}',
-    description: 'Take less damage',
-    baseCost: 5,
-    costMultiplier: 2.0,
-    maxLevel: 15,
-    effectPerLevel: 10,
-    effectUnit: '% reduction',
-    costResource: 'scrap_metal',
+    id: 'heavy_hauls', name: 'Heavy Hauls', icon: '\u{1F9F2}',
+    description: 'Find bigger stacks',
+    baseCost: 6, costMultiplier: 1.9, maxLevel: 9999,
+    effectPerLevel: 12, effectUnit: '% haul', costResource: 'scrap_metal', effect: 'findAmount',
   },
   {
-    id: 'iron_will',
-    name: 'Iron Will',
-    icon: '\u{1F9E0}',
-    description: 'Slower sanity drain',
-    baseCost: 5,
-    costMultiplier: 2.0,
-    maxLevel: 15,
-    effectPerLevel: 10,
-    effectUnit: '% reduction',
-    costResource: 'canned_food',
+    id: 'scavenger', name: 'Scavenger', icon: '\u{1F392}',
+    description: 'Chance for double finds',
+    baseCost: 4, costMultiplier: 1.9, maxLevel: 30,
+    effectPerLevel: 3, effectUnit: '% double', costResource: 'lucky_coins', effect: 'doubleChance',
   },
   {
-    id: 'quiet_steps',
-    name: 'Quiet Steps',
-    icon: '\u{1F92B}',
-    description: 'Encounter fewer entities',
-    baseCost: 5,
-    costMultiplier: 2.0,
-    maxLevel: 15,
-    effectPerLevel: 8,
-    effectUnit: '% avoidance',
-    costResource: 'cloth_scraps',
+    id: 'clear_head', name: 'Clear Head', icon: '\u{1F9E0}',
+    description: 'Explore faster',
+    baseCost: 5, costMultiplier: 1.85, maxLevel: 9999,
+    effectPerLevel: 10, effectUnit: '% speed', costResource: 'canned_food', effect: 'exploreSpeed',
   },
   {
-    id: 'scavenger',
-    name: 'Scavenger',
-    icon: '\u{1F392}',
-    description: 'Chance for double resources',
-    baseCost: 3,
-    costMultiplier: 1.9,
-    maxLevel: 15,
-    effectPerLevel: 7,
-    effectUnit: '% chance',
-    costResource: 'lucky_coins',
+    id: 'sharp_instinct', name: 'Sharp Instinct', icon: '\u{1F50D}',
+    description: 'Find resources more often',
+    baseCost: 5, costMultiplier: 1.85, maxLevel: 9999,
+    effectPerLevel: 10, effectUnit: '% find rate', costResource: 'almond_water', effect: 'findRate',
   },
   {
-    id: 'regeneration',
-    name: 'Regeneration',
-    icon: '\u{1F49A}',
-    description: 'Slowly heal over time',
-    baseCost: 8,
-    costMultiplier: 2.2,
-    maxLevel: 10,
-    effectPerLevel: 0.5,
-    effectUnit: ' HP/tick',
-    costResource: 'almond_water',
-  },
-  {
-    id: 'meditation',
-    name: 'Meditation',
-    icon: '\u{1F49C}',
-    description: 'Slowly restore sanity',
-    baseCost: 5,
-    costMultiplier: 2.2,
-    maxLevel: 10,
-    effectPerLevel: 0.5,
-    effectUnit: ' San/tick',
-    costResource: 'canned_food',
-  },
-  {
-    id: 'tough_body',
-    name: 'Tough Body',
-    icon: '\u{1F4AA}',
-    description: 'Increase max HP',
-    baseCost: 4,
-    costMultiplier: 1.6,
-    maxLevel: 50,
-    effectPerLevel: 10,
-    effectUnit: ' Max HP',
-    costResource: 'scrap_metal',
-  },
-  {
-    id: 'strong_mind',
-    name: 'Strong Mind',
-    icon: '\u{1F9E0}',
-    description: 'Increase max Sanity',
-    baseCost: 4,
-    costMultiplier: 1.6,
-    maxLevel: 50,
-    effectPerLevel: 10,
-    effectUnit: ' Max Sanity',
-    costResource: 'canned_food',
+    id: 'firesalt_charm', name: 'Firesalt Charm', icon: '\u{1F525}',
+    description: 'Find bigger stacks',
+    baseCost: 4, costMultiplier: 2.0, maxLevel: 9999,
+    effectPerLevel: 14, effectUnit: '% haul', costResource: 'firesalt', effect: 'findAmount',
   },
 ];
 
