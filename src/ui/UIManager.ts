@@ -1,7 +1,7 @@
 import Phaser from 'phaser';
 import RundotGameAPI from '@series-inc/rundot-game-sdk/api';
 import { LAYOUT } from '../config';
-import { UPGRADES, RESOURCES, RESOURCE_ORDER, VOID_UPGRADES, PRESTIGE_TIERS, ABILITIES, EQUIP_SLOTS, EQUIP_SLOT_ICONS, GEAR_POOL, GEAR_TIER_COLORS, RECIPES, SHOP_ITEMS, SHARD_MILESTONES, getTierColor, tierSuffix } from '../data/GameData';
+import { UPGRADES, RESOURCES, RESOURCE_ORDER, VOID_UPGRADES, PRESTIGE_TIERS, ABILITIES, EQUIP_SLOTS, EQUIP_SLOT_ICONS, GEAR_POOL, GEAR_TIER_COLORS, RECIPES, SHOP_ITEMS, SHARD_MILESTONES, getTierColor, tierSuffix, getFloorOre } from '../data/GameData';
 import type { GameEvent, OfflineSummary } from '../GameState';
 import { GameState } from '../GameState';
 
@@ -92,7 +92,6 @@ export class UIManager {
 
   // Header
   private levelText!: Phaser.GameObjects.Text;
-  private subtitleText!: Phaser.GameObjects.Text;
 
   // Status bars
   private progFill!: Phaser.GameObjects.Rectangle;
@@ -102,6 +101,9 @@ export class UIManager {
   private showcaseBig: Phaser.GameObjects.Image | null = null;
   private showcaseKey: string | null = null;
   private showcaseTier = 1;
+  private lastPulseTime = 0;                           // throttles the tap pulse animation
+  private flavorMsg?: Phaser.GameObjects.Text;         // reusable entity/ambient flavor line
+  private flavorTween?: Phaser.Tweens.Tween;
   private hintText!: Phaser.GameObjects.Text;
   private roomsLabel!: Phaser.GameObjects.Text;
   private exploreBtnZone?: Phaser.GameObjects.Rectangle;
@@ -111,6 +113,9 @@ export class UIManager {
 
   // Resource bar
   private resTexts: Map<string, Phaser.GameObjects.Text> = new Map();
+  private floorCleared = false;                        // tracks the "Cleared!" flash on the counter
+  private resBarIcon?: Phaser.GameObjects.Image;       // current floor's resource icon
+  private resBarText?: Phaser.GameObjects.Text;        // current floor's resource count
 
   // Tabs
   private activeTab = 'explore';
@@ -155,6 +160,8 @@ export class UIManager {
   private exploreDescendTxt?: Phaser.GameObjects.Text;
   private leftArrowBg?: Phaser.GameObjects.Rectangle;        // left arrow (go back up)
   private leftArrowTxt?: Phaser.GameObjects.Text;
+  private leftArrowIcon?: Phaser.GameObjects.Image;          // previous floor's resource preview
+  private rightArrowIcon?: Phaser.GameObjects.Image;         // next floor's resource preview
 
   // Void prompt (stuck at max level)
   private voidPromptBanner: Phaser.GameObjects.Container | null = null;
@@ -293,27 +300,24 @@ export class UIManager {
     });
 
     // Dark panels behind UI sections for contrast
-    // Header panel
-    this.scene.add.rectangle(GAME_WIDTH / 2, 48, GAME_WIDTH, 90, 0x000000, 0.5)
-      .setDepth(3);
-    // Status bars panel
-    this.scene.add.rectangle(GAME_WIDTH / 2, 140, GAME_WIDTH, 86, 0x000000, 0.45)
-      .setDepth(3);
+    // Header card — one panel behind Title + Depth + explore bar + count, styled
+    // to match the content card below (no more two-bar seam in the top area).
+    this.scene.add.rectangle(GAME_WIDTH / 2, 87, GAME_WIDTH - 20, 158, 0x0a0a0a, 0.6)
+      .setDepth(3)
+      .setStrokeStyle(1, 0x333333);
     // Main content panel
     this.scene.add.rectangle(GAME_WIDTH / 2, (LAYOUT.CONTENT_TOP + LAYOUT.CONTENT_BOTTOM) / 2,
       GAME_WIDTH - 20, LAYOUT.CONTENT_BOTTOM - LAYOUT.CONTENT_TOP + 20, 0x0a0a0a, 0.6)
       .setDepth(3)
       .setStrokeStyle(1, 0x333333);
-    // Resource bar panel
-    this.scene.add.rectangle(GAME_WIDTH / 2, LAYOUT.RESOURCE_BAR_Y + 20, GAME_WIDTH, 50, 0x000000, 0.65)
-      .setDepth(3);
-    // Tab bar panel (two rows: row1 centered at TAB_Y-24, row2 at TAB_Y+24, each 42px tall)
-    this.scene.add.rectangle(GAME_WIDTH / 2, LAYOUT.TAB_Y,
-      GAME_WIDTH, 100, 0x000000, 0.6)
-      .setDepth(3);
-    // Bottom fill below tabs
-    this.scene.add.rectangle(GAME_WIDTH / 2, LAYOUT.TAB_Y + 80,
-      GAME_WIDTH, 120, 0x000000, 0.7)
+    // Resource-bar card — same inset card style as the header/content panels.
+    this.scene.add.rectangle(GAME_WIDTH / 2, LAYOUT.RESOURCE_BAR_Y + 20, GAME_WIDTH - 20, 52, 0x0a0a0a, 0.6)
+      .setDepth(3)
+      .setStrokeStyle(1, 0x333333);
+    // Footer — one solid panel behind the tab buttons down to the screen bottom
+    // (replaces the old overlapping tab + bottom-fill rects).
+    const footerTop = LAYOUT.RESOURCE_BAR_Y + 50;
+    this.scene.add.rectangle(GAME_WIDTH / 2, (footerTop + GAME_HEIGHT) / 2, GAME_WIDTH, GAME_HEIGHT - footerTop, 0x0a0a0a, 0.6)
       .setDepth(3);
 
     // Damage flash overlay
@@ -328,22 +332,28 @@ export class UIManager {
 
   private createHeader(): void {
     const cx = LAYOUT.CENTER_X;
-    this.levelText = makeText(this.scene, cx, 18, this.state.level.name, 36, '#FFFFFF', {
+    // Header column (all CENTER-anchored so visual gaps match the y-deltas):
+    // Title + Depth as one group; the explore bar + count follow in
+    // createStatusBars. Centers at 42 / 76 / 120 / 154.
+    this.levelText = makeText(this.scene, cx, 42, this.state.level.name, 36, '#FFFFFF', {
       fontStyle: 'bold',
-    }).setOrigin(0.5, 0);
-    this.levelText.setDepth(10);
+    }).setOrigin(0.5, 0.5).setDepth(10);
 
-    this.subtitleText = makeText(this.scene, cx, 58, this.state.level.subtitle, 22, this.state.level.textColor, {
-      fontStyle: 'italic',
-    }).setOrigin(0.5, 0);
-    this.subtitleText.setDepth(10);
-
-    // Depth counter (top-right) — always visible, shows lifetime progression
-    const showDepth = this.state.totalDepth > 0 || this.state.prestigeCount > 0;
-    const depthStr = showDepth ? `DEPTH: ${this.state.totalDepth}` : '';
-    this.depthText = makeText(this.scene, LAYOUT.GAME_WIDTH - 20, 8, depthStr, 14, '#8888CC', {
+    this.depthText = makeText(this.scene, cx, 76, this.depthLabel(), 18, '#8888CC', {
       fontStyle: 'bold',
-    }).setOrigin(1, 0).setDepth(10);
+    }).setOrigin(0.5, 0.5).setDepth(10);
+  }
+
+  /**
+   * "DEPTH: current / deepest" (e.g. DEPTH: 1 / 20) when on an earlier floor,
+   * or just "DEPTH: 20" when you're at your deepest. '' before the first descent.
+   */
+  private depthLabel(): string {
+    const s = this.state;
+    if (s.totalDepth <= 0 && s.prestigeCount <= 0) return '';
+    return s.currentLevel >= s.totalDepth
+      ? `DEPTH: ${s.totalDepth}`
+      : `DEPTH: ${s.currentLevel} / ${s.totalDepth}`;
   }
 
   /* ---- Status bars ---- */
@@ -351,47 +361,36 @@ export class UIManager {
   private createStatusBars(): void {
     const { BAR_X, BAR_WIDTH, BAR_HEIGHT } = LAYOUT;
 
-    // Green EXPLORATION bar (fills as you explore the level).
-    const y = 104;
+    // Green EXPLORATION bar — even 34px rhythm with the header above
+    // (Title 42, Depth 76, Bar 110, count 144).
+    const y = 110 - BAR_HEIGHT / 2; // bar top (center at 110)
     this.scene.add.rectangle(BAR_X + BAR_WIDTH / 2, y + BAR_HEIGHT / 2, BAR_WIDTH, BAR_HEIGHT, 0x16241a)
       .setDepth(10).setStrokeStyle(1, 0x2e4a2e);
     this.progFill = this.scene.add.rectangle(BAR_X, y, 0, BAR_HEIGHT, 0x4caf50).setOrigin(0, 0).setDepth(11);
-    this.progLabel = makeText(this.scene, LAYOUT.CENTER_X, y + 1, 'EXPLORING 0%', 16, '#FFFFFF', { fontStyle: 'bold' })
-      .setOrigin(0.5, 0).setDepth(12);
+    this.progLabel = makeText(this.scene, LAYOUT.CENTER_X, y + BAR_HEIGHT / 2, 'EXPLORING 0%', 16, '#FFFFFF', { fontStyle: 'bold' })
+      .setOrigin(0.5, 0.5).setDepth(12);
 
-    // Discrete room counter under the bar (e.g. 1 / 10).
-    this.roomsLabel = makeText(this.scene, LAYOUT.CENTER_X, y + BAR_HEIGHT + 6, 'Rooms 0 / 10', 16, '#9fd0a0', {
+    // Discrete count just under the bar (center at 144).
+    this.roomsLabel = makeText(this.scene, LAYOUT.CENTER_X, 144, 'Rooms 0 / 10', 16, '#9fd0a0', {
       fontStyle: 'bold',
-    }).setOrigin(0.5, 0).setDepth(12);
+    }).setOrigin(0.5, 0.5).setDepth(12);
   }
 
   /* ---- Resource bar ---- */
 
   private createResourceBar(): void {
     const y = LAYOUT.RESOURCE_BAR_Y;
-    // Dark background strip
-    this.scene.add.rectangle(LAYOUT.CENTER_X, y + 20, 700, 44, 0x111111, 0.8)
-      .setDepth(10);
+    const cx = LAYOUT.CENTER_X;
+    // (Background is the resource-bar card drawn in createBackground.)
 
-    const show = ['cloth_scraps', 'batteries', 'scrap_metal', 'lucky_coins'];
-    const startX = 50;
-    const gap = 170;
-
-    for (let i = 0; i < show.length; i++) {
-      const res = RESOURCES[show[i]];
-      const x = startX + i * gap;
-      const icon = this.createIcon(x + 18, y + 20, show[i], 80);
-      if (icon) {
-        icon.setDepth(11);
-        const txt = makeText(this.scene, x + 60, y + 8, `${this.state.resources[show[i]] ?? 0}`, 20, '#DDDDDD')
-          .setDepth(11);
-        this.resTexts.set(show[i], txt);
-      } else {
-        const txt = makeText(this.scene, x, y + 8, `${res.icon} ${this.state.resources[show[i]] ?? 0}`, 20, '#DDDDDD')
-          .setDepth(11);
-        this.resTexts.set(show[i], txt);
-      }
-    }
+    // Single readout: how many of the resource you're CURRENTLY collecting you
+    // have. Icon + count swap as you descend (see updateResourceBar).
+    const res = this.state.floorOre.resource;
+    this.resBarIcon = this.createIcon(cx - 50, y + 20, res, 80) ?? undefined;
+    if (this.resBarIcon) this.resBarIcon.setDepth(11);
+    this.resBarText = makeText(this.scene, cx - 8, y + 6, `${this.state.resources[res] ?? 0}`, 24, '#DDDDDD', {
+      fontStyle: 'bold',
+    }).setOrigin(0, 0).setDepth(11);
   }
 
   /* ---- Tab bar ---- */
@@ -464,12 +463,22 @@ export class UIManager {
     panel.add(this.exploreBtnZone);
 
     // Navigation arrows flanking the icon: ◀ go back a floor, ▶ descend deeper.
-    const left = makeBtn(this.scene, cx - 250, iconCy, '◀', 92, 132, 0x2a2a3a, () => this.goShallower());
+    // Each arrow previews the resource of that floor (prev on the left, next on
+    // the right) above a small direction glyph. Textures swap in updateStatusBars.
+    const left = makeBtn(this.scene, cx - 250, iconCy, '◀', 92, 132, 0x2a2a2a, () => this.goShallower());
     this.leftArrowBg = left.getAt(0) as Phaser.GameObjects.Rectangle;
     this.leftArrowTxt = left.getAt(1) as Phaser.GameObjects.Text;
+    this.leftArrowTxt.setPosition(0, 42).setFontSize(20);
+    this.leftArrowIcon = this.scene.add.image(0, -26, `icon_${this.state.floorOre.resource}`).setScale(56 / ICON_NATIVE);
+    left.add(this.leftArrowIcon);
+
     const right = makeBtn(this.scene, cx + 250, iconCy, '▶', 92, 132, 0x333355, () => this.goDeeper());
     this.exploreDescendBg = right.getAt(0) as Phaser.GameObjects.Rectangle;
     this.exploreDescendTxt = right.getAt(1) as Phaser.GameObjects.Text;
+    this.exploreDescendTxt.setPosition(0, 42).setFontSize(20);
+    this.rightArrowIcon = this.scene.add.image(0, -26, `icon_${this.state.floorOre.resource}`).setScale(56 / ICON_NATIVE);
+    right.add(this.rightArrowIcon);
+
     panel.add([left, right]);
 
     // Durability bar under the icon — fills as you chip the current ore node.
@@ -479,7 +488,7 @@ export class UIManager {
     panel.add([durBg, this.durFill]);
 
     // Persistent hint under the icon.
-    this.hintText = makeText(this.scene, cx, iconCy + 196, 'Tap or hold to explore', 18, '#FFFFFF')
+    this.hintText = makeText(this.scene, cx, iconCy + 196, 'Tap or hold to collect', 18, '#FFFFFF')
       .setOrigin(0.5).setDepth(16);
     panel.add(this.hintText);
 
@@ -529,9 +538,26 @@ export class UIManager {
 
   private pulseShowcase(): void {
     if (!this.showcaseBig) return;
+    // Throttle: at high click speed taps fire faster than the animation lasts,
+    // which would restart it every frame and make the icon vibrate. Ignore extra
+    // taps until the current pulse has had time to settle — clicks still collect.
+    const PULSE_THROTTLE_MS = 360;
+    const now = this.scene.time.now;
+    if (now - this.lastPulseTime < PULSE_THROTTLE_MS) return;
+    this.lastPulseTime = now;
+
     const s = 320 / ICON_NATIVE;
-    this.showcaseBig.setScale(s * 0.9);
-    this.scene.tweens.add({ targets: this.showcaseBig, scale: s, duration: 110, ease: 'Quad.easeOut' });
+    this.scene.tweens.killTweensOf(this.showcaseBig);
+    this.showcaseBig.setScale(s * 0.93);
+    this.showcaseBig.angle = 0;
+    // Soft scale settle.
+    this.scene.tweens.add({ targets: this.showcaseBig, scale: s, duration: 240, ease: 'Back.easeOut' });
+    // Damped rotational wobble: each swing smaller than the last, settling upright.
+    this.scene.tweens.add({
+      targets: this.showcaseBig, angle: [-5, 3, -1.5, 0],
+      duration: 320, ease: 'Sine.easeInOut',
+      onComplete: () => { if (this.showcaseBig) this.showcaseBig.angle = 0; },
+    });
   }
 
   /* ---- Items panel ---- */
@@ -614,6 +640,12 @@ export class UIManager {
         scrollContainer.y = Phaser.Math.Clamp(scrollContainer.y + dy, minScroll, 0);
       });
       this.scene.input.on('pointerup', () => { dragging = false; });
+
+      // Mouse-wheel scroll for PC players.
+      this.scene.input.on('wheel', (_p: Phaser.Input.Pointer, _o: unknown, _dx: number, dy: number) => {
+        if (!this.panels.get('items')?.visible) return;
+        scrollContainer.y = Phaser.Math.Clamp(scrollContainer.y - dy, minScroll, 0);
+      });
 
       panel.add(dragZone);
     }
@@ -709,6 +741,12 @@ export class UIManager {
         scrollContainer.y = Phaser.Math.Clamp(scrollContainer.y + dy, minScroll, 0);
       });
       this.scene.input.on('pointerup', () => { dragging = false; });
+
+      // Mouse-wheel scroll for PC players.
+      this.scene.input.on('wheel', (_p: Phaser.Input.Pointer, _o: unknown, _dx: number, dy: number) => {
+        if (!this.panels.get('upgrades')?.visible) return;
+        scrollContainer.y = Phaser.Math.Clamp(scrollContainer.y - dy, minScroll, 0);
+      });
 
       panel.add(dragZone);
     }
@@ -1405,17 +1443,41 @@ export class UIManager {
     // Only resource events re-pop it; entities/ambient are flavor text only.
     if (evt.iconKey && evt.type === 'resource') this.popShowcase(evt.iconKey, this.state.floorOre.tier);
 
-    // Floating feedback that pops up from the icon and fades — no wall of text.
-    if (this.activeTab === 'explore') {
-      const startY = this.showcaseCenterY() + 120;
-      const t = makeText(this.scene, LAYOUT.CENTER_X, startY, evt.message, 20, evt.color, {
+    if (this.activeTab !== 'explore') return;
+
+    if (evt.type === 'resource') {
+      // Resource feedback = little "+N" motes that spawn around the icon and
+      // float up. Each is its own short-lived object, so spam-tapping fills the
+      // air with them. No top label (it strobed at high click speed).
+      if (evt.value) {
+        const mx = LAYOUT.CENTER_X + Phaser.Math.Between(-110, 110);
+        const my = this.showcaseCenterY() + Phaser.Math.Between(-30, 70);
+        const mote = makeText(this.scene, mx, my, `+${evt.value}`, 26, evt.color, { fontStyle: 'bold' })
+          .setOrigin(0.5).setDepth(20);
+        this.panels.get('explore')?.add(mote);
+        this.scene.tweens.add({
+          targets: mote, y: my - 130, alpha: { from: 1, to: 0 },
+          duration: 850, ease: 'Cubic.easeOut', onComplete: () => mote.destroy(),
+        });
+      }
+      return;
+    }
+
+    // Entity / ambient flavor = a line above the icon that stays put (no upward
+    // drift) and lingers long enough to read, then fades. One reusable label so
+    // a new line replaces the old instead of overlapping it.
+    if (!this.flavorMsg) {
+      this.flavorMsg = makeText(this.scene, LAYOUT.CENTER_X, this.showcaseCenterY() - 200, '', 20, evt.color, {
         align: 'center', wordWrap: { width: 600 }, fontStyle: 'bold',
       }).setOrigin(0.5).setDepth(19);
-      this.scene.tweens.add({
-        targets: t, y: startY - 90, alpha: { from: 1, to: 0 },
-        duration: 1300, ease: 'Cubic.easeOut', onComplete: () => t.destroy(),
-      });
+      this.panels.get('explore')?.add(this.flavorMsg);
     }
+    this.flavorMsg.setText(evt.message).setColor(evt.color).setAlpha(1);
+    this.flavorTween?.stop();
+    this.flavorTween = this.scene.tweens.add({
+      targets: this.flavorMsg, alpha: 0,
+      delay: 3500, duration: 800, ease: 'Sine.easeIn',
+    });
   }
 
   /* ================================================================ */
@@ -1433,45 +1495,78 @@ export class UIManager {
     this.progFill.width = Phaser.Math.Linear(this.progFill.width, progW, 0.15);
     this.progFill.x = BAR_X;
     this.progLabel.setText(done ? `${oreName} — DESCEND!` : `Exploring for ${oreName}`);
-    this.roomsLabel.setText(`${Math.min(ore.required, Math.floor(s.exploration))} / ${ore.required}`);
+    // Counter shows N / required while exploring; on clearing it flashes
+    // "Cleared!" once, then hides.
+    if (done) {
+      if (!this.floorCleared) {
+        this.floorCleared = true;
+        this.roomsLabel.setText('Cleared!').setVisible(true);
+        this.scene.time.delayedCall(1300, () => {
+          if (this.floorCleared) this.roomsLabel.setVisible(false);
+        });
+      }
+    } else {
+      this.floorCleared = false;
+      this.roomsLabel.setVisible(true).setText(`${Math.min(ore.required, Math.floor(s.exploration))} / ${ore.required}`);
+    }
 
     // Durability fill toward the next ore node.
     if (this.durFill) {
       this.durFill.width = 240 * Math.max(0, Math.min(1, s.nodeDamage / s.nodeDurabilityMax));
     }
 
-    // Right arrow (go deeper): green/ready when you can descend to NEW territory;
-    // plain-enabled when a deeper floor is already unlocked; dim when neither.
+    // Right arrow (go deeper): GREEN only when you can descend into NEW territory
+    // you haven't unlocked yet (the "move forward" signal). Once the next floor
+    // is already unlocked, it's just navigation — gray like the left arrow.
     if (this.exploreDescendBg && this.exploreDescendTxt) {
       const nextUnlocked = s.unlockedLevels.includes(s.currentLevel + 1);
-      const newReady = s.canEscape();
-      const enabled = nextUnlocked || newReady;
-      this.exploreDescendBg.setFillStyle(newReady ? 0x2c6a3c : enabled ? 0x333355 : 0x232330);
-      this.exploreDescendBg.setStrokeStyle(3, newReady ? 0x66cc88 : enabled ? 0x55557a : 0x35353f);
-      this.exploreDescendTxt.setColor(enabled ? '#FFFFFF' : '#555566');
+      const newReady = s.canEscape() && !nextUnlocked;
+      const enabled = nextUnlocked || s.canEscape();
+      this.exploreDescendBg.setFillStyle(newReady ? 0x2c6a3c : enabled ? 0x2a2a2a : 0x1e1e1e);
+      this.exploreDescendBg.setStrokeStyle(3, newReady ? 0x66cc88 : enabled ? 0x555555 : 0x333333);
+      this.exploreDescendTxt.setColor(newReady ? '#FFFFFF' : enabled ? '#DDDDDD' : '#555555');
     }
+    // Right arrow preview = the NEXT floor's resource icon.
+    this.setArrowIcon(this.rightArrowIcon, getFloorOre(s.currentLevel + 1).resource);
+
     // Left arrow (go back up): enabled whenever you're below floor 0.
     if (this.leftArrowBg && this.leftArrowTxt) {
       const canBack = s.currentLevel > 0;
-      this.leftArrowBg.setFillStyle(canBack ? 0x2a2a3a : 0x232330);
-      this.leftArrowBg.setStrokeStyle(3, canBack ? 0x55557a : 0x35353f);
-      this.leftArrowTxt.setColor(canBack ? '#FFFFFF' : '#555566');
+      this.leftArrowBg.setFillStyle(canBack ? 0x2a2a2a : 0x1e1e1e);
+      this.leftArrowBg.setStrokeStyle(3, canBack ? 0x555555 : 0x333333);
+      this.leftArrowTxt.setColor(canBack ? '#DDDDDD' : '#555555');
+    }
+    // Left arrow preview = the PREVIOUS floor's resource (hidden on floor 0).
+    this.setArrowIcon(this.leftArrowIcon, s.currentLevel > 0 ? getFloorOre(s.currentLevel - 1).resource : null);
+  }
+
+  /** Point an arrow's preview image at a resource icon, or hide it if none. */
+  private setArrowIcon(icon: Phaser.GameObjects.Image | undefined, resource: string | null): void {
+    if (!icon) return;
+    const key = resource ? `icon_${resource}` : '';
+    if (resource && this.scene.textures.exists(key)) {
+      icon.setTexture(key).setScale(56 / ICON_NATIVE).setVisible(true);
+    } else {
+      icon.setVisible(false);
     }
   }
 
   updateResourceBar(): void {
-    const show = ['cloth_scraps', 'batteries', 'scrap_metal', 'lucky_coins'];
-    for (const id of show) {
-      const txt = this.resTexts.get(id);
-      if (txt) {
-        const hasIcon = this.scene.textures.exists(`icon_${id}`);
-        if (hasIcon) {
-          txt.setText(`${this.state.resources[id] ?? 0}`);
-        } else {
-          const res = RESOURCES[id];
-          txt.setText(`${res.icon} ${this.state.resources[id] ?? 0}`);
-        }
+    // Show the resource you're currently collecting — icon + count both follow
+    // the active floor.
+    const res = this.state.floorOre.resource;
+    const key = `icon_${res}`;
+    const hasIcon = this.scene.textures.exists(key);
+    if (this.resBarIcon) {
+      if (hasIcon) {
+        this.resBarIcon.setTexture(key).setScale(80 / ICON_NATIVE).setVisible(true);
+      } else {
+        this.resBarIcon.setVisible(false);
       }
+    }
+    if (this.resBarText) {
+      const count = this.state.resources[res] ?? 0;
+      this.resBarText.setText(hasIcon ? `${count}` : `${RESOURCES[res].icon} ${count}`);
     }
     // Keep item counts in sync when viewing items tab
     if (this.activeTab === 'items') this.refreshItemCounts();
@@ -1708,18 +1803,10 @@ export class UIManager {
   /* ---- Level change ---- */
 
   refreshForNewLevel(): void {
-    // Darker overlay for more dangerous levels
-    const danger = this.state.level.danger;
-    this.darkOverlay.setAlpha(0.45 + danger * 0.06);
-
+    // (Overlay stays a fixed readable alpha — the old danger-based darkening
+    //  pushed deep floors to near-black.)
     this.levelText.setText(this.state.level.name);
-    this.subtitleText.setText(this.state.level.subtitle);
-    this.subtitleText.setColor(this.state.level.textColor);
-
-    // Update depth counter
-    if (this.state.totalDepth > 0 || this.state.prestigeCount > 0) {
-      this.depthText.setText(`DEPTH: ${this.state.totalDepth}`);
-    }
+    this.depthText.setText(this.depthLabel());
 
     // New floor's ore becomes the focal node.
     this.clearShowcase();

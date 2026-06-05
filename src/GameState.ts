@@ -1,5 +1,4 @@
 import {
-  ENTITIES,
   UPGRADES,
   RESOURCES,
   VOID_UPGRADES,
@@ -88,6 +87,7 @@ export interface GameEvent {
   message: string;
   color: string;
   iconKey?: string;
+  value?: number;   // for resource events: the amount gained (drives floating "+N")
 }
 
 export interface TickResult {
@@ -342,7 +342,7 @@ export class GameState {
       this.resources[ore.resource] = (this.resources[ore.resource] ?? 0) + gain;   // inventory (uncapped)
       this.stats.resourcesFound += gain;
       this.exploration = Math.min(ore.required, this.exploration + gain);           // descend progress (capped)
-      events.push({ type: 'resource', message: `+${gain} ${RESOURCES[ore.resource].name}${tierSuffix(ore.tier)}`, color: '#7CFF7C', iconKey: ore.resource });
+      events.push({ type: 'resource', message: `+ ${RESOURCES[ore.resource].name}${tierSuffix(ore.tier)}`, color: '#7CFF7C', iconKey: ore.resource, value: gain });
     }
   }
 
@@ -436,16 +436,9 @@ export class GameState {
     this.nodeDamage += this.autoMineRate;
     this.resolveNode(events);
 
-    // 2. Atmosphere only — entities drift past, ambient flavor. No random loot.
-    const roll = Math.random();
-    if (roll < 0.18 && lvl.entityIds.length > 0) {
-      const entityId = lvl.entityIds[Math.floor(Math.random() * lvl.entityIds.length)];
-      const entity = ENTITIES[entityId];
-      if (entity) {
-        this.stats.entitiesEncountered++;
-        events.push({ type: 'entity', message: entity.encounterMessage, color: '#FF8800', iconKey: entityId });
-      }
-    } else if (roll < 0.45) {
+    // 2. Atmosphere only — ambient flavor. No random loot. (Entities are coming
+    //    back later; their flavor text is removed for now.)
+    if (Math.random() < 0.45) {
       const msgs = lvl.ambientMessages;
       events.push({ type: 'ambient', message: msgs[Math.floor(Math.random() * msgs.length)], color: lvl.textColor });
     }

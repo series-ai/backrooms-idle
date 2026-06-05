@@ -222,11 +222,9 @@ export const RESOURCES: Record<string, ResourceDef> = {
   vhs_tape: { id: 'vhs_tape', name: 'VHS Tape', icon: '\u{1F4FC}', description: 'An unlabeled tape. You don’t want to watch it.', usable: false },
 };
 
-export const RESOURCE_ORDER = [
-  ...ORE_SEQUENCE,
-  'firesalt',
-  'level_keys',
-];
+// The Items menu lists exactly the explorable resources. firesalt / level_keys
+// are no longer resources (they're dormant tools), so they're not shown here.
+export const RESOURCE_ORDER = [...ORE_SEQUENCE];
 
 export const ENTITIES: Record<string, EntityDef> = {
   smiler: {
@@ -312,312 +310,72 @@ export const ENTITIES: Record<string, EntityDef> = {
   },
 };
 
+// 31 floor locations, one per resource in ORE_SEQUENCE order (floor N collects
+// ORE_SEQUENCE[N % 31]). Deeper tiers reuse these same locations, recolored by
+// the resource tier outline. resourceDrops is dormant (no random drops) → [].
 export const LEVELS: LevelDef[] = [
-  {
-    id: 0,
-    name: 'LEVEL 0',
-    subtitle: 'The Lobby',
-    description:
-      'Endless yellow rooms. Fluorescent lights buzz overhead. The carpet is damp.',
-    bgColor: 0x6b6030,
-    textColor: '#E8DCA0',
-    danger: 1,
-    explorationRequired: 100,
-    resourceDrops: [
-      { resourceId: 'almond_water', weight: 25, minAmount: 1, maxAmount: 2 },
-      { resourceId: 'cloth_scraps', weight: 22, minAmount: 1, maxAmount: 3 },
-      { resourceId: 'canned_food', weight: 18, minAmount: 1, maxAmount: 1 },
-      { resourceId: 'batteries', weight: 12, minAmount: 1, maxAmount: 1 },
-      { resourceId: 'scrap_metal', weight: 10, minAmount: 1, maxAmount: 1 },
-      { resourceId: 'level_keys', weight: 3, minAmount: 1, maxAmount: 1 },
-    ],
-    entityIds: ['smiler', 'hound'],
-    ambientMessages: [
-      'The fluorescent lights flicker above you.',
-      'You hear a distant humming sound.',
-      'The carpet squelches underfoot.',
-      'Another identical yellow room. And another.',
-      'Was that shadow always there?',
-      'The wallpaper is peeling in the corner.',
-      'You smell almonds.',
-      'A light buzzes and goes dark. Then flickers back.',
-      'You find scratch marks on the wall.',
-      'The air feels thick and stale.',
-      'A door that leads to another identical hallway.',
-      'You swear the ceiling is lower than before.',
-    ],
-  },
-  {
-    id: 1,
-    name: 'LEVEL 1',
-    subtitle: 'Habitable Zone',
-    description:
-      'Dark warehouses and concrete. Some areas look almost lived-in.',
-    bgColor: 0x2a2a2a,
-    textColor: '#B0B0B0',
-    danger: 2,
-    explorationRequired: 250,
-    resourceDrops: [
-      { resourceId: 'scrap_metal', weight: 25, minAmount: 1, maxAmount: 3 },
-      { resourceId: 'batteries', weight: 20, minAmount: 1, maxAmount: 2 },
-      { resourceId: 'almond_water', weight: 15, minAmount: 1, maxAmount: 2 },
-      { resourceId: 'canned_food', weight: 12, minAmount: 1, maxAmount: 2 },
-      { resourceId: 'cloth_scraps', weight: 10, minAmount: 1, maxAmount: 2 },
-      { resourceId: 'firesalt', weight: 6, minAmount: 1, maxAmount: 1 },
-      { resourceId: 'level_keys', weight: 3, minAmount: 1, maxAmount: 1 },
-    ],
-    entityIds: ['hound', 'skin_stealer'],
-    ambientMessages: [
-      'Empty crates line the walls.',
-      'You find a makeshift campsite. Long abandoned.',
-      'Metal shelving stretches into the darkness.',
-      "Graffiti on the wall: \"DON'T TRUST THEM\"",
-      'A distant clang echoes through the warehouse.',
-      'Old supplies are scattered on the floor.',
-      'Someone was here. Recently.',
-      'You find a torn journal page. Frantic writing.',
-      'The concrete floor is cracked and uneven.',
-      'A cold draft blows from somewhere above.',
-    ],
-  },
-  {
-    id: 2,
-    name: 'LEVEL 2',
-    subtitle: 'Pipe Dreams',
-    description:
-      'Concrete tunnels lined with pipes. Unknown fluids drip from above.',
-    bgColor: 0x1c2833,
-    textColor: '#7FB3D3',
-    danger: 3,
-    explorationRequired: 500,
-    resourceDrops: [
-      { resourceId: 'scrap_metal', weight: 20, minAmount: 2, maxAmount: 4 },
-      { resourceId: 'batteries', weight: 20, minAmount: 1, maxAmount: 3 },
-      { resourceId: 'firesalt', weight: 12, minAmount: 1, maxAmount: 2 },
-      { resourceId: 'almond_water', weight: 12, minAmount: 1, maxAmount: 2 },
-      { resourceId: 'cloth_scraps', weight: 10, minAmount: 1, maxAmount: 2 },
-      { resourceId: 'lucky_coins', weight: 5, minAmount: 1, maxAmount: 1 },
-      { resourceId: 'canned_food', weight: 8, minAmount: 1, maxAmount: 1 },
-      { resourceId: 'level_keys', weight: 3, minAmount: 1, maxAmount: 1 },
-    ],
-    entityIds: ['smiler', 'skin_stealer', 'partygoer'],
-    ambientMessages: [
-      'Pipes groan and shudder overhead.',
-      'A dark liquid drips onto your shoulder.',
-      'The tunnel splits three ways. You pick one.',
-      'You hear rushing water behind the walls.',
-      'Steam hisses from a cracked pipe.',
-      'The temperature drops suddenly.',
-      'Rust flakes off the pipe you brush against.',
-      'You find old tools scattered on the ground.',
-      'The tunnel narrows. You squeeze through.',
-      'Something splashes in the distance.',
-    ],
-  },
-  {
-    id: 3,
-    name: 'THE POOLROOMS',
-    subtitle: 'Liminal Waters',
-    description:
-      'Pristine blue pools stretch into infinity. Beautiful... but wrong.',
-    bgColor: 0x14544a,
-    textColor: '#A0F0E0',
-    danger: 2,
-    explorationRequired: 400,
-    resourceDrops: [
-      { resourceId: 'almond_water', weight: 25, minAmount: 2, maxAmount: 4 },
-      { resourceId: 'lucky_coins', weight: 18, minAmount: 1, maxAmount: 2 },
-      { resourceId: 'firesalt', weight: 12, minAmount: 1, maxAmount: 2 },
-      { resourceId: 'canned_food', weight: 15, minAmount: 1, maxAmount: 2 },
-      { resourceId: 'cloth_scraps', weight: 10, minAmount: 1, maxAmount: 2 },
-      { resourceId: 'batteries', weight: 8, minAmount: 1, maxAmount: 1 },
-      { resourceId: 'level_keys', weight: 3, minAmount: 1, maxAmount: 1 },
-    ],
-    entityIds: ['partygoer'],
-    ambientMessages: [
-      'The water is perfectly still. Almost too still.',
-      'White tiles gleam under fluorescent light.',
-      'Your footsteps echo across the pool deck.',
-      'The water looks inviting. You resist.',
-      "A splash from somewhere you can't see.",
-      'The ceiling is impossibly high above the pools.',
-      'You find a towel neatly folded on a chair.',
-      'The chlorine smell is overwhelming.',
-      "Reflections in the water don't match the room.",
-      'A sign reads: "NO LIFEGUARD ON DUTY"',
-    ],
-  },
-  {
-    id: 4,
-    name: 'LEVEL 3',
-    subtitle: 'Electrical Station',
-    description:
-      'Banks of humming machinery. Sparks fly from exposed wiring.',
-    bgColor: 0x0d0d1a,
-    textColor: '#8080FF',
-    danger: 4,
-    explorationRequired: 750,
-    resourceDrops: [
-      { resourceId: 'batteries', weight: 25, minAmount: 2, maxAmount: 5 },
-      { resourceId: 'scrap_metal', weight: 20, minAmount: 2, maxAmount: 4 },
-      { resourceId: 'firesalt', weight: 12, minAmount: 1, maxAmount: 2 },
-      { resourceId: 'lucky_coins', weight: 10, minAmount: 1, maxAmount: 2 },
-      { resourceId: 'almond_water', weight: 8, minAmount: 1, maxAmount: 2 },
-      { resourceId: 'cloth_scraps', weight: 8, minAmount: 1, maxAmount: 2 },
-      { resourceId: 'canned_food', weight: 5, minAmount: 1, maxAmount: 1 },
-      { resourceId: 'level_keys', weight: 2, minAmount: 1, maxAmount: 1 },
-    ],
-    entityIds: ['wretched', 'partygoer', 'skin_stealer'],
-    ambientMessages: [
-      'Sparks fly from a panel on the wall.',
-      'The machinery hums louder. Then quiets.',
-      'Warning lights flash in the corridor.',
-      'You smell ozone and burnt plastic.',
-      'Cables hang from the ceiling like vines.',
-      'A screen flickers: ERROR ERROR ERROR',
-      'The floor vibrates beneath your feet.',
-      'You find a dead flashlight. Batteries gone.',
-      'Electric arcs dance between two conductors.',
-      'The lights cut out. Then slam back on.',
-    ],
-  },
-  {
-    id: 5,
-    name: 'LEVEL 4',
-    subtitle: 'Abandoned Office',
-    description:
-      'Rows of cubicles and filing cabinets. Computers display only static.',
-    bgColor: 0x1a1a1a,
-    textColor: '#909090',
-    danger: 5,
-    explorationRequired: 1000,
-    resourceDrops: [
-      { resourceId: 'almond_water', weight: 12, minAmount: 1, maxAmount: 3 },
-      { resourceId: 'canned_food', weight: 12, minAmount: 1, maxAmount: 3 },
-      { resourceId: 'batteries', weight: 12, minAmount: 2, maxAmount: 4 },
-      { resourceId: 'scrap_metal', weight: 12, minAmount: 2, maxAmount: 5 },
-      { resourceId: 'firesalt', weight: 12, minAmount: 1, maxAmount: 3 },
-      { resourceId: 'lucky_coins', weight: 12, minAmount: 1, maxAmount: 3 },
-      { resourceId: 'cloth_scraps', weight: 12, minAmount: 2, maxAmount: 4 },
-      { resourceId: 'level_keys', weight: 2, minAmount: 1, maxAmount: 1 },
-    ],
-    entityIds: ['wretched', 'partygoer', 'skin_stealer', 'hound', 'smiler'],
-    ambientMessages: [
-      'A phone rings. You let it go to voicemail.',
-      'Post-it notes cover a cubicle wall. All blank.',
-      'A computer shows static. Then a face. Then static.',
-      'Filing cabinets stand open. All empty.',
-      'The office chairs spin slowly on their own.',
-      'A printer whirs to life. It prints nothing.',
-      'You find a coffee mug. Still warm.',
-      'Ceiling tiles are missing. Darkness above.',
-      'The elevator button glows but nothing comes.',
-      'A clock on the wall. The hands move backward.',
-    ],
-  },
-  /* --- Prestige-gated levels --- */
-  {
-    id: 6,
-    name: 'LEVEL 5',
-    subtitle: 'The Crimson Halls',
-    description:
-      'Blood-red walls stretch endlessly. The air tastes like copper.',
-    bgColor: 0x3a0a0a,
-    textColor: '#FF6666',
-    danger: 4,
-    explorationRequired: 1200,
-    resourceDrops: [
-      { resourceId: 'firesalt', weight: 22, minAmount: 2, maxAmount: 4 },
-      { resourceId: 'scrap_metal', weight: 18, minAmount: 2, maxAmount: 5 },
-      { resourceId: 'almond_water', weight: 15, minAmount: 1, maxAmount: 3 },
-      { resourceId: 'batteries', weight: 12, minAmount: 1, maxAmount: 3 },
-      { resourceId: 'lucky_coins', weight: 10, minAmount: 1, maxAmount: 2 },
-      { resourceId: 'cloth_scraps', weight: 8, minAmount: 1, maxAmount: 2 },
-      { resourceId: 'canned_food', weight: 8, minAmount: 1, maxAmount: 2 },
-      { resourceId: 'level_keys', weight: 2, minAmount: 1, maxAmount: 1 },
-    ],
-    entityIds: ['crimson_watcher', 'wretched', 'skin_stealer'],
-    ambientMessages: [
-      'The walls pulse faintly. Like a heartbeat.',
-      'Your footsteps leave marks in something wet and red.',
-      'A distant scream echoes. Or was it laughter?',
-      'The ceiling drips. You don\'t look up.',
-      'Handprints on the wall. Too many fingers.',
-      'The red gets deeper the further you go.',
-      'You find a mirror. Your reflection is delayed.',
-      'Something warm runs down the walls.',
-      'The lights here are red. Everything is red.',
-      'A door is nailed shut from the inside.',
-    ],
-  },
-  {
-    id: 7,
-    name: 'LEVEL 6',
-    subtitle: 'The Library',
-    description:
-      'Infinite shelves of books in languages that don\'t exist. Knowledge here has teeth.',
-    bgColor: 0x1a1412,
-    textColor: '#D4A574',
-    danger: 5,
-    explorationRequired: 1500,
-    resourceDrops: [
-      { resourceId: 'batteries', weight: 18, minAmount: 2, maxAmount: 5 },
-      { resourceId: 'lucky_coins', weight: 16, minAmount: 1, maxAmount: 3 },
-      { resourceId: 'canned_food', weight: 14, minAmount: 1, maxAmount: 3 },
-      { resourceId: 'firesalt', weight: 14, minAmount: 1, maxAmount: 3 },
-      { resourceId: 'cloth_scraps', weight: 10, minAmount: 2, maxAmount: 4 },
-      { resourceId: 'almond_water', weight: 10, minAmount: 1, maxAmount: 2 },
-      { resourceId: 'scrap_metal', weight: 10, minAmount: 1, maxAmount: 3 },
-      { resourceId: 'level_keys', weight: 2, minAmount: 1, maxAmount: 1 },
-    ],
-    entityIds: ['ink_crawler', 'archivist', 'partygoer'],
-    ambientMessages: [
-      'Books whisper when you walk past.',
-      'A page turns on its own. You didn\'t touch it.',
-      'The Dewey Decimal system here uses symbols you\'ve never seen.',
-      'You find a book with your name as the author.',
-      'The shelves rearrange when you\'re not looking.',
-      'A reading lamp flickers. Someone was just here.',
-      'You open a book. The words rearrange into warnings.',
-      'Dust falls from shelves that go up forever.',
-      'A card catalogue drawer opens. It\'s full of teeth.',
-      'The silence here is aggressive.',
-    ],
-  },
-  {
-    id: 8,
-    name: 'LEVEL 7',
-    subtitle: 'The Frozen Sublevel',
-    description:
-      'Sub-zero temperatures. Ice coats every surface. Your breath freezes mid-air.',
-    bgColor: 0x0a1a2a,
-    textColor: '#88CCFF',
-    danger: 6,
-    explorationRequired: 2000,
-    resourceDrops: [
-      { resourceId: 'scrap_metal', weight: 18, minAmount: 3, maxAmount: 6 },
-      { resourceId: 'firesalt', weight: 18, minAmount: 2, maxAmount: 4 },
-      { resourceId: 'almond_water', weight: 14, minAmount: 2, maxAmount: 4 },
-      { resourceId: 'batteries', weight: 12, minAmount: 2, maxAmount: 4 },
-      { resourceId: 'lucky_coins', weight: 12, minAmount: 1, maxAmount: 3 },
-      { resourceId: 'canned_food', weight: 10, minAmount: 1, maxAmount: 3 },
-      { resourceId: 'cloth_scraps', weight: 10, minAmount: 2, maxAmount: 4 },
-      { resourceId: 'level_keys', weight: 2, minAmount: 1, maxAmount: 1 },
-    ],
-    entityIds: ['frost_shade', 'wretched', 'crimson_watcher'],
-    ambientMessages: [
-      'Your breath crystallizes and falls like glass.',
-      'Ice cracks beneath your feet. Something stirs below.',
-      'Frost patterns on the wall form faces.',
-      'The temperature drops again. You can barely move.',
-      'Icicles hang from pipes. Some are red.',
-      'You find frozen footprints. They lead in circles.',
-      'A frozen door. Through the ice, you see movement.',
-      'Your fingers are numb. Keep moving.',
-      'The ice is perfectly clear. You see rooms below.',
-      'A frozen clock. The hands are at 3:33.',
-    ],
-  },
+  // 0 — almond_water
+  { id: 0, name: 'THE LOBBY', subtitle: 'The Hum Never Stops', description: 'Endless yellow rooms. Fluorescent lights buzz overhead. The carpet is damp.', bgColor: 0x6b6030, textColor: '#E8DCA0', danger: 1, explorationRequired: 100, resourceDrops: [], entityIds: ['smiler', 'hound'], ambientMessages: ['The fluorescent lights flicker above you.', 'You hear a distant humming sound.', 'The carpet squelches underfoot.', 'Another identical yellow room. And another.', 'Was that shadow always there?', 'You smell almonds.'] },
+  // 1 — wallpaper_strip
+  { id: 1, name: 'THE YELLOW CORRIDOR', subtitle: 'It Goes On Forever', description: 'Mile after mile of the same wallpaper, curling off the walls in long strips.', bgColor: 0x7a6a32, textColor: '#E8DC90', danger: 1, explorationRequired: 100, resourceDrops: [], entityIds: ['smiler', 'hound'], ambientMessages: ['The wallpaper peels at the slightest touch.', 'Behind the paper, the wall is the same color.', 'A seam in the pattern repeats every few feet.', 'You smell old paste and dust.', 'The yellow seems to hum.'] },
+  // 2 — carpet_swatch
+  { id: 2, name: 'THE CARPET HALLS', subtitle: 'Always Wet Underfoot', description: 'The mono-yellow carpet stretches on, soaked through and warm underfoot.', bgColor: 0x5e5a28, textColor: '#D8D080', danger: 1, explorationRequired: 100, resourceDrops: [], entityIds: ['hound', 'skin_stealer'], ambientMessages: ['The carpet squelches with every step.', 'Damp patches spread like they are breathing.', 'You leave footprints that slowly fill back in.', 'Something is wet that should not be.', 'The padding underneath is soft. Too soft.'] },
+  // 3 — ceiling_tile
+  { id: 3, name: 'THE DROP CEILING', subtitle: 'Something Above the Tiles', description: 'A low crawlspace of sagging acoustic tiles, stained and ready to fall.', bgColor: 0x4a4a40, textColor: '#C8C8B0', danger: 2, explorationRequired: 100, resourceDrops: [], entityIds: ['smiler', 'skin_stealer'], ambientMessages: ['A tile shifts overhead. Dust rains down.', 'The grid sags lower the further you go.', 'Something moves above the tiles.', 'A tile is missing. Only black above.', 'Water stains form the shape of a face.'] },
+  // 4 — fluorescent_tube
+  { id: 4, name: 'LOW-CEILING LEVEL', subtitle: 'Do Not Stand Up Straight', description: 'Rows of buzzing light tubes stretch into the dark, some flickering, some dead.', bgColor: 0x3a3a30, textColor: '#E0E0A0', danger: 2, explorationRequired: 100, resourceDrops: [], entityIds: ['smiler', 'partygoer'], ambientMessages: ['A tube flickers and dies. Then another.', 'The buzzing is louder here.', 'Your shadow multiplies under the lights.', 'One light pulses in a rhythm. Almost a word.', 'The hum gets inside your teeth.'] },
+  // 5 — cloth_scraps
+  { id: 5, name: 'HABITABLE ZONE', subtitle: 'They Were Here Recently', description: 'Dark warehouses and concrete. Some areas look almost lived-in.', bgColor: 0x2a2a2a, textColor: '#B0B0B0', danger: 2, explorationRequired: 250, resourceDrops: [], entityIds: ['hound', 'skin_stealer'], ambientMessages: ['Empty crates line the walls.', 'You find a makeshift campsite. Long abandoned.', 'Metal shelving stretches into the darkness.', 'Graffiti on the wall: "DON\'T TRUST THEM"', 'Someone was here. Recently.', 'You find a torn journal page. Frantic writing.'] },
+  // 6 — scrap_wood
+  { id: 6, name: 'THE CARPENTRY', subtitle: 'Abandoned Mid-Cut', description: 'Endless wooden framing, sawdust underfoot, projects abandoned mid-cut.', bgColor: 0x3a2a18, textColor: '#C8A878', danger: 3, explorationRequired: 300, resourceDrops: [], entityIds: ['hound', 'wretched'], ambientMessages: ['Sawdust drifts in the still air.', 'A saw rests mid-cut in a board.', 'Half-built doorways lead nowhere.', 'The wood is warm, like it was just worked.', 'Nails are scattered in patterns you do not like.'] },
+  // 7 — scrap_metal
+  { id: 7, name: 'THE MACHINE YARD', subtitle: 'Something Still Moves', description: 'Heaps of rusted machinery and scrap rise in the gloom like dunes.', bgColor: 0x2a2a2e, textColor: '#A8A8B0', danger: 3, explorationRequired: 350, resourceDrops: [], entityIds: ['skin_stealer', 'wretched'], ambientMessages: ['Metal groans somewhere in the dark.', 'Rust flakes coat everything you touch.', 'A heap of scrap shifts on its own.', 'You find tools, still oily.', 'Something metal scrapes, far off.'] },
+  // 8 — copper_wire
+  { id: 8, name: 'THE BOILER ROOMS', subtitle: 'It Breathes in the Pipes', description: 'Concrete tunnels lined with pipes. Unknown fluids drip from above.', bgColor: 0x1c2833, textColor: '#7FB3D3', danger: 3, explorationRequired: 500, resourceDrops: [], entityIds: ['smiler', 'skin_stealer', 'partygoer'], ambientMessages: ['Pipes groan and shudder overhead.', 'A dark liquid drips onto your shoulder.', 'The tunnel splits three ways. You pick one.', 'Steam hisses from a cracked pipe.', 'Rust flakes off the pipe you brush against.', 'Something splashes in the distance.'] },
+  // 9 — duct_tape
+  { id: 9, name: 'MAINTENANCE TUNNELS', subtitle: 'No One Maintains It', description: 'Cramped utility crawlways where everything is patched with tape and prayer.', bgColor: 0x2e2a20, textColor: '#C0B890', danger: 4, explorationRequired: 600, resourceDrops: [], entityIds: ['wretched', 'skin_stealer'], ambientMessages: ['Tape holds a pipe that should not hold.', 'Every surface is patched and re-patched.', 'A valve drips no matter how tight.', 'The tunnels narrow, then narrow again.', 'Someone wrote "TEMPORARY" on everything.'] },
+  // 10 — glass_shard
+  { id: 10, name: 'THE GREENHOUSE', subtitle: 'It Grew Toward You', description: 'A vast collapsed arcade, the floor a carpet of broken glass under dead skylights.', bgColor: 0x1a2a2e, textColor: '#A8D0D8', danger: 4, explorationRequired: 700, resourceDrops: [], entityIds: ['partygoer', 'ink_crawler'], ambientMessages: ['Glass crunches no matter where you step.', 'Your reflection scatters across a thousand shards.', 'A skylight gives way somewhere distant.', 'The shards are arranged, almost deliberately.', 'You bleed a little. You do not remember when.'] },
+  // 11 — batteries
+  { id: 11, name: 'ELECTRICAL STATION', subtitle: 'Live to the Touch', description: 'Banks of humming machinery. Sparks fly from exposed wiring.', bgColor: 0x0d0d1a, textColor: '#8080FF', danger: 4, explorationRequired: 750, resourceDrops: [], entityIds: ['wretched', 'partygoer', 'skin_stealer'], ambientMessages: ['Sparks fly from a panel on the wall.', 'The machinery hums louder. Then quiets.', 'Warning lights flash in the corridor.', 'You smell ozone and burnt plastic.', 'Cables hang from the ceiling like vines.', 'The lights cut out. Then slam back on.'] },
+  // 12 — lamp
+  { id: 12, name: 'THE SHOWROOM', subtitle: 'Someone Was Just Sitting Here', description: 'An infinite furniture showroom, every room staged and lit by countless lamps.', bgColor: 0x2a241a, textColor: '#E0C890', danger: 5, explorationRequired: 850, resourceDrops: [], entityIds: ['partygoer', 'skin_stealer'], ambientMessages: ['Every lamp is on. No one turned them on.', 'The furniture is arranged for guests.', 'A price tag reads a number that hurts to look at.', 'You sink into a couch. It is warm.', 'Each room is staged. Each room is empty.'] },
+  // 13 — radio
+  { id: 13, name: 'THE BROADCAST STATION', subtitle: 'It Says Your Name', description: 'A derelict broadcast station, every speaker hissing with static and half-words.', bgColor: 0x1a1e26, textColor: '#90B0C0', danger: 5, explorationRequired: 950, resourceDrops: [], entityIds: ['wretched', 'ink_crawler'], ambientMessages: ['Static resolves into a voice, then back.', 'A reel-to-reel spins with nothing on it.', 'The dial moves on its own.', 'You hear your name between stations.', 'Every channel is the same breathing.'] },
+  // 14 — CCTV_camera
+  { id: 14, name: 'THE SECURITY WING', subtitle: 'It Saw You First', description: 'Endless banks of monitors, each showing a room you just left.', bgColor: 0x14181a, textColor: '#88A0A0', danger: 5, explorationRequired: 1050, resourceDrops: [], entityIds: ['crimson_watcher', 'skin_stealer'], ambientMessages: ['A monitor shows the room you are standing in.', 'A camera tracks you as you pass.', 'One screen shows a hallway that is not here. Yet.', 'The timestamps are all wrong.', 'You wave at a camera. The screen waves back.'] },
+  // 15 — computer
+  { id: 15, name: 'THE ABANDONED OFFICE', subtitle: 'Everyone Just Left', description: 'Rows of cubicles and filing cabinets. Computers display only static.', bgColor: 0x1a1a1a, textColor: '#909090', danger: 5, explorationRequired: 1000, resourceDrops: [], entityIds: ['wretched', 'partygoer', 'skin_stealer', 'hound', 'smiler'], ambientMessages: ['A phone rings. You let it go to voicemail.', 'Post-it notes cover a cubicle wall. All blank.', 'A computer shows static. Then a face. Then static.', 'Filing cabinets stand open. All empty.', 'You find a coffee mug. Still warm.', 'A clock on the wall. The hands move backward.'] },
+  // 16 — vhs_tape
+  { id: 16, name: 'THE VIDEO STORE', subtitle: 'Do Not Watch the Tape', description: 'A derelict video store, shelves of unlabeled tapes humming faintly.', bgColor: 0x1a1424, textColor: '#B090C0', danger: 5, explorationRequired: 1100, resourceDrops: [], entityIds: ['partygoer', 'ink_crawler'], ambientMessages: ['Every tape is unlabeled. Or labeled in your hand.', 'A TV in the corner plays a tape you did not insert.', 'The NEW RELEASES are decades old.', 'Rewinding sounds like whispering.', 'One tape is warm. Recently watched.'] },
+  // 17 — notebook_page
+  { id: 17, name: 'THE LIBRARY', subtitle: 'It Knows Your Name', description: 'Infinite shelves of books in languages that do not exist. Knowledge here has teeth.', bgColor: 0x1a1412, textColor: '#D4A574', danger: 5, explorationRequired: 1500, resourceDrops: [], entityIds: ['ink_crawler', 'archivist', 'partygoer'], ambientMessages: ['Books whisper when you walk past.', 'A page turns on its own. You did not touch it.', 'You find a book with your name as the author.', 'The shelves rearrange when you are not looking.', 'You open a book. The words rearrange into warnings.', 'The silence here is aggressive.'] },
+  // 18 — maps
+  { id: 18, name: 'THE ENCAMPMENT', subtitle: 'The Maps Lie', description: 'An abandoned survivors\' camp, every surface papered with hand-drawn maps of the endless halls.', bgColor: 0x1e2218, textColor: '#B0C088', danger: 6, explorationRequired: 1300, resourceDrops: [], entityIds: ['skin_stealer', 'partygoer'], ambientMessages: ['Bedrolls lie abandoned around a cold fire pit.', 'Hand-drawn maps are pinned to every wall.', 'A map marks a safe route. It is scratched out.', 'Someone charted these halls for years.', 'The maps disagree with each other. And with the halls.'] },
+  // 19 — canned_food
+  { id: 19, name: 'THE STOCKROOM', subtitle: 'Something Shops Here', description: 'The back room of a supermarket that never ends, shelves stocked and silent.', bgColor: 0x1a2418, textColor: '#A0C088', danger: 6, explorationRequired: 1400, resourceDrops: [], entityIds: ['hound', 'wretched'], ambientMessages: ['The shelves restock when you look away.', 'Every can has the same blank label.', 'A freezer hums with nothing inside.', 'The aisles loop back on themselves.', 'Something is shopping in the next aisle.'] },
+  // 20 — mre
+  { id: 20, name: 'THE BUNKER', subtitle: 'Sealed From the Inside', description: 'A military supply depot sealed against an emergency that already happened.', bgColor: 0x22241a, textColor: '#B0B088', danger: 6, explorationRequired: 1500, resourceDrops: [], entityIds: ['wretched', 'crimson_watcher'], ambientMessages: ['Crates of rations stacked to the ceiling.', 'A klaxon light spins with no sound.', 'The blast door is sealed from this side.', 'Someone counted the supplies. Obsessively.', 'A cot is still warm under the blanket.'] },
+  // 21 — energy_bar
+  { id: 21, name: 'THE BREAK ROOM', subtitle: 'No One Clocked Out', description: 'A flickering employee lounge, vending machines glowing in the dark.', bgColor: 0x22201a, textColor: '#C0B080', danger: 6, explorationRequired: 1600, resourceDrops: [], entityIds: ['partygoer', 'skin_stealer'], ambientMessages: ['A vending machine drops a snack, unasked.', 'The microwave runs with nothing inside.', 'A schedule on the wall has only your name.', 'The coffee is fresh. The pot is cold.', '"CLEAN UP AFTER YOURSELF," the sign insists.'] },
+  // 22 — bandage
+  { id: 22, name: 'THE INFIRMARY', subtitle: 'The Beds Are Still Warm', description: 'A field hospital of empty gurneys and curtains that move on their own.', bgColor: 0x1c2222, textColor: '#A0C0B0', danger: 7, explorationRequired: 1700, resourceDrops: [], entityIds: ['wretched', 'skin_stealer'], ambientMessages: ['A curtain sways. No draft.', 'A heart monitor beeps somewhere. Steady.', 'The gurneys are made up, waiting.', 'Bloody handprints lead to a sealed door.', 'A chart bears your name and no diagnosis.'] },
+  // 23 — anti_anxiety_pills
+  { id: 23, name: 'THE PHARMACY', subtitle: 'It Knows What Is Wrong With You', description: 'A ward of pill cabinets, every drawer labeled with symptoms you have.', bgColor: 0x1e2026, textColor: '#A0A8C0', danger: 7, explorationRequired: 1800, resourceDrops: [], entityIds: ['partygoer', 'wretched'], ambientMessages: ['Every drawer is labeled with a feeling.', 'Pills are sorted by a logic you almost grasp.', 'A prescription waits, made out to you.', 'The cabinets rattle softly, like teeth.', '"DO NOT EXCEED THE DOSE," underlined twice.'] },
+  // 24 — anti_radiation_pills
+  { id: 24, name: 'THE REACTOR', subtitle: 'Do Not Linger', description: 'A contaminated sublevel where the air glows faintly and the cold bites.', bgColor: 0x1a2210, textColor: '#C0E070', danger: 8, explorationRequired: 2000, resourceDrops: [], entityIds: ['crimson_watcher', 'wretched', 'frost_shade'], ambientMessages: ['A dosimeter clicks faster the deeper you go.', 'The frost here glows a sickly green.', 'Warning trefoils peel off every wall.', 'Your skin prickles in the cold light.', 'Something survived down here. It should not have.'] },
+  // 25 — charcoal
+  { id: 25, name: 'THE INCINERATOR', subtitle: 'Something Burned Here', description: 'A scorched maze of furnaces, the walls black with old soot and heat.', bgColor: 0x18120e, textColor: '#C09060', danger: 8, explorationRequired: 2100, resourceDrops: [], entityIds: ['wretched', 'crimson_watcher'], ambientMessages: ['A furnace ticks as it cools. Or heats.', 'Soot coats your hands, your throat.', 'Embers glow in a grate no one tends.', 'The heat comes in waves, like breath.', 'Charcoal crunches into black dust underfoot.'] },
+  // 26 — bone_fragments
+  { id: 26, name: 'THE CATACOMBS', subtitle: 'The Bones Remember', description: 'Shelves of bone tablets. The inscriptions change when you look away.', bgColor: 0x1a1412, textColor: '#D4C4A4', danger: 8, explorationRequired: 2200, resourceDrops: [], entityIds: ['archivist', 'ink_crawler', 'crimson_watcher'], ambientMessages: ['Bone tablets line the walls, inscribed.', 'The carvings rearrange when you blink.', 'A skull watches from a niche.', 'Your footsteps echo like a tally.', 'The dust here is pale and fine and old.'] },
+  // 27 — mannequin
+  { id: 27, name: 'THE MALL', subtitle: 'The Mannequins Moved', description: 'A dead department store, mannequins posed mid-gesture in the gloom.', bgColor: 0x201a24, textColor: '#C0A0C0', danger: 8, explorationRequired: 2300, resourceDrops: [], entityIds: ['partygoer', 'skin_stealer', 'smiler'], ambientMessages: ['A mannequin faces you. It did not before.', 'Escalators run to floors that do not exist.', 'A fountain trickles in the empty atrium.', 'The mannequins are posed like they are waiting.', 'A mall map says "YOU ARE HERE." You are not.'] },
+  // 28 — pool_water
+  { id: 28, name: 'THE POOLROOMS', subtitle: 'Do Not Touch the Water', description: 'Pristine blue pools stretch into infinity. Beautiful... but wrong.', bgColor: 0x14544a, textColor: '#A0F0E0', danger: 7, explorationRequired: 2400, resourceDrops: [], entityIds: ['partygoer'], ambientMessages: ['The water is perfectly still. Almost too still.', 'White tiles gleam under fluorescent light.', 'Your footsteps echo across the pool deck.', 'The water looks inviting. You resist.', 'Reflections in the water do not match the room.', 'A sign reads: "NO LIFEGUARD ON DUTY"'] },
+  // 29 — liquid_pain
+  { id: 29, name: 'THE RED HALLS', subtitle: 'It Tastes Like Copper', description: 'Blood-red walls stretch endlessly. The air tastes like copper.', bgColor: 0x3a0a0a, textColor: '#FF6666', danger: 8, explorationRequired: 2500, resourceDrops: [], entityIds: ['crimson_watcher', 'wretched', 'skin_stealer'], ambientMessages: ['The walls pulse faintly. Like a heartbeat.', 'A distant scream echoes. Or was it laughter?', 'The ceiling drips. You do not look up.', 'Handprints on the wall. Too many fingers.', 'You find a mirror. Your reflection is delayed.', 'The lights here are red. Everything is red.'] },
+  // 30 — lucky_coins
+  { id: 30, name: 'THE FOUNTAIN', subtitle: 'Make No Wishes', description: 'A grand wishing fountain in a dead arcade, its water full of coins and want.', bgColor: 0x1a2418, textColor: '#E0D070', danger: 8, explorationRequired: 2600, resourceDrops: [], entityIds: ['partygoer', 'archivist', 'crimson_watcher'], ambientMessages: ['Coins glitter under black water.', 'The fountain whispers when you near it.', 'A wish surfaces, not yours.', 'Arcade machines flicker to attract no one.', 'Every coin you take, two appear.'] },
 ];
 
 // Mining upgrades. Every collectible resource feeds one, so each floor's ore is
@@ -890,82 +648,20 @@ const PROCEDURAL_THEMES: ProceduralTheme[] = [
   { subtitle: 'The Forgetting', bgColor: 0x1a1a2a, textColor: '#9999CC', description: 'You can\'t remember entering this room. Or the last one.' },
 ];
 
-const PROCEDURAL_AMBIENT: string[] = [
-  'The geometry here doesn\'t make sense.',
-  'You\'ve been walking in a straight line. You ended up behind yourself.',
-  'The walls hum a song you almost recognize.',
-  'Something breathes in rhythm with you.',
-  'The ceiling is gone. Above is just... more floor.',
-  'Your shadow moves a half-second behind you.',
-  'You find footprints. They\'re yours. But you haven\'t been here before.',
-  'The lights here don\'t cast shadows. But something else does.',
-  'A door opens to a wall. The wall opens to a door.',
-  'You hear your own voice echo back. It says different words.',
-  'The floor is soft here. You try not to think about why.',
-  'Gravity shifts for a moment. You grab the wall. It grabs back.',
-  'A clock on the wall shows a time that hasn\'t happened yet.',
-  'The air tastes like static.',
-  'You find a note in your own handwriting. You don\'t remember writing it.',
-  'Something is always just around the corner. But the corner keeps moving.',
-];
-
-function generateProceduralLevel(id: number): LevelDef {
-  const depth = id - LEVELS.length + 1; // 1-based depth past hand-crafted levels
-  const themeIndex = (id - LEVELS.length) % PROCEDURAL_THEMES.length;
-  const theme = PROCEDURAL_THEMES[themeIndex];
-
-  const danger = Math.min(10, 6 + Math.floor(depth / 2));
-  const explorationRequired = 2000 + depth * 500;
-
-  // Deterministic entity selection based on level id
-  const allEntityIds = Object.keys(ENTITIES);
-  const entityCount = Math.min(allEntityIds.length, 4 + Math.floor(depth / 4));
-  const entityIds: string[] = [];
-  for (let i = 0; i < entityCount; i++) {
-    const idx = (id * 7 + i * 3) % allEntityIds.length;
-    const eid = allEntityIds[idx];
-    if (!entityIds.includes(eid)) entityIds.push(eid);
-  }
-  // Ensure at least 3 entities
-  let fill = 0;
-  while (entityIds.length < 3) {
-    const eid = allEntityIds[fill % allEntityIds.length];
-    if (!entityIds.includes(eid)) entityIds.push(eid);
-    fill++;
-  }
-
-  // Resource drops scale with depth
-  const dScale = Math.floor(depth / 3);
-  const resourceDrops: ResourceDrop[] = [
-    { resourceId: 'scrap_metal', weight: 18, minAmount: 3 + dScale, maxAmount: 6 + dScale },
-    { resourceId: 'firesalt', weight: 18, minAmount: 2 + dScale, maxAmount: 4 + dScale },
-    { resourceId: 'almond_water', weight: 14, minAmount: 2 + dScale, maxAmount: 4 + dScale },
-    { resourceId: 'batteries', weight: 12, minAmount: 2 + dScale, maxAmount: 4 + dScale },
-    { resourceId: 'lucky_coins', weight: 12, minAmount: 1 + dScale, maxAmount: 3 + dScale },
-    { resourceId: 'canned_food', weight: 10, minAmount: 1 + dScale, maxAmount: 3 + dScale },
-    { resourceId: 'cloth_scraps', weight: 10, minAmount: 2 + dScale, maxAmount: 4 + dScale },
-    { resourceId: 'level_keys', weight: 2, minAmount: 1, maxAmount: 1 },
-  ];
-
-  return {
-    id,
-    name: `SUBLEVEL ${id}`,
-    subtitle: theme.subtitle,
-    description: theme.description,
-    bgColor: theme.bgColor,
-    textColor: theme.textColor,
-    danger,
-    explorationRequired,
-    resourceDrops,
-    entityIds,
-    ambientMessages: PROCEDURAL_AMBIENT,
-  };
-}
-
-/** Get level data by id — hand-crafted for 0-8, procedurally generated beyond */
+/**
+ * Get level data by id. The 31 hand-crafted floors cycle forever; each full lap
+ * is a deeper tier (more danger / darker overlay), matching the resource tier
+ * outline. Floor N always uses the location aligned to ORE_SEQUENCE[N % 31].
+ */
 export function getLevel(id: number): LevelDef {
-  if (id < LEVELS.length) return LEVELS[id];
-  return generateProceduralLevel(id);
+  const loc = LEVELS[id % LEVELS.length];
+  const lap = Math.floor(id / LEVELS.length); // 0 = Tier 1
+  return {
+    ...loc,
+    id,
+    danger: Math.min(10, loc.danger + lap * 2),
+    explorationRequired: loc.explorationRequired + id * 50,
+  };
 }
 
 /* ------------------------------------------------------------------ */
