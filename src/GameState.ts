@@ -5,9 +5,6 @@ import {
   VOID_UPGRADES,
   PRESTIGE_TIERS,
   ABILITIES,
-  MILESTONE_THRESHOLDS,
-  MEMORY_FRAGMENT_LORE,
-  WANDERER_TRADES,
   GEAR_POOL,
   GEAR_TIER_VALUE,
   GEAR_TIER_COLORS,
@@ -16,6 +13,7 @@ import {
   SHOP_ITEMS,
   SHARD_MILESTONES,
   getLevel,
+  getFloorOre,
   type LevelDef,
   type EquipSlot,
   type GearDef,
@@ -112,8 +110,9 @@ export class GameState {
   maxHealth = 100;
   sanity = 100;
   maxSanity = 100;
-  exploration = 0;
+  exploration = 0;                 // ore mined on the current floor (toward `required`)
   explorationPerLevel: Record<number, number> = {};
+  nodeDamage = 0;                  // durability dealt to the current ore node
   resources: Record<string, number> = {};
   upgrades: Record<string, number> = {};
   stats: GameStats = {
@@ -185,9 +184,15 @@ export class GameState {
     return getLevel(this.currentLevel);
   }
 
+  /** Descend progress = ore mined on this floor toward its requirement. */
   get explorationPct(): number {
-    return Math.min(100, (this.exploration / this.level.explorationRequired) * 100);
+    return Math.min(100, (this.exploration / this.required) * 100);
   }
+
+  /* ---- Mining: this floor's ore + how it breaks ---- */
+  get floorOre() { return getFloorOre(this.currentLevel); }
+  get required(): number { return this.floorOre.required; }
+  get nodeDurabilityMax(): number { return Math.max(1, this.floorOre.durability); }
 
   getUpgradeLevel(id: string): number {
     return this.upgrades[id] ?? 0;
@@ -245,9 +250,18 @@ export class GameState {
     return m;
   }
 
-  get explorationSpeed(): number { return this.upgradeMult('exploreSpeed'); }
-  get findRateBonus(): number { return this.upgradeMult('findRate'); }
-  get findAmountMult(): number { return this.upgradeMult('findAmount'); }
+  /** Durability damage per tap. */
+  get clickPower(): number { return this.upgradeMult('power'); }
+  /** Idle durability damage per tick. */
+  get autoMineRate(): number { return 0.25 * this.upgradeMult('autoMine'); }
+  /** Cooldown (ms) between taps — lowered by Mining Speed / Swift Hands. */
+  get mineCooldownMs(): number {
+    let m = 1;
+    for (const u of UPGRADES) {
+      if (u.effect === 'cooldown') m *= Math.pow(1 - u.effectPerLevel / 100, this.getUpgradeLevel(u.id));
+    }
+    return Math.max(60, 500 * m);
+  }
   get damageReduction(): number {
     return Math.min(0.85, this.getUpgradeLevel('thick_skin') * 0.10
       + this.getVoidLevel('thick_hide') * 0.03
@@ -262,10 +276,11 @@ export class GameState {
     return Math.min(0.60, this.getUpgradeLevel('quiet_steps') * 0.08
       + this.getGearBonus('entityAvoidance') * 0.01);
   }
-  get doubleResourceChance(): number {
+  /** Chance a broken node yields +1 bonus ore. */
+  get bonusOreChance(): number {
     let c = 0;
     for (const u of UPGRADES) {
-      if (u.effect === 'doubleChance') c += (u.effectPerLevel / 100) * this.getUpgradeLevel(u.id);
+      if (u.effect === 'bonusOre') c += (u.effectPerLevel / 100) * this.getUpgradeLevel(u.id);
     }
     return Math.min(0.9, c);
   }
@@ -306,29 +321,28 @@ export class GameState {
     return true;
   }
 
-  /** Tap/hold to explore — advances exploration faster than idle, and may find loot. */
+  /** One tap on the ore node (active mining). Cooldown is enforced by the UI. */
   manualSearch(): GameEvent[] {
     const events: GameEvent[] = [];
-    const lvl = this.level;
-
-    // Active exploring advances the bar in ~2% steps (much faster than idle).
-    const step = lvl.explorationRequired * 0.02;
-    this.exploration = Math.min(lvl.explorationRequired, this.exploration + step);
-    this.stats.totalExploration += step;
-    this.checkMilestones(events);
-
-    // Chance to turn up a resource on the tap.
-    if (Math.random() < 0.45 * this.findRateBonus) {
-      const found = this.rollResourceDrop(lvl);
-      if (found) {
-        let amount = Math.max(1, Math.round(found.amount * this.findAmountMult));
-        if (Math.random() < this.doubleResourceChance) amount *= 2;
-        this.resources[found.resourceId] = (this.resources[found.resourceId] ?? 0) + amount;
-        this.stats.resourcesFound += amount;
-        events.push({ type: 'resource', message: `+${amount} ${RESOURCES[found.resourceId].name}`, color: '#7CFF7C', iconKey: found.resourceId });
-      }
-    }
+    this.nodeDamage += this.clickPower;
+    this.resolveNode(events);
     return events;
+  }
+
+  /** Break any fully-damaged ore nodes into ore (active or idle). */
+  private resolveNode(events: GameEvent[]): void {
+    const ore = this.floorOre;
+    const dur = this.nodeDurabilityMax;
+    let loops = 0;
+    while (this.nodeDamage >= dur && loops++ < 500) {
+      this.nodeDamage -= dur;
+      let gain = 1;
+      if (Math.random() < this.bonusOreChance) gain += 1;
+      this.resources[ore.resource] = (this.resources[ore.resource] ?? 0) + gain;   // inventory (uncapped)
+      this.stats.resourcesFound += gain;
+      this.exploration = Math.min(ore.required, this.exploration + gain);           // descend progress (capped)
+      events.push({ type: 'resource', message: `+${gain} ${RESOURCES[ore.resource].name}`, color: '#7CFF7C', iconKey: ore.resource });
+    }
   }
 
   /* ---- Level escape / travel ---- */
@@ -348,6 +362,7 @@ export class GameState {
     }
     // New level starts at 0 (never visited)
     this.exploration = this.explorationPerLevel[this.currentLevel] ?? 0;
+    this.nodeDamage = 0;
     this.stats.levelsEscaped++;
     this.totalDepth++;
     return true;
@@ -361,6 +376,7 @@ export class GameState {
     this.currentLevel = levelId;
     // Restore destination level's exploration
     this.exploration = this.explorationPerLevel[levelId] ?? 0;
+    this.nodeDamage = 0;
     return true;
   }
 
@@ -386,24 +402,8 @@ export class GameState {
     this.abilityCooldowns[id] = def.cooldownTicks;
 
     if (id === 'scavenge') {
-      const rolls = 3 + Math.floor(Math.random() * 3);
-      let totalFound = 0;
-      for (let i = 0; i < rolls; i++) {
-        const found = this.rollResourceDrop(this.level);
-        if (found) {
-          let amount = found.amount;
-          if (this.signalFlareTicks > 0) amount *= 2;
-          this.resources[found.resourceId] = (this.resources[found.resourceId] ?? 0) + amount;
-          this.stats.resourcesFound += amount;
-          totalFound += amount;
-        }
-      }
-      events.push({
-        type: 'event',
-        message: `Scavenged the area! (+${totalFound} resources)`,
-        color: '#88FFAA',
-        iconKey: 'scavenge',
-      });
+      this.nodeDamage += this.clickPower * 6;
+      this.resolveNode(events);
     } else if (id === 'barricade') {
       this.barricadeTicks = def.durationTicks;
       events.push({
@@ -431,156 +431,25 @@ export class GameState {
     const events: GameEvent[] = [];
     const lvl = this.level;
 
-    // 1. Exploration progress
-    const exploreAmt = 1 * this.explorationSpeed;
-    this.exploration = Math.min(lvl.explorationRequired, this.exploration + exploreAmt);
-    this.stats.totalExploration += exploreAmt;
+    // 1. Idle auto-mining (slow trickle of the floor's ore).
+    this.nodeDamage += this.autoMineRate;
+    this.resolveNode(events);
 
-    // 1b. Check milestones
-    this.checkMilestones(events);
-
-    // 2. Random events
+    // 2. Atmosphere only — entities drift past, ambient flavor. No random loot.
     const roll = Math.random();
-    const entityChance = 0.25 + lvl.danger * 0.04;
-
-    if (roll < 0.25) {
-      // Resource find attempt
-      if (Math.random() < 0.5 * this.findRateBonus) {
-        const found = this.rollResourceDrop(lvl);
-        if (found) {
-          let amount = Math.max(1, Math.round(found.amount * this.findAmountMult));
-          if (Math.random() < this.doubleResourceChance) {
-            amount *= 2;
-            events.push({
-              type: 'resource',
-              message: `Double find! +${amount} ${RESOURCES[found.resourceId].name}`,
-              color: '#FFD700',
-              iconKey: found.resourceId,
-            });
-          } else {
-            events.push({
-              type: 'resource',
-              message: `Found +${amount} ${RESOURCES[found.resourceId].name}`,
-              color: '#44FF44',
-              iconKey: found.resourceId,
-            });
-          }
-          this.resources[found.resourceId] = (this.resources[found.resourceId] ?? 0) + amount;
-          this.stats.resourcesFound += amount;
-        }
-      }
-    } else if (roll < entityChance) {
-      // Entity drifts past — pure atmosphere for now (clickable bonus comes in a later slice)
+    if (roll < 0.18 && lvl.entityIds.length > 0) {
       const entityId = lvl.entityIds[Math.floor(Math.random() * lvl.entityIds.length)];
       const entity = ENTITIES[entityId];
       if (entity) {
         this.stats.entitiesEncountered++;
         events.push({ type: 'entity', message: entity.encounterMessage, color: '#FF8800', iconKey: entityId });
       }
-    } else if (roll < 0.6) {
-      // Ambient message
+    } else if (roll < 0.45) {
       const msgs = lvl.ambientMessages;
-      events.push({
-        type: 'ambient',
-        message: msgs[Math.floor(Math.random() * msgs.length)],
-        color: lvl.textColor,
-      });
-    }
-
-    // 3. Rare events (hidden rooms, caches, wanderers, memory fragments)
-    this.rollRareEvent(events);
-
-    // 4. Nudge to descend once the level is fully explored
-    if (this.explorationPct >= 100 && Math.random() < 0.05) {
-      events.push({
-        type: 'system',
-        message: 'You\'ve explored this level. An exit waits deeper...',
-        color: '#FFD700',
-      });
+      events.push({ type: 'ambient', message: msgs[Math.floor(Math.random() * msgs.length)], color: lvl.textColor });
     }
 
     return { events };
-  }
-
-  /* ---- Resource drop roll ---- */
-
-  private rollResourceDrop(lvl: LevelDef): { resourceId: string; amount: number } | null {
-    // Triple key drop weight when fully explored
-    const drops = lvl.resourceDrops.map((d) => {
-      if (d.resourceId === 'level_keys' && this.explorationPct >= 100) {
-        return { ...d, weight: d.weight * 3 };
-      }
-      return d;
-    });
-
-    const totalWeight = drops.reduce((sum, d) => sum + d.weight, 0);
-    let r = Math.random() * totalWeight;
-    for (const drop of drops) {
-      r -= drop.weight;
-      if (r <= 0) {
-        const amount =
-          drop.minAmount + Math.floor(Math.random() * (drop.maxAmount - drop.minAmount + 1));
-        return { resourceId: drop.resourceId, amount };
-      }
-    }
-    return null;
-  }
-
-  /* ---- Milestones ---- */
-
-  private checkMilestones(events: GameEvent[]): void {
-    const pct = this.explorationPct;
-    const claimed = this.claimedMilestones[this.currentLevel] ?? [];
-
-    for (const threshold of MILESTONE_THRESHOLDS) {
-      if (pct >= threshold && !claimed.includes(threshold)) {
-        if (!this.claimedMilestones[this.currentLevel]) {
-          this.claimedMilestones[this.currentLevel] = [];
-        }
-        this.claimedMilestones[this.currentLevel].push(threshold);
-        this.awardMilestone(threshold, events);
-      }
-    }
-  }
-
-  private awardMilestone(threshold: number, events: GameEvent[]): void {
-    events.push({
-      type: 'milestone',
-      message: `MILESTONE ${threshold}%`,
-      color: '#FFD700',
-    });
-
-    // Standard milestone rewards
-    let dropCount: number;
-    switch (threshold) {
-      case 25: dropCount = 3 + Math.floor(Math.random() * 3); break;
-      case 50: dropCount = 5 + Math.floor(Math.random() * 4); break;
-      case 75: dropCount = 8 + Math.floor(Math.random() * 5); break;
-      case 100: dropCount = 5; break;
-      default: return;
-    }
-
-    let totalFound = 0;
-    for (let i = 0; i < dropCount; i++) {
-      const found = this.rollResourceDrop(this.level);
-      if (found) {
-        this.resources[found.resourceId] = (this.resources[found.resourceId] ?? 0) + found.amount;
-        this.stats.resourcesFound += found.amount;
-        totalFound += found.amount;
-      }
-    }
-
-    if (threshold === 50) {
-      const bonus = 2;
-      this.resources['firesalt'] = (this.resources['firesalt'] ?? 0) + bonus;
-      events.push({ type: 'resource', message: `Milestone bonus: +${bonus} Firesalt`, color: '#FF8844', iconKey: 'firesalt' });
-    }
-
-    events.push({
-      type: 'resource',
-      message: `Supply cache found! (+${totalFound} resources)`,
-      color: '#88FF88',
-    });
   }
 
   /* ---- Gear drops & equipping ---- */
@@ -789,91 +658,6 @@ export class GameState {
     return events;
   }
 
-  /* ---- Rare events ---- */
-
-  private rollRareEvent(events: GameEvent[]): void {
-    const rareRoll = Math.random();
-
-    if (rareRoll < 0.02) {
-      // Hidden Room (2%)
-      const drops = 3 + Math.floor(Math.random() * 3);
-      let totalFound = 0;
-      for (let i = 0; i < drops; i++) {
-        const found = this.rollResourceDrop(this.level);
-        if (found) {
-          this.resources[found.resourceId] = (this.resources[found.resourceId] ?? 0) + found.amount;
-          this.stats.resourcesFound += found.amount;
-          totalFound += found.amount;
-        }
-      }
-      events.push({ type: 'event', message: 'You find a hidden room behind the wall...', color: '#FFAA44' });
-      events.push({ type: 'resource', message: `Searched the room! (+${totalFound} resources)`, color: '#88FF88' });
-    } else if (rareRoll < 0.035) {
-      // Supply Cache (1.5%)
-      const drops = 5 + Math.floor(Math.random() * 4);
-      let totalFound = 0;
-      for (let i = 0; i < drops; i++) {
-        const found = this.rollResourceDrop(this.level);
-        if (found) {
-          this.resources[found.resourceId] = (this.resources[found.resourceId] ?? 0) + found.amount;
-          this.stats.resourcesFound += found.amount;
-          totalFound += found.amount;
-        }
-      }
-      events.push({ type: 'event', message: 'You stumble upon an old supply cache!', color: '#FFAA44' });
-      events.push({ type: 'resource', message: `Looted the cache! (+${totalFound} resources)`, color: '#88FF88' });
-    } else if (rareRoll < 0.045) {
-      // Wanderer NPC (1%)
-      const trade = WANDERER_TRADES[Math.floor(Math.random() * WANDERER_TRADES.length)];
-      events.push({ type: 'event', message: 'A wanderer emerges from the shadows...', color: '#FFCC44' });
-      events.push({ type: 'event', message: trade.dialogue, color: '#DDDDAA' });
-      if ((this.resources[trade.giveResource] ?? 0) >= trade.giveAmount) {
-        this.resources[trade.giveResource] -= trade.giveAmount;
-        this.resources[trade.receiveResource] = (this.resources[trade.receiveResource] ?? 0) + trade.receiveAmount;
-        const giveRes = RESOURCES[trade.giveResource];
-        const receiveRes = RESOURCES[trade.receiveResource];
-        events.push({
-          type: 'resource',
-          message: `Traded ${trade.giveAmount} ${giveRes.name} for ${trade.receiveAmount} ${receiveRes.name}!`,
-          color: '#88FF88',
-        });
-      } else {
-        events.push({ type: 'event', message: 'You don\'t have enough to trade. The wanderer vanishes.', color: '#888888' });
-      }
-    } else if (rareRoll < 0.065) {
-      // Unstable Floor (2%)
-      const otherLevels = this.unlockedLevels.filter(l => l !== this.currentLevel);
-      if (otherLevels.length > 0) {
-        const randomLvlId = otherLevels[Math.floor(Math.random() * otherLevels.length)];
-        const randomLvl = getLevel(randomLvlId);
-        const drops = 2 + Math.floor(Math.random() * 3);
-        let totalFound = 0;
-        for (let i = 0; i < drops; i++) {
-          const found = this.rollResourceDrop(randomLvl);
-          if (found) {
-            this.resources[found.resourceId] = (this.resources[found.resourceId] ?? 0) + found.amount;
-            this.stats.resourcesFound += found.amount;
-            totalFound += found.amount;
-          }
-        }
-        events.push({ type: 'event', message: `The floor collapses! You glimpse ${randomLvl.name}...`, color: '#FF88FF' });
-        events.push({ type: 'resource', message: `Grabbed ${totalFound} resources before climbing back!`, color: '#88FF88' });
-      }
-    } else if (rareRoll < 0.07) {
-      // Memory Fragment (0.5%)
-      this.memoryFragments++;
-      const lore = MEMORY_FRAGMENT_LORE[(this.memoryFragments - 1) % MEMORY_FRAGMENT_LORE.length];
-      events.push({ type: 'event', message: `MEMORY FRAGMENT #${this.memoryFragments}`, color: '#CC88FF', iconKey: 'vhs_tape' });
-      events.push({ type: 'event', message: lore, color: '#9988CC' });
-
-      // 25% chance to award a Void Shard from memory fragments
-      if (Math.random() < 0.25) {
-        this.voidShards += 1;
-        events.push({ type: 'event', message: 'The fragment resonates... +1 Void Shard!', color: '#CC88FF', iconKey: 'void_shard' });
-      }
-    }
-  }
-
   /* ---- Offline progress ---- */
 
   processOfflineTime(elapsedMs: number): { events: GameEvent[]; summary: OfflineSummary } {
@@ -887,33 +671,15 @@ export class GameState {
     const summary: OfflineSummary = { minutes: Math.floor(elapsedMs / 60000), resourcesFound: 0, explorationGained: 0 };
     if (ticks <= 0) return { events, summary };
 
-    const startExpl = this.exploration;
-    for (let i = 0; i < ticks; i++) {
-      const lvl = this.level;
-      this.exploration = Math.min(
-        lvl.explorationRequired,
-        this.exploration + 1 * this.explorationSpeed,
-      );
-      if (Math.random() < 0.15) {
-        const found = this.rollResourceDrop(lvl);
-        if (found) {
-          this.resources[found.resourceId] =
-            (this.resources[found.resourceId] ?? 0) + found.amount;
-          summary.resourcesFound += found.amount;
-        }
-      }
-      if (this.healthRegen > 0) {
-        this.health = Math.min(this.maxHealth, this.health + this.healthRegen);
-      }
-      if (this.sanityRegen > 0) {
-        this.sanity = Math.min(this.maxSanity, this.sanity + this.sanityRegen);
-      }
-    }
-    summary.explorationGained = Math.floor(this.exploration - startExpl);
+    // Auto-mine the floor's ore for the elapsed (capped) ticks.
+    const ore = this.floorOre;
+    const before = this.resources[ore.resource] ?? 0;
+    this.nodeDamage += this.autoMineRate * ticks;
+    const mineEvents: GameEvent[] = [];
+    this.resolveNode(mineEvents);
+    summary.resourcesFound = Math.floor((this.resources[ore.resource] ?? 0) - before);
 
-    // Sync per-level exploration
     this.explorationPerLevel[this.currentLevel] = this.exploration;
-
     return { events, summary };
   }
 

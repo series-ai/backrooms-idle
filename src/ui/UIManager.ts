@@ -105,6 +105,8 @@ export class UIManager {
   private roomsLabel!: Phaser.GameObjects.Text;
   private exploreBtnZone?: Phaser.GameObjects.Rectangle;
   private holdTimer?: Phaser.Time.TimerEvent;
+  private lastMineTime = 0;
+  private durFill?: Phaser.GameObjects.Rectangle;
 
   // Resource bar
   private resTexts: Map<string, Phaser.GameObjects.Text> = new Map();
@@ -467,28 +469,40 @@ export class UIManager {
     this.exploreBtnZone.on('pointerout', () => this.stopHoldExplore());
     panel.add(this.exploreBtnZone);
 
+    // Durability bar under the icon — fills as you chip the current ore node.
+    const durW = 240;
+    const durBg = this.scene.add.rectangle(cx, iconCy + 168, durW, 12, 0x202a20).setDepth(16);
+    this.durFill = this.scene.add.rectangle(cx - durW / 2, iconCy + 168, 0, 12, 0xffcc44).setOrigin(0, 0.5).setDepth(17);
+    panel.add([durBg, this.durFill]);
+
     // Persistent hint under the icon.
-    this.hintText = makeText(this.scene, cx, iconCy + 200, 'Tap or hold to explore', 18, '#FFFFFF')
+    this.hintText = makeText(this.scene, cx, iconCy + 196, 'Tap or hold to mine', 18, '#FFFFFF')
       .setOrigin(0.5).setDepth(16);
     panel.add(this.hintText);
 
     this.panels.set('explore', panel);
 
-    // Initial focal icon so the button isn't empty.
-    this.popShowcase('scavenge');
+    // Initial focal icon = this floor's ore.
+    this.popShowcase(this.state.floorOre.resource);
   }
 
-  /* ---- Tap / hold to explore ---- */
+  /* ---- Tap / hold to mine (cooldown-gated) ---- */
+
+  private tryMine(): void {
+    if (this.activeTab !== 'explore') return;
+    const now = this.scene.time.now;
+    if (now - this.lastMineTime < this.state.mineCooldownMs) return;
+    this.lastMineTime = now;
+    this.cb.onSearch();
+    this.pulseShowcase();
+  }
 
   private startHoldExplore(): void {
     if (this.activeTab !== 'explore') return;
-    this.cb.onSearch();
-    this.pulseShowcase();
+    this.tryMine();
     this.holdTimer?.remove();
-    this.holdTimer = this.scene.time.addEvent({
-      delay: 120, loop: true,
-      callback: () => { this.cb.onSearch(); this.pulseShowcase(); },
-    });
+    // Poll often; tryMine self-gates by the (upgradeable) cooldown.
+    this.holdTimer = this.scene.time.addEvent({ delay: 40, loop: true, callback: () => this.tryMine() });
   }
 
   private stopHoldExplore(): void {
@@ -1491,12 +1505,20 @@ export class UIManager {
   updateStatusBars(): void {
     const { BAR_WIDTH, BAR_X } = LAYOUT;
     const s = this.state;
+    const ore = s.floorOre;
+    const oreName = RESOURCES[ore.resource]?.name ?? ore.resource;
+    const done = s.exploration >= ore.required;
+
     const progW = BAR_WIDTH * Math.max(0, s.explorationPct / 100);
     this.progFill.width = Phaser.Math.Linear(this.progFill.width, progW, 0.15);
     this.progFill.x = BAR_X;
-    const pct = Math.floor(s.explorationPct);
-    this.progLabel.setText(pct >= 100 ? 'EXPLORED — DESCEND!' : `EXPLORING ${pct}%`);
-    this.roomsLabel.setText(`Rooms ${Math.min(10, Math.floor(s.explorationPct / 10))} / 10`);
+    this.progLabel.setText(done ? `${oreName} — DESCEND!` : `Mining ${oreName}`);
+    this.roomsLabel.setText(`${Math.min(ore.required, Math.floor(s.exploration))} / ${ore.required}`);
+
+    // Durability fill toward the next ore node.
+    if (this.durFill) {
+      this.durFill.width = 240 * Math.max(0, Math.min(1, s.nodeDamage / s.nodeDurabilityMax));
+    }
 
     if (this.exploreDescendBg && this.exploreDescendTxt) {
       const can = s.canEscape();
@@ -1800,8 +1822,10 @@ export class UIManager {
       this.depthText.setText(`DEPTH: ${this.state.totalDepth}`);
     }
 
-    // Reset focal showcase for the new level
+    // New floor's ore becomes the focal node.
     this.clearShowcase();
+    this.popShowcase(this.state.floorOre.resource);
+    this.lastMineTime = 0;
 
     // Clear void prompt banner + dot (conditions may have changed after rewind)
     if (this.voidPromptBanner) { this.voidPromptBanner.destroy(); this.voidPromptBanner = null; }
@@ -1811,11 +1835,6 @@ export class UIManager {
       type: 'system',
       message: this.state.level.description,
       color: this.state.level.textColor,
-    });
-    this.addLogMessage({
-      type: 'system',
-      message: 'You begin exploring...',
-      color: '#AAAAAA',
     });
   }
 }

@@ -39,7 +39,30 @@ export interface EntityDef {
   defeatMessage: string;
 }
 
-export type UpgradeEffect = 'exploreSpeed' | 'findRate' | 'findAmount' | 'doubleChance';
+export type UpgradeEffect = 'cooldown' | 'power' | 'autoMine' | 'bonusOre';
+
+/* ------------------------------------------------------------------ */
+/*  Floor ores — each level is ONE ore you mine toward a target.       */
+/* ------------------------------------------------------------------ */
+
+/** The ore each floor yields, in descend order (cycles for deeper floors). */
+export const ORE_SEQUENCE = [
+  'almond_water', 'batteries', 'cloth_scraps', 'scrap_metal', 'canned_food', 'firesalt', 'lucky_coins',
+];
+
+export interface FloorOre {
+  resource: string;
+  required: number;   // ore needed to unlock descend
+  durability: number; // taps to break ONE ore node (before Mining Power)
+}
+
+export function getFloorOre(levelId: number): FloorOre {
+  return {
+    resource: ORE_SEQUENCE[levelId % ORE_SEQUENCE.length],
+    required: 10 + levelId * 20,        // Floor 0: 10, Floor 1: 30, Floor 2: 50, ...
+    durability: 3 + levelId,            // deeper nodes are tougher
+  };
+}
 
 export interface UpgradeDef {
   id: string;
@@ -528,50 +551,50 @@ export const LEVELS: LevelDef[] = [
   },
 ];
 
-// Every collectible resource feeds an upgrade. All effects are MULTIPLICATIVE and
-// uncapped — the escalating cost paces you, not a hard maxLevel.
+// Mining upgrades. Every collectible resource feeds one, so each floor's ore is
+// useful. Effects are uncapped — escalating cost paces you, not a hard maxLevel.
 export const UPGRADES: UpgradeDef[] = [
   {
-    id: 'quick_feet', name: 'Quick Feet', icon: '\u{1F45F}',
-    description: 'Explore faster',
-    baseCost: 5, costMultiplier: 1.8, maxLevel: 9999,
-    effectPerLevel: 15, effectUnit: '% speed', costResource: 'cloth_scraps', effect: 'exploreSpeed',
+    id: 'mining_speed', name: 'Mining Speed', icon: '\u{26A1}',
+    description: 'Lower the cooldown between taps',
+    baseCost: 5, costMultiplier: 1.7, maxLevel: 9999,
+    effectPerLevel: 6, effectUnit: '% faster', costResource: 'almond_water', effect: 'cooldown',
   },
   {
-    id: 'sharp_eyes', name: 'Sharp Eyes', icon: '\u{1F441}',
-    description: 'Find resources more often',
-    baseCost: 3, costMultiplier: 1.8, maxLevel: 9999,
-    effectPerLevel: 18, effectUnit: '% find rate', costResource: 'batteries', effect: 'findRate',
+    id: 'mining_power', name: 'Mining Power', icon: '\u{1F528}',
+    description: 'Each tap breaks ore faster',
+    baseCost: 4, costMultiplier: 1.8, maxLevel: 9999,
+    effectPerLevel: 20, effectUnit: '% power', costResource: 'batteries', effect: 'power',
   },
   {
-    id: 'heavy_hauls', name: 'Heavy Hauls', icon: '\u{1F9F2}',
-    description: 'Find bigger stacks',
+    id: 'auto_miner', name: 'Auto-Miner', icon: '\u{1F916}',
+    description: 'Mine slowly on its own',
     baseCost: 6, costMultiplier: 1.9, maxLevel: 9999,
-    effectPerLevel: 12, effectUnit: '% haul', costResource: 'scrap_metal', effect: 'findAmount',
+    effectPerLevel: 25, effectUnit: '% auto', costResource: 'cloth_scraps', effect: 'autoMine',
   },
   {
-    id: 'scavenger', name: 'Scavenger', icon: '\u{1F392}',
-    description: 'Chance for double finds',
-    baseCost: 4, costMultiplier: 1.9, maxLevel: 30,
-    effectPerLevel: 3, effectUnit: '% double', costResource: 'lucky_coins', effect: 'doubleChance',
+    id: 'rich_veins', name: 'Rich Veins', icon: '\u{1FAA8}',
+    description: 'Chance for +1 bonus ore per node',
+    baseCost: 5, costMultiplier: 2.0, maxLevel: 40,
+    effectPerLevel: 2, effectUnit: '% bonus', costResource: 'lucky_coins', effect: 'bonusOre',
   },
   {
-    id: 'clear_head', name: 'Clear Head', icon: '\u{1F9E0}',
-    description: 'Explore faster',
+    id: 'swift_hands', name: 'Swift Hands', icon: '\u{1F90C}',
+    description: 'Lower the cooldown between taps',
+    baseCost: 5, costMultiplier: 1.75, maxLevel: 9999,
+    effectPerLevel: 5, effectUnit: '% faster', costResource: 'canned_food', effect: 'cooldown',
+  },
+  {
+    id: 'heavy_pick', name: 'Heavy Pick', icon: '\u{26CF}\u{FE0F}',
+    description: 'Each tap breaks ore faster',
     baseCost: 5, costMultiplier: 1.85, maxLevel: 9999,
-    effectPerLevel: 10, effectUnit: '% speed', costResource: 'canned_food', effect: 'exploreSpeed',
+    effectPerLevel: 18, effectUnit: '% power', costResource: 'scrap_metal', effect: 'power',
   },
   {
-    id: 'sharp_instinct', name: 'Sharp Instinct', icon: '\u{1F50D}',
-    description: 'Find resources more often',
-    baseCost: 5, costMultiplier: 1.85, maxLevel: 9999,
-    effectPerLevel: 10, effectUnit: '% find rate', costResource: 'almond_water', effect: 'findRate',
-  },
-  {
-    id: 'firesalt_charm', name: 'Firesalt Charm', icon: '\u{1F525}',
-    description: 'Find bigger stacks',
-    baseCost: 4, costMultiplier: 2.0, maxLevel: 9999,
-    effectPerLevel: 14, effectUnit: '% haul', costResource: 'firesalt', effect: 'findAmount',
+    id: 'prospecting', name: 'Prospecting', icon: '\u{1F9ED}',
+    description: 'Mine slowly on its own',
+    baseCost: 5, costMultiplier: 1.9, maxLevel: 9999,
+    effectPerLevel: 22, effectUnit: '% auto', costResource: 'firesalt', effect: 'autoMine',
   },
 ];
 
