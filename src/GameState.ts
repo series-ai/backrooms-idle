@@ -306,18 +306,27 @@ export class GameState {
     return true;
   }
 
-  /** Manual active search — instantly attempts a resource find (the clicker beat). */
+  /** Tap/hold to explore — advances exploration faster than idle, and may find loot. */
   manualSearch(): GameEvent[] {
     const events: GameEvent[] = [];
-    const found = this.rollResourceDrop(this.level);
-    if (found) {
-      let amount = Math.max(1, Math.round(found.amount * this.findAmountMult));
-      if (Math.random() < this.doubleResourceChance) amount *= 2;
-      this.resources[found.resourceId] = (this.resources[found.resourceId] ?? 0) + amount;
-      this.stats.resourcesFound += amount;
-      events.push({ type: 'resource', message: `Searched: +${amount} ${RESOURCES[found.resourceId].name}`, color: '#7CFF7C', iconKey: found.resourceId });
-    } else {
-      events.push({ type: 'ambient', message: 'You search the area, but find nothing.', color: '#888888' });
+    const lvl = this.level;
+
+    // Active exploring advances the bar in ~2% steps (much faster than idle).
+    const step = lvl.explorationRequired * 0.02;
+    this.exploration = Math.min(lvl.explorationRequired, this.exploration + step);
+    this.stats.totalExploration += step;
+    this.checkMilestones(events);
+
+    // Chance to turn up a resource on the tap.
+    if (Math.random() < 0.45 * this.findRateBonus) {
+      const found = this.rollResourceDrop(lvl);
+      if (found) {
+        let amount = Math.max(1, Math.round(found.amount * this.findAmountMult));
+        if (Math.random() < this.doubleResourceChance) amount *= 2;
+        this.resources[found.resourceId] = (this.resources[found.resourceId] ?? 0) + amount;
+        this.stats.resourcesFound += amount;
+        events.push({ type: 'resource', message: `+${amount} ${RESOURCES[found.resourceId].name}`, color: '#7CFF7C', iconKey: found.resourceId });
+      }
     }
     return events;
   }

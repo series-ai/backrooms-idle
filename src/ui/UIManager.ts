@@ -101,7 +101,10 @@ export class UIManager {
   // Focal "showcase" presentation (replaces the scrolling text log)
   private showcaseBig: Phaser.GameObjects.Image | null = null;
   private showcaseKey: string | null = null;
-  private captionText!: Phaser.GameObjects.Text;
+  private hintText!: Phaser.GameObjects.Text;
+  private roomsLabel!: Phaser.GameObjects.Text;
+  private exploreBtnZone?: Phaser.GameObjects.Rectangle;
+  private holdTimer?: Phaser.Time.TimerEvent;
 
   // Resource bar
   private resTexts: Map<string, Phaser.GameObjects.Text> = new Map();
@@ -345,16 +348,18 @@ export class UIManager {
   private createStatusBars(): void {
     const { BAR_X, BAR_WIDTH, BAR_HEIGHT } = LAYOUT;
 
-    // Goal line — so a new player always knows the loop.
-    makeText(this.scene, BAR_X, 96, 'Explore to find resources → buy upgrades → descend deeper.', 15, '#9aa6c0')
-      .setDepth(12);
+    // Green EXPLORATION bar (fills as you explore the level).
+    const y = 104;
+    this.scene.add.rectangle(BAR_X + BAR_WIDTH / 2, y + BAR_HEIGHT / 2, BAR_WIDTH, BAR_HEIGHT, 0x16241a)
+      .setDepth(10).setStrokeStyle(1, 0x2e4a2e);
+    this.progFill = this.scene.add.rectangle(BAR_X, y, 0, BAR_HEIGHT, 0x4caf50).setOrigin(0, 0).setDepth(11);
+    this.progLabel = makeText(this.scene, LAYOUT.CENTER_X, y + 1, 'EXPLORING 0%', 16, '#FFFFFF', { fontStyle: 'bold' })
+      .setOrigin(0.5, 0).setDepth(12);
 
-    // Single EXPLORATION bar (the thing that fills as you explore the level).
-    const y = 140;
-    this.scene.add.rectangle(BAR_X + BAR_WIDTH / 2, y + BAR_HEIGHT / 2, BAR_WIDTH, BAR_HEIGHT, 0x222222).setDepth(10);
-    this.progFill = this.scene.add.rectangle(BAR_X, y, 0, BAR_HEIGHT, 0xffcc00).setOrigin(0, 0).setDepth(11);
-    this.progLabel = makeText(this.scene, BAR_X + 6, y + 1, 'EXPLORING: 0%', 16, '#FFFFFF').setDepth(12);
-
+    // Discrete room counter under the bar (e.g. 1 / 10).
+    this.roomsLabel = makeText(this.scene, LAYOUT.CENTER_X, y + BAR_HEIGHT + 6, 'Rooms 0 / 10', 16, '#9fd0a0', {
+      fontStyle: 'bold',
+    }).setOrigin(0.5, 0).setDepth(12);
   }
 
   /* ---- Resource bar ---- */
@@ -441,25 +446,61 @@ export class UIManager {
   private createExplorePanel(): void {
     const panel = this.scene.add.container(0, 0).setDepth(15);
 
-    // Action buttons at the bottom: SEARCH (manual find) + DESCEND.
+    const cx = LAYOUT.CENTER_X;
+
+    // DESCEND button at the bottom (lights up green when the level is fully explored).
     const btnY = LAYOUT.CONTENT_BOTTOM - 44;
-    const searchBtn = makeBtn(this.scene, 198, btnY, '\u{1F50D} SEARCH', 300, 72, 0x2c6a3c, () => this.cb.onSearch());
-    (searchBtn.getAt(0) as Phaser.GameObjects.Rectangle).setStrokeStyle(3, 0x66cc88);
-    const descendBtn = makeBtn(this.scene, 522, btnY, '⬇ DESCEND', 300, 72, 0x333355, () => this.cb.onEscape());
+    const descendBtn = makeBtn(this.scene, cx, btnY, '⬇ DESCEND DEEPER', 440, 72, 0x333355, () => this.cb.onEscape());
     this.exploreDescendBg = descendBtn.getAt(0) as Phaser.GameObjects.Rectangle;
     this.exploreDescendTxt = descendBtn.getAt(1) as Phaser.GameObjects.Text;
-    panel.add([searchBtn, descendBtn]);
+    panel.add(descendBtn);
 
-    // Focal showcase fills the space above the buttons: a big icon (created on
-    // demand at scene depth 14) plus a caption that pops as events happen.
     this.logBottom = btnY - 56;
-    const capY = this.logBottom - 60;
-    this.captionText = makeText(this.scene, LAYOUT.CENTER_X, capY, 'Searching the rooms...', 24, '#d6d6d6', {
-      align: 'center', wordWrap: { width: 640 },
-    }).setOrigin(0.5).setDepth(16);
-    panel.add(this.captionText);
+    const iconCy = this.showcaseCenterY();
+
+    // The big focal icon doubles as the explore BUTTON: tap or hold to explore.
+    // A transparent hit zone sits on top of the swappable showcase icon.
+    this.exploreBtnZone = this.scene.add.rectangle(cx, iconCy, 360, 360, 0xffffff, 0)
+      .setDepth(17).setInteractive({ useHandCursor: true });
+    this.exploreBtnZone.on('pointerdown', () => this.startHoldExplore());
+    this.exploreBtnZone.on('pointerup', () => this.stopHoldExplore());
+    this.exploreBtnZone.on('pointerout', () => this.stopHoldExplore());
+    panel.add(this.exploreBtnZone);
+
+    // Persistent hint under the icon.
+    this.hintText = makeText(this.scene, cx, iconCy + 200, 'Tap or hold to explore', 18, '#FFFFFF')
+      .setOrigin(0.5).setDepth(16);
+    panel.add(this.hintText);
 
     this.panels.set('explore', panel);
+
+    // Initial focal icon so the button isn't empty.
+    this.popShowcase('scavenge');
+  }
+
+  /* ---- Tap / hold to explore ---- */
+
+  private startHoldExplore(): void {
+    if (this.activeTab !== 'explore') return;
+    this.cb.onSearch();
+    this.pulseShowcase();
+    this.holdTimer?.remove();
+    this.holdTimer = this.scene.time.addEvent({
+      delay: 120, loop: true,
+      callback: () => { this.cb.onSearch(); this.pulseShowcase(); },
+    });
+  }
+
+  private stopHoldExplore(): void {
+    this.holdTimer?.remove();
+    this.holdTimer = undefined;
+  }
+
+  private pulseShowcase(): void {
+    if (!this.showcaseBig) return;
+    const s = 320 / ICON_NATIVE;
+    this.showcaseBig.setScale(s * 0.9);
+    this.scene.tweens.add({ targets: this.showcaseBig, scale: s, duration: 110, ease: 'Quad.easeOut' });
   }
 
   /* ---- Items panel ---- */
@@ -1416,6 +1457,7 @@ export class UIManager {
 
     // Toggle showcase icon visibility with explore tab
     if (this.showcaseBig) this.showcaseBig.setVisible(tab === 'explore');
+    if (tab !== 'explore') this.stopHoldExplore();
 
     // Hide void notification dot when viewing VOID tab
     if (tab === 'void' && this.voidNotifDot) this.voidNotifDot.setVisible(false);
@@ -1429,10 +1471,16 @@ export class UIManager {
     // Big focal icon pops in for events that carry one (resources, entities, items).
     if (evt.iconKey) this.popShowcase(evt.iconKey);
 
-    // Caption pops as it updates — no wall of scrolling text.
-    if (this.captionText) {
-      this.captionText.setText(evt.message).setColor(evt.color).setScale(0.92).setAlpha(1);
-      this.scene.tweens.add({ targets: this.captionText, scale: 1, duration: 180, ease: 'Back.easeOut' });
+    // Floating feedback that pops up from the icon and fades — no wall of text.
+    if (this.activeTab === 'explore') {
+      const startY = this.showcaseCenterY() + 120;
+      const t = makeText(this.scene, LAYOUT.CENTER_X, startY, evt.message, 20, evt.color, {
+        align: 'center', wordWrap: { width: 600 }, fontStyle: 'bold',
+      }).setOrigin(0.5).setDepth(19);
+      this.scene.tweens.add({
+        targets: t, y: startY - 90, alpha: { from: 1, to: 0 },
+        duration: 1300, ease: 'Cubic.easeOut', onComplete: () => t.destroy(),
+      });
     }
   }
 
@@ -1447,7 +1495,8 @@ export class UIManager {
     this.progFill.width = Phaser.Math.Linear(this.progFill.width, progW, 0.15);
     this.progFill.x = BAR_X;
     const pct = Math.floor(s.explorationPct);
-    this.progLabel.setText(pct >= 100 ? 'EXPLORED — ready to descend' : `EXPLORING: ${pct}%`);
+    this.progLabel.setText(pct >= 100 ? 'EXPLORED — DESCEND!' : `EXPLORING ${pct}%`);
+    this.roomsLabel.setText(`Rooms ${Math.min(10, Math.floor(s.explorationPct / 10))} / 10`);
 
     if (this.exploreDescendBg && this.exploreDescendTxt) {
       const can = s.canEscape();
