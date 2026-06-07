@@ -20,6 +20,7 @@ import {
   type GearTier,
 } from './data/GameData';
 import { MAX_OFFLINE_TICKS } from './config';
+import { type Big, D } from './num';
 
 /* ------------------------------------------------------------------ */
 /*  Types                                                              */
@@ -35,7 +36,7 @@ export interface SaveData {
   maxSanity: number;
   exploration: number;
   explorationPerLevel: Record<number, number>;
-  resources: Record<string, number>;
+  resources: Record<string, string>;   // Big values serialized as decimal strings
   upgrades: Record<string, number>;
   stats: GameStats;
   ghostWalkTicks: number;
@@ -94,6 +95,13 @@ export interface TickResult {
   events: GameEvent[];
 }
 
+/** Result of one active tap on the node: damage dealt + whether it was a lucky find (crit). */
+export interface SearchHit {
+  events: GameEvent[];
+  damage: Big;
+  crit: boolean;
+}
+
 export interface OfflineSummary {
   minutes: number;
   resourcesFound: number;
@@ -113,8 +121,8 @@ export class GameState {
   maxSanity = 100;
   exploration = 0;                 // ore mined on the current floor (toward `required`)
   explorationPerLevel: Record<number, number> = {};
-  nodeDamage = 0;                  // durability dealt to the current ore node
-  resources: Record<string, number> = {};
+  nodeDamage: Big = D(0);          // Integrity (HP) dealt to the current node — transient, not saved
+  resources: Record<string, Big> = {};
   upgrades: Record<string, number> = {};
   stats: GameStats = {
     totalExploration: 0,
@@ -165,9 +173,9 @@ export class GameState {
 
   constructor() {
     for (const key of Object.keys(RESOURCES)) {
-      this.resources[key] = 0;
+      this.resources[key] = D(0);
     }
-    this.resources['almond_water'] = 5;
+    this.resources['almond_water'] = D(5);
     for (const u of UPGRADES) {
       this.upgrades[u.id] = 0;
     }
@@ -195,27 +203,66 @@ export class GameState {
   get required(): number { return this.floorOre.required; }
   get nodeDurabilityMax(): number { return Math.max(1, this.floorOre.durability); }
 
+  /* ---- Integrity (node HP) — the active "feel" layer ----------------- *
+   * Both the node's Integrity pool AND your search power are multiplied by
+   * the SAME per-floor magnitude factor. The ratio (taps-to-break) is therefore
+   * unchanged from the raw durability balance, but the on-screen numbers grow
+   * into the thousands/millions as you descend — the big-number dopamine of an
+   * idle clicker. Backed by Big, so the growth is genuinely unbounded (no
+   * safe-integer ceiling, no clamp). */
+  private static readonly SCALE_BASE = 10;
+  private static readonly SCALE_GROWTH = 1.45;
+
+  /** Magnitude multiplier for the current floor (drives how big the numbers look). */
+  get nodeScale(): Big {
+    return D(GameState.SCALE_BASE).mul(D(GameState.SCALE_GROWTH).pow(this.currentLevel));
+  }
+
+  /** Total Integrity (HP) of one node on this floor. */
+  get nodeIntegrityMax(): Big {
+    return D(this.nodeDurabilityMax).mul(this.nodeScale).floor().max(D(1));
+  }
+
+  /** Damage one manual tap deals to a node's Integrity (before a crit roll). */
+  get searchPower(): Big {
+    return this.clickPower.mul(this.nodeScale);
+  }
+
+  /** Idle Integrity damage per tick. */
+  get autoSearchPower(): Big {
+    return this.autoMineRate.mul(this.nodeScale);
+  }
+
+  /** Chance a tap is a "lucky find" (crit). Boosted by the Lucky Find upgrade. */
+  get critChance(): number {
+    return Math.min(0.6, 0.12 + this.bonusOreChance * 0.5);
+  }
+
+  /** Damage multiplier on a lucky find. */
+  get critMult(): number { return 5; }
+
   getUpgradeLevel(id: string): number {
     return this.upgrades[id] ?? 0;
   }
 
-  getUpgradeCost(id: string): number {
+  getUpgradeCost(id: string): Big {
     const def = UPGRADES.find((u) => u.id === id);
-    if (!def) return Infinity;
-    return Math.floor(def.baseCost * Math.pow(def.costMultiplier, this.getUpgradeLevel(id)));
+    if (!def) return D(Number.MAX_VALUE);
+    // baseCost × costMultiplier^level — full precision so it never overflows.
+    return D(def.baseCost).mul(D(def.costMultiplier).pow(this.getUpgradeLevel(id))).floor();
   }
 
   canAffordUpgrade(id: string): boolean {
     const def = UPGRADES.find((u) => u.id === id);
     if (!def) return false;
     if (this.getUpgradeLevel(id) >= def.maxLevel) return false;
-    return (this.resources[def.costResource] ?? 0) >= this.getUpgradeCost(id);
+    return (this.resources[def.costResource] ?? D(0)).gte(this.getUpgradeCost(id));
   }
 
   buyUpgrade(id: string): boolean {
     const def = UPGRADES.find((u) => u.id === id);
     if (!def || !this.canAffordUpgrade(id)) return false;
-    this.resources[def.costResource] -= this.getUpgradeCost(id);
+    this.resources[def.costResource] = (this.resources[def.costResource] ?? D(0)).sub(this.getUpgradeCost(id));
     this.upgrades[id] = this.getUpgradeLevel(id) + 1;
     return true;
   }
@@ -239,22 +286,22 @@ export class GameState {
   }
 
   // Multiplicative + uncapped: each level multiplies, so the next purchase always
-  // matters and exploration visibly accelerates.
-  private upgradeMult(effect: string): number {
-    let m = 1;
+  // matters and exploration visibly accelerates. Returned as Big since it compounds.
+  private upgradeMult(effect: string): Big {
+    let m = D(1);
     for (const u of UPGRADES) {
       if (u.effect === effect) {
         const lvl = this.getUpgradeLevel(u.id);
-        if (lvl > 0) m *= Math.pow(1 + u.effectPerLevel / 100, lvl);
+        if (lvl > 0) m = m.mul(D(1 + u.effectPerLevel / 100).pow(lvl));
       }
     }
     return m;
   }
 
-  /** Durability damage per tap. */
-  get clickPower(): number { return this.upgradeMult('power'); }
-  /** Idle durability damage per tick. */
-  get autoMineRate(): number { return 0.25 * this.upgradeMult('autoMine'); }
+  /** Search power multiplier per tap (before the floor magnitude scale). */
+  get clickPower(): Big { return this.upgradeMult('power'); }
+  /** Idle search multiplier per tick (before the floor magnitude scale). */
+  get autoMineRate(): Big { return D(0.25).mul(this.upgradeMult('autoMine')); }
   /** Cooldown (ms) between taps — lowered by Mining Speed / Swift Hands. */
   get mineCooldownMs(): number {
     let m = 1;
@@ -309,39 +356,41 @@ export class GameState {
   /* ---- Consumables ---- */
 
   useAlmondWater(): boolean {
-    if (this.resources['almond_water'] <= 0) return false;
-    this.resources['almond_water']--;
+    if ((this.resources['almond_water'] ?? D(0)).lte(0)) return false;
+    this.resources['almond_water'] = this.resources['almond_water'].sub(1);
     this.health = Math.min(this.maxHealth, this.health + 15);
     return true;
   }
 
   useCannedFood(): boolean {
-    if (this.resources['canned_food'] <= 0) return false;
-    this.resources['canned_food']--;
+    if ((this.resources['canned_food'] ?? D(0)).lte(0)) return false;
+    this.resources['canned_food'] = this.resources['canned_food'].sub(1);
     this.sanity = Math.min(this.maxSanity, this.sanity + 20);
     return true;
   }
 
-  /** One tap on the ore node (active mining). Cooldown is enforced by the UI. */
-  manualSearch(): GameEvent[] {
+  /** One tap on the ore node (active search). Cooldown is enforced by the UI. */
+  manualSearch(): SearchHit {
     const events: GameEvent[] = [];
-    this.nodeDamage += this.clickPower;
+    const crit = Math.random() < this.critChance;
+    const damage = this.searchPower.mul(crit ? this.critMult : 1);
+    this.nodeDamage = this.nodeDamage.add(damage);
     this.resolveNode(events);
-    return events;
+    return { events, damage, crit };
   }
 
   /** Break any fully-damaged ore nodes into ore (active or idle). */
   private resolveNode(events: GameEvent[]): void {
     const ore = this.floorOre;
-    const dur = this.nodeDurabilityMax;
+    const dur = this.nodeIntegrityMax;
     let loops = 0;
-    while (this.nodeDamage >= dur && loops++ < 500) {
-      this.nodeDamage -= dur;
+    while (this.nodeDamage.gte(dur) && loops++ < 500) {
+      this.nodeDamage = this.nodeDamage.sub(dur);
       let gain = 1;
       if (Math.random() < this.bonusOreChance) gain += 1;
-      this.resources[ore.resource] = (this.resources[ore.resource] ?? 0) + gain;   // inventory (uncapped)
+      this.resources[ore.resource] = (this.resources[ore.resource] ?? D(0)).add(gain);   // inventory (uncapped)
       this.stats.resourcesFound += gain;
-      this.exploration = Math.min(ore.required, this.exploration + gain);           // descend progress (capped)
+      this.exploration = Math.min(ore.required, this.exploration + gain);                 // descend progress (capped)
       events.push({ type: 'resource', message: `+ ${RESOURCES[ore.resource].name}${tierSuffix(ore.tier)}`, color: '#7CFF7C', iconKey: ore.resource, value: gain });
     }
   }
@@ -363,7 +412,7 @@ export class GameState {
     }
     // New level starts at 0 (never visited)
     this.exploration = this.explorationPerLevel[this.currentLevel] ?? 0;
-    this.nodeDamage = 0;
+    this.nodeDamage = D(0);
     this.stats.levelsEscaped++;
     this.totalDepth++;
     return true;
@@ -377,7 +426,7 @@ export class GameState {
     this.currentLevel = levelId;
     // Restore destination level's exploration
     this.exploration = this.explorationPerLevel[levelId] ?? 0;
-    this.nodeDamage = 0;
+    this.nodeDamage = D(0);
     return true;
   }
 
@@ -387,7 +436,7 @@ export class GameState {
     const def = ABILITIES.find(a => a.id === id);
     if (!def) return false;
     if ((this.abilityCooldowns[id] ?? 0) > 0) return false;
-    return (this.resources[def.costResource] ?? 0) >= def.costAmount;
+    return (this.resources[def.costResource] ?? D(0)).gte(def.costAmount);
   }
 
   getAbilityCooldown(id: string): number {
@@ -399,11 +448,11 @@ export class GameState {
     if (!def || !this.canUseAbility(id)) return [];
 
     const events: GameEvent[] = [];
-    this.resources[def.costResource] -= def.costAmount;
+    this.resources[def.costResource] = (this.resources[def.costResource] ?? D(0)).sub(def.costAmount);
     this.abilityCooldowns[id] = def.cooldownTicks;
 
     if (id === 'scavenge') {
-      this.nodeDamage += this.clickPower * 6;
+      this.nodeDamage = this.nodeDamage.add(this.searchPower.mul(6));
       this.resolveNode(events);
     } else if (id === 'barricade') {
       this.barricadeTicks = def.durationTicks;
@@ -432,8 +481,8 @@ export class GameState {
     const events: GameEvent[] = [];
     const lvl = this.level;
 
-    // 1. Idle auto-mining (slow trickle of the floor's ore).
-    this.nodeDamage += this.autoMineRate;
+    // 1. Idle auto-search (slow trickle of the floor's ore).
+    this.nodeDamage = this.nodeDamage.add(this.autoSearchPower);
     this.resolveNode(events);
 
     // 2. Atmosphere only — ambient flavor. No random loot. (Entities are coming
@@ -508,7 +557,7 @@ export class GameState {
     const recipe = RECIPES.find(r => r.id === recipeId);
     if (!recipe) return false;
     return recipe.ingredients.every(
-      ing => (this.resources[ing.resourceId] ?? 0) >= ing.amount,
+      ing => (this.resources[ing.resourceId] ?? D(0)).gte(ing.amount),
     );
   }
 
@@ -520,7 +569,7 @@ export class GameState {
 
     // Consume ingredients
     for (const ing of recipe.ingredients) {
-      this.resources[ing.resourceId] -= ing.amount;
+      this.resources[ing.resourceId] = (this.resources[ing.resourceId] ?? D(0)).sub(ing.amount);
     }
 
     // Apply effect
@@ -600,7 +649,7 @@ export class GameState {
       case 'resource_bundle': {
         const resKeys = Object.keys(RESOURCES).filter(k => k !== 'level_keys');
         for (const k of resKeys) {
-          this.resources[k] = (this.resources[k] ?? 0) + 10;
+          this.resources[k] = (this.resources[k] ?? D(0)).add(10);
         }
         events.push({ type: 'event', message: '+10 of each resource!', color: '#88FF88' });
         break;
@@ -667,11 +716,11 @@ export class GameState {
 
     // Auto-mine the floor's ore for the elapsed (capped) ticks.
     const ore = this.floorOre;
-    const before = this.resources[ore.resource] ?? 0;
-    this.nodeDamage += this.autoMineRate * ticks;
+    const before = this.resources[ore.resource] ?? D(0);
+    this.nodeDamage = this.nodeDamage.add(this.autoSearchPower.mul(ticks));
     const mineEvents: GameEvent[] = [];
     this.resolveNode(mineEvents);
-    summary.resourcesFound = Math.floor((this.resources[ore.resource] ?? 0) - before);
+    summary.resourcesFound = Math.floor((this.resources[ore.resource] ?? D(0)).sub(before).toNumber());
 
     this.explorationPerLevel[this.currentLevel] = this.exploration;
     return { events, summary };
@@ -718,11 +767,11 @@ export class GameState {
 
     // Reset resources with Pack Rat bonus
     for (const key of Object.keys(RESOURCES)) {
-      this.resources[key] = 0;
+      this.resources[key] = D(0);
     }
     const packRatLvl = this.getVoidLevel('pack_rat');
-    this.resources['almond_water'] = 5 + packRatLvl * 3 + (this.survivorsKitOwned ? 10 : 0);
-    this.resources['canned_food'] = packRatLvl * 2;
+    this.resources['almond_water'] = D(5 + packRatLvl * 3 + (this.survivorsKitOwned ? 10 : 0));
+    this.resources['canned_food'] = D(packRatLvl * 2);
 
     // Reset upgrades
     for (const u of UPGRADES) {
@@ -816,7 +865,9 @@ export class GameState {
       maxSanity: this.maxSanity,
       exploration: this.exploration,
       explorationPerLevel: { ...this.explorationPerLevel },
-      resources: { ...this.resources },
+      resources: Object.fromEntries(
+        Object.entries(this.resources).map(([k, v]) => [k, v.toString()]),
+      ),
       upgrades: { ...this.upgrades },
       stats: { ...this.stats },
       ghostWalkTicks: this.ghostWalkTicks,
@@ -864,7 +915,12 @@ export class GameState {
     this.maxSanity = data.maxSanity;
     this.exploration = data.exploration;
     this.explorationPerLevel = data.explorationPerLevel ?? {};
-    this.resources = data.resources;
+    // Rebuild resources as Big. D() accepts old numeric saves and new string saves,
+    // so legacy saves load cleanly. Default every known resource to D(0) first.
+    this.resources = {};
+    for (const key of Object.keys(RESOURCES)) this.resources[key] = D(0);
+    const savedRes = (data.resources ?? {}) as Record<string, string | number>;
+    for (const key of Object.keys(savedRes)) this.resources[key] = D(savedRes[key]);
     this.upgrades = data.upgrades;
     this.stats = data.stats;
     this.ghostWalkTicks = data.ghostWalkTicks ?? 0;

@@ -119,6 +119,7 @@ export default class GameScene extends Phaser.Scene {
       onCraft: (id) => this.handleCraft(id),
       onBuyShopItem: (id) => this.handleBuyShopItem(id),
       onOpenStore: () => this.handleOpenStore(),
+      onResetProgress: () => this.handleResetProgress(),
     });
     this.ui.createAll();
 
@@ -205,7 +206,7 @@ export default class GameScene extends Phaser.Scene {
         RundotGameAPI.analytics.recordCustomEvent('player_died', {
           level: this.state.currentLevel,
           deaths: this.state.stats.deaths,
-          had_coin_insurance: (this.state.resources['lucky_coins'] ?? 0) >= 5,
+          had_coin_insurance: (this.state.resources['lucky_coins']?.gte(5)) ?? false,
         });
       }
 
@@ -270,10 +271,11 @@ export default class GameScene extends Phaser.Scene {
   }
 
   private handleSearch(): void {
-    const events = this.state.manualSearch();
-    for (const evt of events) this.ui.addLogMessage(evt);
+    const hit = this.state.manualSearch();
+    for (const evt of hit.events) this.ui.addLogMessage(evt);
+    this.ui.showSearchHit(hit.damage, hit.crit);
     this.ui.updateResourceBar();
-    RundotGameAPI.triggerHapticAsync('light' as never);
+    RundotGameAPI.triggerHapticAsync((hit.crit ? 'medium' : 'light') as never);
   }
 
   private handleBuyUpgrade(id: string): void {
@@ -494,6 +496,22 @@ export default class GameScene extends Phaser.Scene {
       RundotGameAPI.triggerHapticAsync('success' as never);
       this.saveGame();
     }
+  }
+
+  private async handleResetProgress(): Promise<void> {
+    RundotGameAPI.analytics.recordCustomEvent('progress_reset', {
+      level: this.state.currentLevel,
+      total_depth: this.state.totalDepth,
+      prestiges: this.state.prestigeCount,
+    });
+    RundotGameAPI.triggerHapticAsync('warning' as never);
+    try {
+      await RundotGameAPI.appStorage.removeItem('backrooms_save');
+    } catch (err) {
+      RundotGameAPI.log(`[Reset] Error: ${err}`);
+    }
+    // Rebuild from a clean slate — create() runs loadGame() which now finds no save.
+    this.scene.restart();
   }
 
   /* ================================================================ */

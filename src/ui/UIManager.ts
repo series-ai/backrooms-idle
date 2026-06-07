@@ -2,6 +2,7 @@ import Phaser from 'phaser';
 import RundotGameAPI from '@series-inc/rundot-game-sdk/api';
 import { LAYOUT } from '../config';
 import { UPGRADES, RESOURCES, RESOURCE_ORDER, VOID_UPGRADES, PRESTIGE_TIERS, ABILITIES, EQUIP_SLOTS, EQUIP_SLOT_ICONS, GEAR_POOL, GEAR_TIER_COLORS, RECIPES, SHOP_ITEMS, SHARD_MILESTONES, getTierColor, tierSuffix, getFloorOre } from '../data/GameData';
+import { fmt, D, type Big } from '../num';
 import type { GameEvent, OfflineSummary } from '../GameState';
 import { GameState } from '../GameState';
 
@@ -77,6 +78,7 @@ export interface UICallbacks {
   onCraft: (recipeId: string) => void;
   onBuyShopItem: (itemId: string) => void;
   onOpenStore: () => void;
+  onResetProgress: () => void;
 }
 
 export class UIManager {
@@ -86,7 +88,6 @@ export class UIManager {
 
   // Background
   private bgImage!: Phaser.GameObjects.Image;
-  private darkOverlay!: Phaser.GameObjects.Rectangle;
   private flickerOverlay!: Phaser.GameObjects.Rectangle;
   private damageOverlay!: Phaser.GameObjects.Rectangle;
 
@@ -110,6 +111,7 @@ export class UIManager {
   private holdTimer?: Phaser.Time.TimerEvent;
   private lastMineTime = 0;
   private durFill?: Phaser.GameObjects.Rectangle;
+  private durLabel?: Phaser.GameObjects.Text;   // "N to collect" readout on the durability bar
 
   // Resource bar
   private resTexts: Map<string, Phaser.GameObjects.Text> = new Map();
@@ -169,6 +171,9 @@ export class UIManager {
 
   // Header extras
   private depthText!: Phaser.GameObjects.Text;
+
+  // Settings modal (built on demand; null while closed)
+  private settingsModal: Phaser.GameObjects.Container | null = null;
 
   constructor(scene: Phaser.Scene, state: GameState, cb: UICallbacks) {
     this.scene = scene;
@@ -270,7 +275,7 @@ export class UIManager {
     this.bgImage.setScale(coverScale);
 
     // Dark overlay so UI is readable on top of the yellow wallpaper
-    this.darkOverlay = this.scene.add.rectangle(
+    this.scene.add.rectangle(
       GAME_WIDTH / 2, GAME_HEIGHT / 2,
       GAME_WIDTH, GAME_HEIGHT,
       0x000000, 0.55,
@@ -342,6 +347,11 @@ export class UIManager {
     this.depthText = makeText(this.scene, cx, 76, this.depthLabel(), 18, '#8888CC', {
       fontStyle: 'bold',
     }).setOrigin(0.5, 0.5).setDepth(10);
+
+    // Settings button — top-right corner of the header card.
+    const settingsBtn = makeBtn(this.scene, LAYOUT.GAME_WIDTH - 78, 30, 'SETTINGS', 120, 36, 0x2a2a2a, () => this.openSettings());
+    (settingsBtn.getAt(1) as Phaser.GameObjects.Text).setFontSize(16);
+    settingsBtn.setDepth(12);
   }
 
   /**
@@ -388,7 +398,7 @@ export class UIManager {
     const res = this.state.floorOre.resource;
     this.resBarIcon = this.createIcon(cx - 50, y + 20, res, 80) ?? undefined;
     if (this.resBarIcon) this.resBarIcon.setDepth(11);
-    this.resBarText = makeText(this.scene, cx - 8, y + 6, `${this.state.resources[res] ?? 0}`, 24, '#DDDDDD', {
+    this.resBarText = makeText(this.scene, cx - 8, y + 6, `${fmt(this.state.resources[res] ?? D(0))}`, 24, '#DDDDDD', {
       fontStyle: 'bold',
     }).setOrigin(0, 0).setDepth(11);
   }
@@ -481,14 +491,20 @@ export class UIManager {
 
     panel.add([left, right]);
 
-    // Durability bar under the icon — fills as you chip the current ore node.
+    // Integrity bar under the icon — the node's HP. Starts full and DRAINS as you
+    // search it; when it empties you collect the resource and it refills (new node).
+    // Carries a centered "remaining / max" HP readout for transparency.
     const durW = 240;
-    const durBg = this.scene.add.rectangle(cx, iconCy + 168, durW, 12, 0x202a20).setDepth(16);
-    this.durFill = this.scene.add.rectangle(cx - durW / 2, iconCy + 168, 0, 12, 0xffcc44).setOrigin(0, 0.5).setDepth(17);
-    panel.add([durBg, this.durFill]);
+    const durH = 22;
+    const durBg = this.scene.add.rectangle(cx, iconCy + 168, durW, durH, 0x2a1212, 1).setDepth(16).setStrokeStyle(1, 0x4a2a2a);
+    this.durFill = this.scene.add.rectangle(cx - durW / 2, iconCy + 168, durW, durH, 0xffcc44).setOrigin(0, 0.5).setDepth(17);
+    this.durLabel = makeText(this.scene, cx, iconCy + 168, '', 13, '#FFFFFF', {
+      fontStyle: 'bold', stroke: '#000000', strokeThickness: 3,
+    }).setOrigin(0.5).setDepth(18);
+    panel.add([durBg, this.durFill, this.durLabel]);
 
     // Persistent hint under the icon.
-    this.hintText = makeText(this.scene, cx, iconCy + 196, 'Tap or hold to collect', 18, '#FFFFFF')
+    this.hintText = makeText(this.scene, cx, iconCy + 198, 'Tap or hold to search', 18, '#FFFFFF')
       .setOrigin(0.5).setDepth(16);
     panel.add(this.hintText);
 
@@ -511,9 +527,13 @@ export class UIManager {
 
   private startHoldExplore(): void {
     if (this.activeTab !== 'explore') return;
+    // Discrete press: always replay the pop animation, even if the throttle from a
+    // previous tap is still cooling down.
+    this.pulseShowcase(true);
     this.tryMine();
     this.holdTimer?.remove();
-    // Poll often; tryMine self-gates by the (upgradeable) cooldown.
+    // Poll often; tryMine self-gates by the (upgradeable) cooldown, and its pulses
+    // stay throttled so a held press doesn't jitter the icon.
     this.holdTimer = this.scene.time.addEvent({ delay: 40, loop: true, callback: () => this.tryMine() });
   }
 
@@ -536,14 +556,15 @@ export class UIManager {
     else if (s.canEscape()) this.cb.onEscape();                    // explored enough → descend to new floor
   }
 
-  private pulseShowcase(): void {
+  private pulseShowcase(force = false): void {
     if (!this.showcaseBig) return;
-    // Throttle: at high click speed taps fire faster than the animation lasts,
-    // which would restart it every frame and make the icon vibrate. Ignore extra
-    // taps until the current pulse has had time to settle — clicks still collect.
+    // Throttle: while HOLDING, ticks fire faster than the animation lasts, which
+    // would restart it every frame and make the icon vibrate. Ignore extra ticks
+    // until the current pulse has settled — mining still collects. A discrete tap
+    // passes force=true so every individual click re-pops the icon.
     const PULSE_THROTTLE_MS = 360;
     const now = this.scene.time.now;
-    if (now - this.lastPulseTime < PULSE_THROTTLE_MS) return;
+    if (!force && now - this.lastPulseTime < PULSE_THROTTLE_MS) return;
     this.lastPulseTime = now;
 
     const s = 320 / ICON_NATIVE;
@@ -557,6 +578,32 @@ export class UIManager {
       targets: this.showcaseBig, angle: [-5, 3, -1.5, 0],
       duration: 320, ease: 'Sine.easeInOut',
       onComplete: () => { if (this.showcaseBig) this.showcaseBig.angle = 0; },
+    });
+  }
+
+  /**
+   * Floating damage number on each search tap — the "big number" juice. A normal
+   * hit is a small white number; a lucky find (crit) is a large gold number that
+   * pops bigger and drifts higher.
+   */
+  showSearchHit(damage: Big, crit: boolean): void {
+    if (this.activeTab !== 'explore') return;
+    const cx = LAYOUT.CENTER_X + Phaser.Math.Between(-50, 50);
+    const cy = this.showcaseCenterY() + Phaser.Math.Between(-30, 10);
+    const label = crit ? `${fmt(damage)}!` : fmt(damage);
+    const mote = makeText(this.scene, cx, cy, label, crit ? 54 : 30, crit ? '#FFD24A' : '#FFFFFF', {
+      fontStyle: 'bold', stroke: '#000000', strokeThickness: crit ? 6 : 4,
+    }).setOrigin(0.5).setDepth(21);
+    this.panels.get('explore')?.add(mote);
+    this.scene.tweens.add({
+      targets: mote,
+      x: cx + Phaser.Math.Between(-40, 40),
+      y: cy - (crit ? 180 : 120),
+      alpha: { from: 1, to: 0 },
+      scale: crit ? { from: 1.35, to: 1 } : { from: 1, to: 0.9 },
+      duration: crit ? 950 : 680,
+      ease: 'Cubic.easeOut',
+      onComplete: () => mote.destroy(),
     });
   }
 
@@ -587,7 +634,7 @@ export class UIManager {
         const nameTxt = makeText(this.scene, 40, y, `${res.icon}  ${res.name}`, 22, '#EEEEEE');
         row.add(nameTxt);
       }
-      const countTxt = makeText(this.scene, 680, y + 2, `x${this.state.resources[resId] ?? 0}`, 22, '#FFD700', {
+      const countTxt = makeText(this.scene, 680, y + 2, `x${fmt(this.state.resources[resId] ?? D(0))}`, 22, '#FFD700', {
         fontStyle: 'bold',
       }).setOrigin(1, 0);
       row.add(countTxt);
@@ -691,7 +738,7 @@ export class UIManager {
       // Cost + buy button on same line
       const cost = this.state.getUpgradeCost(upg.id);
       const costRes = RESOURCES[upg.costResource];
-      const costTxt = makeText(this.scene, upgIcon ? 112 : 60, y + 50, `Cost: ${cost} ${costRes.icon}`, 16, '#CCCCCC');
+      const costTxt = makeText(this.scene, upgIcon ? 112 : 60, y + 50, `Cost: ${fmt(cost)} ${costRes.icon}`, 16, '#CCCCCC');
       this.upgCostLabels.set(upg.id, costTxt);
 
       const canBuy = this.state.canAffordUpgrade(upg.id);
@@ -1510,9 +1557,18 @@ export class UIManager {
       this.roomsLabel.setVisible(true).setText(`${Math.min(ore.required, Math.floor(s.exploration))} / ${ore.required}`);
     }
 
-    // Durability fill toward the next ore node.
+    // Integrity (node HP) bar — DRAINS as you search. Lerped so it glides, and
+    // tinted from amber → red as the node gets close to breaking.
+    const integ = s.nodeIntegrityMax;
+    const remaining = integ.sub(s.nodeDamage).max(0);
+    const remainPct = Math.max(0, Math.min(1, remaining.div(integ).toNumber()));
     if (this.durFill) {
-      this.durFill.width = 240 * Math.max(0, Math.min(1, s.nodeDamage / s.nodeDurabilityMax));
+      this.durFill.width = Phaser.Math.Linear(this.durFill.width, 240 * remainPct, 0.25);
+      this.durFill.setFillStyle(remainPct > 0.5 ? 0xffcc44 : remainPct > 0.25 ? 0xff9933 : 0xff5544);
+    }
+    // Explicit HP readout so it's clear how much is left to collect the resource.
+    if (this.durLabel) {
+      this.durLabel.setText(`${fmt(remaining)} / ${fmt(integ)}`);
     }
 
     // Right arrow (go deeper): GREEN only when you can descend into NEW territory
@@ -1565,7 +1621,7 @@ export class UIManager {
       }
     }
     if (this.resBarText) {
-      const count = this.state.resources[res] ?? 0;
+      const count = fmt(this.state.resources[res] ?? D(0));
       this.resBarText.setText(hasIcon ? `${count}` : `${RESOURCES[res].icon} ${count}`);
     }
     // Keep item counts in sync when viewing items tab
@@ -1575,7 +1631,7 @@ export class UIManager {
   refreshItemCounts(): void {
     for (const resId of RESOURCE_ORDER) {
       const txt = this.resTexts.get(`item_${resId}`);
-      if (txt) txt.setText(`x${this.state.resources[resId] ?? 0}`);
+      if (txt) txt.setText(`x${fmt(this.state.resources[resId] ?? D(0))}`);
     }
   }
 
@@ -1596,7 +1652,7 @@ export class UIManager {
         const cost = this.state.getUpgradeCost(upg.id);
         const costRes = RESOURCES[upg.costResource];
         costTxt.setText(
-          lvl >= upg.maxLevel ? 'MAXED' : `Cost: ${cost} ${costRes.icon}`,
+          lvl >= upg.maxLevel ? 'MAXED' : `Cost: ${fmt(cost)} ${costRes.icon}`,
         );
       }
 
@@ -1798,6 +1854,88 @@ export class UIManager {
       },
     );
     dismissBtn.setDepth(302);
+  }
+
+  /* ---- Settings modal ---- */
+
+  private openSettings(): void {
+    if (this.settingsModal) return;                       // already open
+    const { GAME_WIDTH, GAME_HEIGHT } = LAYOUT;
+    const cx = GAME_WIDTH / 2;
+    const cy = GAME_HEIGHT / 2;
+
+    RundotGameAPI.analytics.recordCustomEvent('settings_opened');
+    RundotGameAPI.triggerHapticAsync('light' as never);
+
+    // Container groups the modal for one-call teardown. Input still routes to the
+    // top-most object under the pointer, so the backdrop blocks the game beneath.
+    const modal = this.scene.add.container(0, 0).setDepth(310);
+
+    // Input-blocking backdrop (closes only via the X / CLOSE buttons).
+    const overlay = this.scene.add.rectangle(cx, cy, GAME_WIDTH, GAME_HEIGHT, 0x000000, 0.72).setInteractive();
+    modal.add(overlay);
+
+    const panelW = 560;
+    const panelH = 470;
+    const top = cy - panelH / 2;
+    const panel = this.scene.add.rectangle(cx, cy, panelW, panelH, 0x141414, 0.98)
+      .setStrokeStyle(2, 0x555555).setInteractive();
+    modal.add(panel);
+
+    modal.add(makeText(this.scene, cx, top + 34, 'SETTINGS', 30, '#FFFFFF', { fontStyle: 'bold' }).setOrigin(0.5));
+
+    // Close (X) — top-right corner of the panel.
+    modal.add(makeBtn(this.scene, cx + panelW / 2 - 32, top + 32, '✕', 40, 40, 0x442222, () => this.closeSettings()));
+
+    modal.add(this.scene.add.rectangle(cx, top + 66, panelW - 48, 1, 0x444444));
+
+    // ---- Credits / version ----
+    modal.add(makeText(this.scene, cx, top + 92, 'Backrooms Escape Idle', 22, '#FFD700', { fontStyle: 'bold' }).setOrigin(0.5));
+    modal.add(makeText(this.scene, cx, top + 122, 'Version 1.0.0', 16, '#AAAAAA').setOrigin(0.5));
+    modal.add(makeText(this.scene, cx, top + 150, 'Created by cbarker', 14, '#888888').setOrigin(0.5));
+
+    modal.add(this.scene.add.rectangle(cx, top + 186, panelW - 48, 1, 0x444444));
+
+    // ---- Reset progress ----
+    modal.add(makeText(this.scene, cx, top + 214, 'RESET PROGRESS', 20, '#FF8888', { fontStyle: 'bold' }).setOrigin(0.5));
+    modal.add(makeText(this.scene, cx, top + 244, 'Permanently erase your save and start over.', 14, '#999999', {
+      align: 'center', wordWrap: { width: panelW - 80 },
+    }).setOrigin(0.5));
+
+    // Confirmation row — hidden until RESET is tapped.
+    const confirmGroup = this.scene.add.container(0, 0).setVisible(false);
+    confirmGroup.add(makeText(this.scene, cx, top + 278, 'Erase everything? This cannot be undone.', 15, '#FFAAAA', {
+      align: 'center', fontStyle: 'bold',
+    }).setOrigin(0.5));
+    const yesBtn = makeBtn(this.scene, cx - 72, top + 314, 'YES, WIPE', 132, 44, 0x882222, () => {
+      this.closeSettings();
+      this.cb.onResetProgress();
+    });
+    (yesBtn.getAt(0) as Phaser.GameObjects.Rectangle).setStrokeStyle(2, 0xcc4444);
+    const noBtn = makeBtn(this.scene, cx + 72, top + 314, 'CANCEL', 132, 44, 0x333333, () => {
+      confirmGroup.setVisible(false);
+      resetBtn.setVisible(true);
+    });
+    confirmGroup.add([yesBtn, noBtn]);
+
+    const resetBtn = makeBtn(this.scene, cx, top + 300, 'RESET', 220, 48, 0x662222, () => {
+      resetBtn.setVisible(false);
+      confirmGroup.setVisible(true);
+    });
+    (resetBtn.getAt(0) as Phaser.GameObjects.Rectangle).setStrokeStyle(2, 0xaa4444);
+    modal.add(resetBtn);
+    modal.add(confirmGroup);
+
+    // ---- Close (bottom) ----
+    modal.add(makeBtn(this.scene, cx, top + panelH - 36, 'CLOSE', 200, 46, 0x2a2a2a, () => this.closeSettings()));
+
+    this.settingsModal = modal;
+  }
+
+  private closeSettings(): void {
+    if (!this.settingsModal) return;
+    this.settingsModal.destroy(true);                     // destroy children too
+    this.settingsModal = null;
   }
 
   /* ---- Level change ---- */

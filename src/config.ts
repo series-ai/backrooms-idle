@@ -21,5 +21,4 @@ export const LAYOUT = {
 
 export const TICK_INTERVAL_MS = 1500;
 export const SAVE_INTERVAL_MS = 30000;
-export const MAX_LOG_MESSAGES = 25;
 export const MAX_OFFLINE_TICKS = 2000;
