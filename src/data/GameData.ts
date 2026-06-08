@@ -39,7 +39,7 @@ export interface EntityDef {
   defeatMessage: string;
 }
 
-export type UpgradeEffect = 'cooldown' | 'power' | 'autoMine' | 'bonusOre';
+export type UpgradeEffect = 'cooldown' | 'power' | 'autoMine' | 'bonusOre' | 'flatPower' | 'critChance' | 'autoCapture' | 'hypeDuration';
 
 /* ------------------------------------------------------------------ */
 /*  Floor ores — each level is ONE ore you mine toward a target.       */
@@ -67,13 +67,28 @@ export interface FloorOre {
   durability: number; // taps to break ONE ore node (before Mining Power)
 }
 
+// Node HP per floor. The first few are hand-tuned to keep an early difficulty
+// spike; past the table, HP grows by a gentle per-floor multiplier (HP_GROWTH)
+// so the curve scales forever WITHOUT the exponential "doubling wall". Pure ×2
+// outran the player's power; ×1.5 keeps numbers climbing into the millions while
+// staying roughly in reach (paired with multiplicative power upgrades).
+//                        f0   f1   f2   f3    f4
+const NODE_HP: number[] = [10, 30, 60, 120, 250];   // hand-tuned intro
+const HP_GROWTH = 1.5;                               // per-floor multiplier for the tail (the knob)
+
+export function floorHp(levelId: number): number {
+  if (levelId >= 0 && levelId < NODE_HP.length) return NODE_HP[levelId];
+  const lastIdx = NODE_HP.length - 1;
+  return Math.round(NODE_HP[lastIdx] * Math.pow(HP_GROWTH, levelId - lastIdx));
+}
+
 export function getFloorOre(levelId: number): FloorOre {
   const n = ORE_SEQUENCE.length;
   return {
     resource: ORE_SEQUENCE[levelId % n],
     tier: Math.floor(levelId / n) + 1,  // every full lap of the list bumps the tier
     required: 10 + levelId * 20,        // Floor 0: 10, Floor 1: 30, Floor 2: 50, ...
-    durability: 10 + levelId,           // node HP: Floor 0 (Almond Water) = 10, deeper = tougher
+    durability: floorHp(levelId),       // node HP — hand-tuned per floor (NODE_HP)
   };
 }
 
@@ -123,6 +138,12 @@ export interface UpgradeDef {
   effectUnit: string;
   costResource: string;
   effect: UpgradeEffect;
+  // When true, the cost resource cycles through ORE_SEQUENCE by level (level N is
+  // paid in ORE_SEQUENCE[N]) instead of always using costResource.
+  costResourceCycle?: boolean;
+  // If set, the upgrade stays hidden ("?????? Locked") until this floor index has
+  // been unlocked — progressively revealing upgrades as the player descends.
+  unlockFloor?: number;
 }
 
 export interface VoidUpgradeDef {
@@ -142,6 +163,15 @@ export const RESOURCES: Record<string, ResourceDef> = {
     name: 'Almond Water',
     icon: '\u{1F4A7}',
     description: 'Upgrades Sharp Instinct (find more often).',
+    usable: false,
+  },
+  // Not floor-based: a moth flutters across the explore screen now and then;
+  // click it to collect one. A constant, always-available rare.
+  moth: {
+    id: 'moth',
+    name: 'Moth',
+    icon: '\u{1F98B}',
+    description: 'Caught fluttering through the halls. Rare, and not tied to any floor.',
     usable: false,
   },
   canned_food: {
@@ -224,7 +254,7 @@ export const RESOURCES: Record<string, ResourceDef> = {
 
 // The Items menu lists exactly the explorable resources. firesalt / level_keys
 // are no longer resources (they're dormant tools), so they're not shown here.
-export const RESOURCE_ORDER = [...ORE_SEQUENCE];
+export const RESOURCE_ORDER = [...ORE_SEQUENCE, 'moth'];
 
 export const ENTITIES: Record<string, EntityDef> = {
   smiler: {
@@ -392,6 +422,51 @@ export const UPGRADES: UpgradeDef[] = [
     description: 'A drone auto searches for resources every 1s (+1 per level)',
     baseCost: 5, costMultiplier: 1.2, maxLevel: 15,
     effectPerLevel: 1, effectUnit: '/s', costResource: 'almond_water', effect: 'autoMine',
+  },
+  // Spend Moths (the click-to-catch rare). Each level adds +2 to BOTH tap and
+  // auto search power. Cost = round(5 × 1.4^level): 5,7,10,…,283 at level 13.
+  {
+    id: 'moth_powers', name: 'Moth Powers', icon: '\u{1F98B}',
+    description: '+2 auto search & tap power per level (+2 per level)',
+    baseCost: 5, costMultiplier: 1.4, maxLevel: 15,
+    effectPerLevel: 2, effectUnit: ' power', costResource: 'moth', effect: 'flatPower',
+  },
+  // Paid in a DIFFERENT floor resource each level (cycles all 31), cost
+  // round(100 × 1.3^level): 100 Almond Water, 130 Wallpaper Strip, … 1792 Batteries
+  // at L12, up to L31. Each level: +5 to both tap and auto search power.
+  {
+    id: 'master_scav', name: 'Master Scav', icon: '\u{1F392}',
+    description: '+5 auto search & tap power per level (+5 per level)',
+    baseCost: 100, costMultiplier: 1.3, maxLevel: 31,
+    effectPerLevel: 5, effectUnit: ' power', costResource: 'almond_water', effect: 'flatPower',
+    costResourceCycle: true,
+  },
+  // Tap-ONLY power (effect 'power' adds to clickPower, not auto). Cost = round(5 ×
+  // 1.2^level) in Wallpaper Strip — same curve as Auto Explore: 5,6,7,9,10,…,64.
+  {
+    id: 'sharp_eye', name: 'Sharp Eye', icon: '\u{1F441}\u{FE0F}',
+    description: '+1 tap power per level',
+    baseCost: 5, costMultiplier: 1.2, maxLevel: 15,
+    effectPerLevel: 1, effectUnit: ' tap power', costResource: 'wallpaper_strip', effect: 'power',
+    unlockFloor: 1,   // hidden until the player reaches the Wallpaper Strip floor
+  },
+  // Chance to auto-capture a passing moth (no click needed). Cost = round(30 ×
+  // 1.2^level) in Wallpaper Strip: 30,36,43,…  Locked until floor 1 (its resource).
+  {
+    id: 'trapper', name: 'Trapper', icon: '\u{1FAA4}',
+    description: '+1% auto-capture chance per level',
+    baseCost: 30, costMultiplier: 1.2, maxLevel: 50,
+    effectPerLevel: 1, effectUnit: '% auto-capture', costResource: 'wallpaper_strip', effect: 'autoCapture',
+    unlockFloor: 1,
+  },
+  // Extends the hype buff duration. Cost = round(50 × 1.3^level) in Carpet Swatch:
+  // 50,65,85,110,…  Locked until floor 2 (its resource).
+  {
+    id: 'rally_cry', name: 'Rally Cry', icon: '\u{1F4E3}',
+    description: '+0.5s Explorer hype duration per level',
+    baseCost: 50, costMultiplier: 1.3, maxLevel: 30,
+    effectPerLevel: 0.5, effectUnit: 's hype', costResource: 'carpet_swatch', effect: 'hypeDuration',
+    unlockFloor: 2,
   },
 ];
 

@@ -1,6 +1,7 @@
 import {
   UPGRADES,
   RESOURCES,
+  ORE_SEQUENCE,
   VOID_UPGRADES,
   PRESTIGE_TIERS,
   ABILITIES,
@@ -73,6 +74,7 @@ export interface SaveData {
   scavengersKitOwned: boolean;
   // Preferences
   autoEscape: boolean;
+  hideMaxedUpgrades?: boolean;
 }
 
 export interface GameStats {
@@ -93,6 +95,8 @@ export interface GameEvent {
 
 export interface TickResult {
   events: GameEvent[];
+  autoDamage?: Big;         // auto-search damage dealt this tick (for a floating number)
+  autoCrit?: boolean;       // whether that auto-search was a lucky find (crit)
 }
 
 /** Result of one active tap on the node: damage dealt + whether it was a lucky find (crit). */
@@ -172,6 +176,7 @@ export class GameState {
 
   // Preferences
   autoEscape = true;
+  hideMaxedUpgrades = false;
 
   constructor() {
     for (const key of Object.keys(RESOURCES)) {
@@ -206,14 +211,13 @@ export class GameState {
   get nodeDurabilityMax(): number { return Math.max(1, this.floorOre.durability); }
 
   /* ---- Integrity (node HP) — the active "feel" layer ----------------- *
-   * Both the node's Integrity pool AND your search power are multiplied by
-   * the SAME per-floor magnitude factor. The ratio (taps-to-break) is therefore
-   * unchanged from the raw durability balance, but the on-screen numbers grow
-   * into the thousands/millions as you descend — the big-number dopamine of an
-   * idle clicker. Backed by Big, so the growth is genuinely unbounded (no
-   * safe-integer ceiling, no clamp). */
+   * Node HP is now hand-authored per floor (see floorHp/NODE_HP in GameData), so
+   * the displayed Integrity is exactly the tuned value. The magnitude multiplier
+   * below is neutralized (growth 1 → nodeScale always 1): HP = durability and tap
+   * damage = power, both clean integers. (Kept as a seam in case a separate
+   * cosmetic magnitude is wanted later.) */
   private static readonly SCALE_BASE = 1;
-  private static readonly SCALE_GROWTH = 1.45;
+  private static readonly SCALE_GROWTH = 1;
 
   /** Magnitude multiplier for the current floor (drives how big the numbers look). */
   get nodeScale(): Big {
@@ -235,13 +239,24 @@ export class GameState {
     return this.autoMineRate.mul(this.nodeScale);
   }
 
-  /** Chance a tap is a "lucky find" (crit). Boosted by the Lucky Find upgrade. */
+  /**
+   * Chance a search is a "lucky find" (crit). Base 0% — granted only by
+   * crit-chance upgrades (effect 'critChance', value in % per level). Capped 60%.
+   */
   get critChance(): number {
-    return Math.min(0.6, 0.12 + this.bonusOreChance * 0.5);
+    return Math.min(0.6, this.sumEffect('critChance') / 100);
   }
 
   /** Damage multiplier on a lucky find. */
-  get critMult(): number { return 5; }
+  get critMult(): number { return 3; }
+
+  /** Average damage multiplier from crits (used to fold crits into offline auto). */
+  get critMultiplierAvg(): number { return 1 + this.critChance * (this.critMult - 1); }
+
+  /** Chance (0–1) a passing moth is auto-captured without a click — from Trapper. */
+  get autoCaptureChance(): number {
+    return Math.min(1, this.sumEffect('autoCapture') / 100);
+  }
 
   /* ---- Node respawn ---- *
    * After a node breaks it doesn't refill instantly — there's a short delay
@@ -266,6 +281,54 @@ export class GameState {
     }
   }
 
+  /* ---- Hype (timed auto-search boost) ---- *
+   * Every cooldown the runner can be tapped to enter HYPE: a big temporary
+   * multiplier on auto-search. All three numbers are upgradable later. */
+  private static readonly HYPE_COOLDOWN_MS = 120_000;   // 2 min
+  private static readonly HYPE_DURATION_MS = 15_000;    // 15 s
+  hypeCooldownMsLeft = GameState.HYPE_COOLDOWN_MS;      // counts down; at 0 hype is available
+  hypeAvailable = false;                                // prompt showing, awaiting activation
+  hypeActiveMsLeft = 0;                                 // >0 while the buff is running
+
+  get hypeActive(): boolean { return this.hypeActiveMsLeft > 0; }
+  get hypeMultiplier(): number { return 3; }                          // upgradable later
+  /** Buff length: base 15s + 0.5s per Rally Cry level (effect in seconds). */
+  get hypeDuration(): number { return GameState.HYPE_DURATION_MS + this.sumEffect('hypeDuration') * 1000; }
+  get hypeCooldown(): number { return GameState.HYPE_COOLDOWN_MS; }   // upgradable later
+
+  /**
+   * Advance hype timers (per frame). Returns the transitions the UI reacts to:
+   * becameAvailable → show the HYPE! prompt; ended → drop the buff visuals.
+   */
+  advanceHype(deltaMs: number): { becameAvailable: boolean; ended: boolean } {
+    let becameAvailable = false;
+    let ended = false;
+    if (this.hypeActiveMsLeft > 0) {
+      this.hypeActiveMsLeft -= deltaMs;
+      if (this.hypeActiveMsLeft <= 0) {
+        this.hypeActiveMsLeft = 0;
+        ended = true;
+        this.hypeCooldownMsLeft = this.hypeCooldown;   // recharge after the buff ends
+      }
+    } else if (!this.hypeAvailable) {
+      this.hypeCooldownMsLeft -= deltaMs;
+      if (this.hypeCooldownMsLeft <= 0) {
+        this.hypeCooldownMsLeft = 0;
+        this.hypeAvailable = true;
+        becameAvailable = true;
+      }
+    }
+    return { becameAvailable, ended };
+  }
+
+  /** Activate the hype buff if it's available. */
+  activateHype(): boolean {
+    if (!this.hypeAvailable || this.hypeActive) return false;
+    this.hypeAvailable = false;
+    this.hypeActiveMsLeft = this.hypeDuration;
+    return true;
+  }
+
   getUpgradeLevel(id: string): number {
     return this.upgrades[id] ?? 0;
   }
@@ -279,11 +342,32 @@ export class GameState {
     return D(def.baseCost).mul(D(def.costMultiplier).pow(this.getUpgradeLevel(id))).add(0.5).floor();
   }
 
+  /**
+   * Which resource the NEXT level is paid in. Usually fixed (def.costResource),
+   * but cycling upgrades (Master Scav) draw from a different floor resource each
+   * level: level N → ORE_SEQUENCE[N].
+   */
+  getUpgradeCostResource(id: string): string {
+    const def = UPGRADES.find((u) => u.id === id);
+    if (!def) return '';
+    if (def.costResourceCycle) return ORE_SEQUENCE[this.getUpgradeLevel(id) % ORE_SEQUENCE.length];
+    return def.costResource;
+  }
+
+  /** Locked upgrades stay hidden until their unlockFloor has been reached. */
+  isUpgradeUnlocked(id: string): boolean {
+    const def = UPGRADES.find((u) => u.id === id);
+    if (!def || def.unlockFloor == null) return true;
+    return this.unlockedLevels.includes(def.unlockFloor);
+  }
+
   canAffordUpgrade(id: string): boolean {
     const def = UPGRADES.find((u) => u.id === id);
     if (!def) return false;
+    if (!this.isUpgradeUnlocked(id)) return false;
     if (this.getUpgradeLevel(id) >= def.maxLevel) return false;
-    return (this.resources[def.costResource] ?? D(0)).gte(this.getUpgradeCost(id));
+    const res = this.getUpgradeCostResource(id);
+    return (this.resources[res] ?? D(0)).gte(this.getUpgradeCost(id));
   }
 
   /** True if any (non-maxed) upgrade is currently affordable — drives the tab alert dot. */
@@ -294,7 +378,8 @@ export class GameState {
   buyUpgrade(id: string): boolean {
     const def = UPGRADES.find((u) => u.id === id);
     if (!def || !this.canAffordUpgrade(id)) return false;
-    this.resources[def.costResource] = (this.resources[def.costResource] ?? D(0)).sub(this.getUpgradeCost(id));
+    const res = this.getUpgradeCostResource(id);
+    this.resources[res] = (this.resources[res] ?? D(0)).sub(this.getUpgradeCost(id));
     this.upgrades[id] = this.getUpgradeLevel(id) + 1;
     return true;
   }
@@ -317,29 +402,33 @@ export class GameState {
     return total;
   }
 
-  // Multiplicative + uncapped: each level multiplies, so the next purchase always
-  // matters and exploration visibly accelerates. Returned as Big since it compounds.
-  private upgradeMult(effect: string): Big {
-    let m = D(1);
+  /** Sum effectPerLevel × level across all upgrades with a given effect. */
+  private sumEffect(effect: string): number {
+    let s = 0;
     for (const u of UPGRADES) {
-      if (u.effect === effect) {
-        const lvl = this.getUpgradeLevel(u.id);
-        if (lvl > 0) m = m.mul(D(1 + u.effectPerLevel / 100).pow(lvl));
-      }
+      if (u.effect === effect) s += u.effectPerLevel * this.getUpgradeLevel(u.id);
     }
-    return m;
+    return s;
   }
 
-  /** Search power multiplier per tap (before the floor magnitude scale). */
-  get clickPower(): Big { return this.upgradeMult('power'); }
+  /** Flat power added to BOTH tap and auto/sec (Moth Powers +2/lvl, Master Scav +5/lvl). */
+  get flatPower(): number { return this.sumEffect('flatPower'); }
+  /** Tap-only power (Sharp Eye +1/lvl). */
+  get tapPower(): number { return this.sumEffect('power'); }
+
+  /** Search power per tap (before the floor magnitude scale). Base 1 + flat + tap-only. */
+  get clickPower(): Big { return D(1 + this.flatPower + this.tapPower); }
+
+  /** Auto-searches per SECOND: +1/level Auto Explore plus flat-power upgrades (NOT tap-only). */
+  get autoPerSecond(): number {
+    return this.getUpgradeLevel('auto_explore') + this.flatPower;
+  }
   /**
-   * Idle searches per TICK (before the floor magnitude scale).
-   * Driven entirely by Auto Explore: each level = +1 auto-search per second
-   * (independent of click/tap power), so a fresh game (level 0) has none.
-   * Converted from per-second to per-tick for the tick cadence.
+   * Idle searches per TICK (before the floor magnitude scale). Converted from the
+   * per-second auto rate for the tick cadence; a fresh game (no upgrades) is 0.
    */
   get autoMineRate(): Big {
-    return D(this.getUpgradeLevel('auto_explore')).mul(TICK_INTERVAL_MS / 1000);
+    return D(this.autoPerSecond).mul(TICK_INTERVAL_MS / 1000);
   }
   /** Cooldown (ms) between taps — lowered by Mining Speed / Swift Hands. */
   get mineCooldownMs(): number {
@@ -418,6 +507,12 @@ export class GameState {
     this.nodeDamage = this.nodeDamage.add(damage);
     this.resolveNode(events);
     return { events, damage, crit, struck: true };
+  }
+
+  /** Collect one Moth (the floor-independent click-to-catch rare). */
+  collectMoth(): void {
+    this.resources['moth'] = (this.resources['moth'] ?? D(0)).add(1);
+    this.stats.resourcesFound += 1;
   }
 
   /**
@@ -536,10 +631,17 @@ export class GameState {
   processTick(): TickResult {
     const events: GameEvent[] = [];
     const lvl = this.level;
+    let autoCrit = false;
+    let autoDamage: Big | undefined;
 
-    // 1. Idle auto-search (drone). Skipped while a node is respawning.
+    // 1. Idle auto-search (drone). Skipped while a node is respawning. The batch
+    //    can roll a lucky find (crit) just like a manual tap — same chance/×.
     if (!this.isRespawning) {
-      this.nodeDamage = this.nodeDamage.add(this.autoSearchPower);
+      autoCrit = Math.random() < this.critChance;
+      const hypeMult = this.hypeActive ? this.hypeMultiplier : 1;
+      const dmg = this.autoSearchPower.mul(autoCrit ? this.critMult : 1).mul(hypeMult);
+      if (dmg.gt(0)) autoDamage = dmg;   // only surface a number when the drone is active
+      this.nodeDamage = this.nodeDamage.add(dmg);
       this.resolveNode(events);
     }
 
@@ -550,7 +652,7 @@ export class GameState {
       events.push({ type: 'ambient', message: msgs[Math.floor(Math.random() * msgs.length)], color: lvl.textColor });
     }
 
-    return { events };
+    return { events, autoDamage, autoCrit };
   }
 
   /* ---- Gear drops & equipping ---- */
@@ -773,15 +875,17 @@ export class GameState {
     if (ticks <= 0) return { events, summary };
 
     // Drone-only while offline. Each resource takes one fill + one respawn:
-    //   fill time = Integrity / auto-damage-per-sec = durability / autoLevel  (the
-    //   floor magnitude cancels), plus the respawn delay. Count whole cycles that
-    //   fit in the elapsed (capped) time.
-    const autoLevel = this.getUpgradeLevel('auto_explore');
-    if (autoLevel <= 0) { this.explorationPerLevel[this.currentLevel] = this.exploration; return { events, summary }; }
+    //   fill time = Integrity / auto-damage-per-sec = durability / autoPerSecond
+    //   (the floor magnitude cancels), plus the respawn delay. Count whole cycles
+    //   that fit in the elapsed (capped) time.
+    const autoRate = this.autoPerSecond;
+    if (autoRate <= 0) { this.explorationPerLevel[this.currentLevel] = this.exploration; return { events, summary }; }
 
     const ore = this.floorOre;
     const elapsedSec = ticks * 1.5;                       // capped ticks → seconds
-    const fillSec = this.nodeDurabilityMax / autoLevel;   // seconds to drain one node
+    // Fold the average crit bonus into the auto rate so offline matches live.
+    const effRate = autoRate * this.critMultiplierAvg;
+    const fillSec = this.nodeDurabilityMax / effRate;     // seconds to drain one node
     const cycleSec = fillSec + this.nodeRespawnTime / 1000;
     const count = Math.floor(elapsedSec / cycleSec);
     if (count > 0) {
@@ -972,6 +1076,7 @@ export class GameState {
       scavengersKitOwned: this.scavengersKitOwned,
       // Preferences
       autoEscape: this.autoEscape,
+      hideMaxedUpgrades: this.hideMaxedUpgrades,
     };
   }
 
@@ -1045,6 +1150,7 @@ export class GameState {
 
     // Preferences
     this.autoEscape = data.autoEscape ?? true;
+    this.hideMaxedUpgrades = data.hideMaxedUpgrades ?? false;
 
     // Recalculate max HP/Sanity from both void and run upgrades
     this.maxHealth = Math.max(this.maxHealth, this.baseMaxHealth + this.getUpgradeLevel('tough_body') * 10);

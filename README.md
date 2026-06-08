@@ -40,22 +40,40 @@ You're not mining — you're **searching**. Every floor has one resource hidden 
 
 <img src="public/icons/resources/wallpaper_strip.png" width="40" align="left" hspace="8">
 
-1. **Tap or hold** the central icon to *search*. Each tap deals **Search Power** to the node's Integrity and pops a floating damage number.
-2. **Lucky Finds (crits)** occasionally land for ×5 — a big gold number.
-3. When Integrity hits zero, the node **breaks** → you collect the resource (+1, sometimes +2) and it refills.
-4. Spend resources on **upgrades** (faster taps, more power, auto-search, better luck), descend via the **▶** arrow once you've explored enough, and do it all again — deeper, with bigger numbers.
-5. Hit a wall? **Rewind** (prestige) for permanent **Void** bonuses and start the climb over, stronger.
+1. **Tap or hold** the central icon to *search*. Each tap deals **Search Power** to the node's Integrity and pops a floating damage number. (Every distinct tap counts — no cooldown; holding auto-repeats.)
+2. **Lucky Finds (crits)** multiply a hit **×3** — a big gold number. Crit chance starts at **0%** and is raised by upgrades; crits fire on **both taps and the auto-drone**.
+3. When Integrity hits zero, the node **breaks** → you collect the resource, then it **respawns after a short delay** before the next appears (so you actually see it drop to zero).
+4. Spend resources on **upgrades** (see below). Most are **hidden as `??????` until you descend deep enough to reveal them** — a gentle drip of new toys.
+5. Watch for the occasional **moth** that flutters across the screen — click it (or auto-catch it with *Trapper*) for a rare **Moth**. It's the one resource not tied to a floor.
+6. Every couple minutes your **Explorer** offers **HYPE!** — tap him to trigger a timed **×3 auto-search** burst (he literally sprints faster).
+7. Descend via the **▶** arrow once you've explored enough; hit a wall? **Rewind** (prestige) for permanent **Void** bonuses and climb again, stronger.
 
-### Why the numbers feel good
+### How node HP scales
 
-The node's Integrity *and* your Search Power are multiplied by the **same per-floor magnitude scale**. That means **taps-to-break stays balanced** at every depth, but the on-screen numbers grow into the thousands → millions → billions → and far beyond. The drama is real growth, not busywork.
+Node HP is **hand-tuned for the first few floors** (to keep an early difficulty spike), then grows by a gentle **×1.5 per floor** for the infinite tail:
 
-| Layer | Icons |
-|---|---|
-| **Search upgrades** | <img src="public/icons/upgrades/quick_feet.png" width="32"> <img src="public/icons/upgrades/sharp_eyes.png" width="32"> <img src="public/icons/upgrades/scavenger.png" width="32"> <img src="public/icons/upgrades/quiet_steps.png" width="32"> |
-| **Abilities** | <img src="public/icons/abilities/scavenge.png" width="32"> <img src="public/icons/abilities/barricade.png" width="32"> <img src="public/icons/abilities/signal_flare.png" width="32"> |
-| **Prestige / Void** | <img src="public/icons/prestige/void_fragment.png" width="32"> <img src="public/icons/prestige/void_shard.png" width="32"> <img src="public/icons/prestige/rewind_button.png" width="32"> <img src="public/icons/prestige/depth_counter.png" width="32"> |
-| **Threats** *(returning soon)* | <img src="public/icons/entities/smiler.png" width="32"> <img src="public/icons/entities/hound.png" width="32"> <img src="public/icons/entities/skin_stealer.png" width="32"> <img src="public/icons/entities/partygoer.png" width="32"> <img src="public/icons/entities/the_wretched.png" width="32"> |
+| Floor | 0 | 1 | 2 | 3 | 4 | 5 | 10 | 20 | 30 |
+|---|---|---|---|---|---|---|---|---|---|
+| **HP** | 10 | 30 | 60 | 120 | 250 | 375 | ~2.8K | ~164K | ~9.5M |
+
+HP is the **displayed value directly** (no hidden magnitude multiplier), and one search removes your **Search Power** in the same units — so `taps-to-break = HP ÷ power`.
+
+> **Balance principle:** a pure ×2 ("doubling") curve outruns additive power and walls into boredom fast. **×1.5** keeps the numbers climbing into the millions/billions for the big-number payoff while staying reachable — *provided power upgrades scale multiplicatively* to keep pace (the planned "other half" of balance). The curve is one knob: `NODE_HP` (the tuned intro) + `HP_GROWTH` in [`src/data/GameData.ts`](src/data/GameData.ts).
+
+### Upgrades
+
+The upgrade roster is being rebuilt from scratch. Each upgrade is a small data entry in `UPGRADES` (`src/data/GameData.ts`); costs follow `round(base × mult^level)`, and an upgrade can declare extras like `unlockFloor` (progressive reveal) or `costResourceCycle` (a different resource each level).
+
+| Upgrade | Effect | Cost resource |
+|---|---|---|
+| **Auto Explore** | +1 auto-search/sec per level (the drone) | Almond Water |
+| **Sharp Eye** | +1 tap power per level | Wallpaper Strip *(unlocks floor 1)* |
+| **Trapper** | +1% moth auto-capture per level | Wallpaper Strip *(unlocks floor 1)* |
+| **Rally Cry** | +0.5s hype duration per level | Carpet Swatch *(unlocks floor 2)* |
+| **Moth Powers** | +2 tap **&** auto power per level | Moths |
+| **Master Scav** | +5 tap **&** auto power per level | **cycles all 31 floor resources** |
+
+Power comes in channels that stack: **tap-only** (`power`), **tap + auto** (`flatPower`), plus standalone systems — **crit** (`critChance`/×mult), **auto-capture**, and **hype** (multiplier / duration / cooldown). All are summed generically, so new upgrades just add their `effect`. The **Stats** menu (top-left) surfaces the live totals.
 
 There are **31 hand-authored floors** that cycle forever — every full lap bumps the *tier* (a new color-grade + tougher danger), so the world re-skins itself endlessly with the same beloved locations.
 
@@ -153,19 +171,23 @@ Saves live in the SDK's `appStorage` under the key **`backrooms_save`** (offline
 
 ## 🗺️ Roadmap & Ideas
 
-The foundation (endless economy, prestige, gear, crafting, shop scaffolding) is in. The big-number migration means **none of this has a ceiling** — we can crank growth as steep as we want.
+**Done so far** (the active redesign)
+- ✅ Search/Integrity core loop with a **node respawn** lifecycle and clean hand-tuned HP + ×1.5 tail.
+- ✅ Rebuilt **upgrade system** (data-driven, progressive `unlockFloor` reveal, cycling cost resources, hide-maxed toggle).
+- ✅ **Crit** system (tap + auto, upgrade-gated), **Hype** burst, the **moth** collectible + auto-capture, **Stats** menu, per-tab alert dots, the running **Explorer** sprite.
 
 **Near-term**
-- [ ] **Scaling ore yield** — make a node break grant *more than +1* via upgrades/power-ups, so resource counts genuinely climb into big-number territory (the inventory is already `Big`-ready; just make `gain` scale in `resolveNode()`).
-- [ ] **Monsters / danger layer** — a *noise* meter that fills as you search loudly; max it and an **entity** interrupts you (avoid / flee / fight). Art for new threats is already staged (`clump`, `doll_face`, `moth`, `scrambles`, `corpus_vitis`, `lucky_crane`, `elevator`).
-- [ ] **Node modifiers** — *Buried* (flat damage reduction) and *Shrouded* (% reduction) on deeper floors, giving upgrades a clear counter-target (the "armor" layer of the mining-game genre, reskinned).
-- [ ] **Boss monsters** guarding milestone floors (e.g. ~Level 20) — a gate you must out-power, the eventual home of the attack/flee mechanic.
+- [ ] **The "other half" of balance** — *multiplicative* power upgrades (e.g. +%/level or ×per-tier) and/or prestige multipliers so power keeps pace with the ×1.5 HP curve (constant time-per-floor = no wall). The flat `+N` upgrades are early boosters only.
+- [ ] **Scaling resource yield** — make a node break grant *more than +1* via upgrades, so inventories climb into big-number territory (`gain` in `resolveNode()`).
+- [ ] **Monsters / danger layer** — a *noise* meter that fills as you search loudly; max it and an **entity** interrupts you. Threat art is staged (`clump`, `doll_face`, `moth`, `scrambles`, `corpus_vitis`, `lucky_crane`, `elevator`).
+- [ ] **Node modifiers** — *Buried* / *Shrouded* armor on deeper floors, giving upgrades a counter-target.
+- [ ] **Boss monsters** guarding milestone floors — a gate you must out-power.
 
 **Later**
-- [ ] New equipment & active tools (`combat_knife`, `crowbar`, `vhs_camera`, `watch` art is staged).
-- [ ] Deeper prestige tree / void upgrades tuned around big-number pacing.
+- [ ] Weapon-tier visuals for the Explorer (pistol → gun → shotgun → AR run cycles tied to tap-damage) and hired companions; new equipment (`combat_knife`, `crowbar`, `vhs_camera`, `watch` art staged).
+- [ ] Deeper prestige / void tree tuned around big-number pacing.
 - [ ] Settings polish, achievements, leaderboard (RUN.game SDK), monetization pass.
-- [ ] Repo hygiene: rename package, drop unused template deps.
+- [ ] UI/button cleanup; repo hygiene (rename package, drop unused template deps).
 
 > **Design principles:** focused, shippable slices over big rewrites. Keep `taps-to-break` balanced when scaling magnitudes. Theme is **searching / scavenging / sneaking**, *not* attacking — combat arrives with the monster layer.
 

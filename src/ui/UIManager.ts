@@ -67,6 +67,8 @@ export interface UICallbacks {
   onHeal: () => void;
   onEat: () => void;
   onSearch: () => void;
+  onCollectMoth: () => void;
+  onActivateHype: () => void;
   onBuyUpgrade: (id: string) => void;
   onEscape: () => void;
   onTravel: (levelId: number) => void;
@@ -75,6 +77,7 @@ export interface UICallbacks {
   onBuyVoidUpgrade: (id: string) => void;
   onUseAbility: (id: string) => void;
   onToggleAutoEscape: () => void;
+  onToggleHideMaxed: () => void;
   onCraft: (recipeId: string) => void;
   onBuyShopItem: (itemId: string) => void;
   onOpenStore: () => void;
@@ -109,6 +112,8 @@ export class UIManager {
   private buddySuit = 1;
   /** What the avatar is currently doing — drives click interactions. */
   private buddyState: 'run' | 'stand' | 'chat' = 'run';
+  /** Bouncing "HYPE!" prompt above the runner (shown when hype is available). */
+  private hypePrompt?: Phaser.GameObjects.Container;
   /** Static frame for the idle "stand00" pose. */
   private static readonly BUDDY_STAND_FRAME = 56;
   private lastPulseTime = 0;                           // throttles the tap pulse animation
@@ -118,6 +123,9 @@ export class UIManager {
   private roomsLabel!: Phaser.GameObjects.Text;
   private exploreBtnZone?: Phaser.GameObjects.Rectangle;
   private holdTimer?: Phaser.Time.TimerEvent;
+  // Wandering moth collectible: at most one in flight; self-rescheduling spawner.
+  private mothTimer?: Phaser.Time.TimerEvent;
+  private activeMoth?: Phaser.GameObjects.Image;
   private durFill?: Phaser.GameObjects.Rectangle;
   private durLabel?: Phaser.GameObjects.Text;   // "N to collect" readout on the durability bar
 
@@ -140,6 +148,8 @@ export class UIManager {
   private upgCostLabels: Map<string, Phaser.GameObjects.Text> = new Map();
   private upgCostIcons: Map<string, Phaser.GameObjects.Image> = new Map();
   private upgLvlLabels: Map<string, Phaser.GameObjects.Text> = new Map();
+  private upgNameLabels: Map<string, Phaser.GameObjects.Text> = new Map();
+  private upgDescLabels: Map<string, Phaser.GameObjects.Text> = new Map();
   private upgBuyBg: Map<string, Phaser.GameObjects.Rectangle> = new Map();
   // Upgrade list: each row is a self-contained container; relayoutUpgrades()
   // stacks the visible ones. This scales to any number of upgrades and supports
@@ -147,7 +157,7 @@ export class UIManager {
   private upgRows: Map<string, Phaser.GameObjects.Container> = new Map();
   private upgScroll?: Phaser.GameObjects.Container;
   private upgMinScroll = 0;
-  private hideMaxedUpgrades = false;
+  private hideMaxedBtn?: Phaser.GameObjects.Container;
   // Drag-to-scroll state (a drag suppresses the button's buy on release).
   private upgDragActive = false;
   private upgDragMoved = false;
@@ -201,6 +211,7 @@ export class UIManager {
 
   // Settings modal (built on demand; null while closed)
   private settingsModal: Phaser.GameObjects.Container | null = null;
+  private statsModal: Phaser.GameObjects.Container | null = null;
 
   constructor(scene: Phaser.Scene, state: GameState, cb: UICallbacks) {
     this.scene = scene;
@@ -283,6 +294,26 @@ export class UIManager {
     else this.buddyRunner.setFrame(UIManager.BUDDY_STAND_FRAME);
   }
 
+  /** Show the bouncing HYPE! prompt (hype just became available). */
+  showHypePrompt(): void {
+    this.hypePrompt?.setVisible(true);
+  }
+
+  /** Hype activated: hide the prompt and make the runner sprint (3× anim speed). */
+  startHype(): void {
+    this.hypePrompt?.setVisible(false);
+    if (this.buddyRunner) {
+      this.buddyState = 'run';
+      this.buddyRunner.play(`buddy${this.buddySuit}_run`);
+      this.buddyRunner.anims.timeScale = 2;
+    }
+  }
+
+  /** Hype ended: return the runner to normal speed. */
+  endHype(): void {
+    if (this.buddyRunner) this.buddyRunner.anims.timeScale = 1;
+  }
+
   /**
    * Steer the avatar from a tap anywhere on the explore screen:
    *  - tap ON him → stop and stand; tap again → chat (chat01..03, resting at stand)
@@ -292,6 +323,10 @@ export class UIManager {
     if (this.activeTab !== 'explore' || !this.buddyRunner) return;
 
     if (Phaser.Geom.Rectangle.Contains(this.buddyRunner.getBounds(), pointer.x, pointer.y)) {
+      // Tapping the runner activates HYPE when it's available; during the buff he's
+      // busy (taps ignored) so the fast run isn't interrupted.
+      if (this.state.hypeAvailable) { this.cb.onActivateHype(); return; }
+      if (this.state.hypeActive) return;
       if (this.buddyState === 'run') {
         // First tap: stop running, hold the idle pose.
         this.buddyState = 'stand';
@@ -336,6 +371,89 @@ export class UIManager {
     this.createGearPanel();
     this.createShopPanel();
     this.showTab('explore');
+    this.scheduleMoth();
+  }
+
+  /* ---- Wandering moth collectible ---- *
+   * Every ~3 minutes a moth drifts across the explore screen; click it for +1
+   * Moth. Only one is ever alive, and it's always cleaned up (clicked or off-screen)
+   * so there's no entity buildup. */
+
+  private scheduleMoth(): void {
+    this.mothTimer?.remove();
+    // ~40s, jittered, so it isn't perfectly periodic.
+    const delay = Phaser.Math.Between(35_000, 45_000);
+    this.mothTimer = this.scene.time.delayedCall(delay, () => {
+      this.trySpawnMoth();
+      this.scheduleMoth();
+    });
+  }
+
+  private trySpawnMoth(): void {
+    // Only while exploring, and never more than one at a time.
+    if (this.activeTab !== 'explore' || this.activeMoth) return;
+    if (!this.scene.textures.exists('icon_moth')) return;
+
+    // Fly through one of two empty bands: above the showcase, or below it.
+    const band = Phaser.Math.Between(0, 1) === 0
+      ? Phaser.Math.Between(210, 340)     // above the showcase, under the header
+      : Phaser.Math.Between(960, 1180);   // below the showcase, above the tabs
+    const startX = LAYOUT.GAME_WIDTH + 60;
+    const endX = -60;
+
+    const moth = this.scene.add.image(startX, band, 'icon_moth')
+      .setScale(76 / ICON_NATIVE).setDepth(22)
+      .setInteractive({ useHandCursor: true });
+    moth.on('pointerdown', () => this.catchMoth());
+    this.panels.get('explore')?.add(moth);   // rides with the explore panel (hidden off-tab)
+    this.activeMoth = moth;
+
+    // Slow right-to-left drift; removed once it exits the screen.
+    this.scene.tweens.add({
+      targets: moth, x: endX, duration: Phaser.Math.Between(9000, 13000),
+      ease: 'Linear', onComplete: () => this.removeMoth(),
+    });
+    // Gentle vertical waver layered on top → a wavy path.
+    this.scene.tweens.add({
+      targets: moth, y: band - 28, duration: 1100,
+      yoyo: true, repeat: -1, ease: 'Sine.easeInOut',
+    });
+    // Soft flutter.
+    this.scene.tweens.add({
+      targets: moth, angle: { from: -8, to: 8 }, duration: 320,
+      yoyo: true, repeat: -1, ease: 'Sine.easeInOut',
+    });
+
+    // Trapper: roll auto-capture once. On success, snag it mid-flight (still
+    // visible flying in first) — unless the player clicks it first.
+    if (Math.random() < this.state.autoCaptureChance) {
+      this.scene.time.delayedCall(Phaser.Math.Between(700, 1800), () => {
+        if (this.activeMoth === moth) this.catchMoth();
+      });
+    }
+  }
+
+  private catchMoth(): void {
+    const moth = this.activeMoth;
+    if (!moth) return;
+    this.cb.onCollectMoth();
+    // Floating "+1" where it was caught.
+    const pop = makeText(this.scene, moth.x, moth.y, '+1', 30, '#C9B6FF', {
+      fontStyle: 'bold', stroke: '#000000', strokeThickness: 4,
+    }).setOrigin(0.5).setDepth(23);
+    this.panels.get('explore')?.add(pop);
+    this.scene.tweens.add({
+      targets: pop, y: moth.y - 70, alpha: { from: 1, to: 0 },
+      duration: 700, ease: 'Cubic.easeOut', onComplete: () => pop.destroy(),
+    });
+    this.removeMoth();
+  }
+
+  private removeMoth(): void {
+    if (!this.activeMoth) return;
+    this.scene.tweens.killTweensOf(this.activeMoth);
+    this.activeMoth.destroy();
+    this.activeMoth = undefined;
   }
 
   /* ---- Background ---- */
@@ -433,6 +551,18 @@ export class UIManager {
     const settingsBtn = makeBtn(this.scene, LAYOUT.GAME_WIDTH - 78, 30, 'SETTINGS', 120, 36, 0x2a2a2a, () => this.openSettings());
     (settingsBtn.getAt(1) as Phaser.GameObjects.Text).setFontSize(16);
     settingsBtn.setDepth(12);
+
+    // Stats button — top-LEFT corner, mirroring Settings (temporary placement).
+    const statsBtn = makeBtn(this.scene, 78, 30, 'STATS', 120, 36, 0x2a2a2a, () => this.showStats());
+    (statsBtn.getAt(1) as Phaser.GameObjects.Text).setFontSize(16);
+    statsBtn.setDepth(12);
+
+    // "Hide maxed" toggle — same style as Settings, tucked just beneath it.
+    // Only shown on the Upgrades tab (toggled in showTab).
+    this.hideMaxedBtn = makeBtn(this.scene, LAYOUT.GAME_WIDTH - 78, 72, 'HIDE MAXED', 120, 34, 0x2a2a2a, () => this.cb.onToggleHideMaxed());
+    (this.hideMaxedBtn.getAt(1) as Phaser.GameObjects.Text).setFontSize(14);
+    this.hideMaxedBtn.setDepth(12).setVisible(false);
+    this.updateHideMaxedBtn();   // sync initial color/label to state
   }
 
   /**
@@ -647,6 +777,20 @@ export class UIManager {
     });
     panel.add(this.buddyRunner);
 
+    // "HYPE!" prompt — yellow text in a black pill that bounces above the runner
+    // when hype is available. Hidden until then; tapping the runner activates it.
+    const hype = this.scene.add.container(cx, runnerY - 70).setDepth(20).setVisible(false);
+    const pill = this.scene.add.graphics();
+    pill.fillStyle(0x000000, 0.92).fillRoundedRect(-42, -18, 84, 36, 18);
+    pill.lineStyle(2, 0xFFD24A, 1).strokeRoundedRect(-42, -18, 84, 36, 18);
+    const hypeTxt = makeText(this.scene, 0, 0, 'HYPE!', 19, '#FFD24A', { fontStyle: 'bold' }).setOrigin(0.5);
+    hype.add([pill, hypeTxt]);
+    panel.add(hype);
+    this.hypePrompt = hype;
+    this.scene.tweens.add({
+      targets: hype, y: runnerY - 80, duration: 420, yoyo: true, repeat: -1, ease: 'Sine.easeInOut',
+    });
+
     // Clicks steer the avatar: tap off him to point him toward the click and run
     // (left of center = run left, right = run right); tap him to stop (stand00),
     // and keep tapping him to chat. A chat finishes back to standing.
@@ -736,7 +880,10 @@ export class UIManager {
     const cx = LAYOUT.CENTER_X + Phaser.Math.Between(-50, 50);
     const cy = this.showcaseCenterY() + Phaser.Math.Between(-30, 10);
     const label = crit ? `${fmt(damage)}!` : fmt(damage);
-    const mote = makeText(this.scene, cx, cy, label, crit ? 54 : 30, crit ? '#FFD24A' : '#FFFFFF', {
+    // Hype mode pumps up the numbers — bigger and chunkier.
+    const hyped = this.state.hypeActive;
+    const size = Math.round((crit ? 54 : 30) * (hyped ? 1.6 : 1));
+    const mote = makeText(this.scene, cx, cy, label, size, crit ? '#FFD24A' : '#FFFFFF', {
       fontStyle: 'bold', stroke: '#000000', strokeThickness: crit ? 6 : 4,
     }).setOrigin(0.5).setDepth(21);
     this.panels.get('explore')?.add(mote);
@@ -877,6 +1024,8 @@ export class UIManager {
       const descTxt = makeText(this.scene, LX, 32, upg.description, 14, '#AAAAAA');
       const lvl = this.state.getUpgradeLevel(upg.id);
       const lvlTxt = makeText(this.scene, LX, 58, `Lv ${lvl}/${upg.maxLevel}`, 16, '#9fd0a0');
+      this.upgNameLabels.set(upg.id, nameTxt);
+      this.upgDescLabels.set(upg.id, descTxt);
       this.upgLvlLabels.set(upg.id, lvlTxt);
 
       // Cost line = the buy button (a pill): "[icon] owned/cost ResourceName".
@@ -905,7 +1054,7 @@ export class UIManager {
       this.upgRows.set(upg.id, row);
       this.upgBuyBg.set(upg.id, btnBg);
       this.upgCostLabels.set(upg.id, costLabel);
-      this.updateCostButton(upg);
+      this.renderUpgradeRow(upg);
     }
 
     panel.add(scrollContainer);
@@ -957,7 +1106,7 @@ export class UIManager {
       const row = this.upgRows.get(upg.id);
       if (!row) continue;
       const maxed = this.state.getUpgradeLevel(upg.id) >= upg.maxLevel;
-      const hidden = this.hideMaxedUpgrades && maxed;
+      const hidden = this.state.hideMaxedUpgrades && maxed;
       row.setVisible(!hidden);
       if (hidden) continue;
       row.y = startY + shown * rowH;
@@ -967,10 +1116,19 @@ export class UIManager {
     if (this.upgScroll) this.upgScroll.y = Phaser.Math.Clamp(this.upgScroll.y, this.upgMinScroll, 0);
   }
 
-  /** Toggle hiding fully-upgraded rows (ready for a future settings switch). */
-  setHideMaxedUpgrades(hide: boolean): void {
-    this.hideMaxedUpgrades = hide;
+  /** Re-apply the (persisted) hide-maxed state to the list + button. */
+  refreshHideMaxed(): void {
     this.relayoutUpgrades();
+    this.updateHideMaxedBtn();
+  }
+
+  /** Reflect the toggle state on the button (label + active tint). */
+  private updateHideMaxedBtn(): void {
+    if (!this.hideMaxedBtn) return;
+    const on = this.state.hideMaxedUpgrades;
+    // Green while it offers to HIDE (maxed shown), gray once they're hidden.
+    (this.hideMaxedBtn.getAt(0) as Phaser.GameObjects.Rectangle).setFillStyle(on ? 0x2a2a2a : 0x336633);
+    (this.hideMaxedBtn.getAt(1) as Phaser.GameObjects.Text).setText(on ? 'SHOW MAXED' : 'HIDE MAXED');
   }
 
   /* ---- Void panel (prestige upgrades + rewind) ---- */
@@ -1675,6 +1833,9 @@ export class UIManager {
     this.progLabel.setVisible(onExplore);
     this.roomsLabel.setVisible(onExplore);
 
+    // "Hide maxed" toggle belongs to the Upgrades tab only.
+    this.hideMaxedBtn?.setVisible(tab === 'upgrades');
+
     // Hide void notification dot when viewing VOID tab
     if (tab === 'void' && this.voidNotifDot) this.voidNotifDot.setVisible(false);
   }
@@ -1722,18 +1883,23 @@ export class UIManager {
     if (this.activeTab !== 'explore') return;
 
     if (evt.type === 'resource') {
-      // Resource feedback = little "+N" motes that spawn around the icon and
-      // float up. Each is its own short-lived object, so spam-tapping fills the
-      // air with them. No top label (it strobed at high click speed).
+      // Resource feedback = "+N ResourceName!" that pops in (scale/fade up), holds
+      // a beat, then vanishes — in place, no long upward float.
       if (evt.value) {
-        const mx = LAYOUT.CENTER_X + Phaser.Math.Between(-110, 110);
-        const my = this.showcaseCenterY() + Phaser.Math.Between(-30, 70);
-        const mote = makeText(this.scene, mx, my, `+${evt.value}`, 26, evt.color, { fontStyle: 'bold' })
-          .setOrigin(0.5).setDepth(20);
+        const resName = evt.iconKey ? (RESOURCES[evt.iconKey]?.name ?? '') : '';
+        // Fixed spot just below the focal icon — centered, no drift.
+        const mx = LAYOUT.CENTER_X;
+        const my = this.showcaseCenterY() + 120;
+        const mote = makeText(this.scene, mx, my, `+${evt.value} ${resName}!`, 18, '#FFD700', {
+          fontStyle: 'bold',
+        }).setOrigin(0.5).setDepth(20).setScale(0.4).setAlpha(0);
         this.panels.get('explore')?.add(mote);
         this.scene.tweens.add({
-          targets: mote, y: my - 130, alpha: { from: 1, to: 0 },
-          duration: 850, ease: 'Cubic.easeOut', onComplete: () => mote.destroy(),
+          targets: mote, scale: 1, alpha: 1, duration: 140, ease: 'Back.easeOut',
+          onComplete: () => this.scene.tweens.add({
+            targets: mote, alpha: 0, delay: 260, duration: 280, ease: 'Sine.easeIn',
+            onComplete: () => mote.destroy(),
+          }),
         });
       }
       return;
@@ -1884,35 +2050,65 @@ export class UIManager {
     const lvl = this.state.getUpgradeLevel(upg.id);
     const maxed = lvl >= upg.maxLevel;
     const canBuy = this.state.canAffordUpgrade(upg.id);
-    const owned = this.state.resources[upg.costResource] ?? D(0);
+    // Cost resource can change per level (cycling upgrades like Master Scav).
+    const resId = this.state.getUpgradeCostResource(upg.id);
+    const owned = this.state.resources[resId] ?? D(0);
     const cost = this.state.getUpgradeCost(upg.id);
-    const resName = RESOURCES[upg.costResource].name;
+    const resName = RESOURCES[resId]?.name ?? resId;
     const LX = UIManager.UPG_LEFT;
 
     const bg = this.upgBuyBg.get(upg.id);
     if (bg) bg.setFillStyle(maxed ? 0x2a2a2a : canBuy ? 0x336633 : 0x333333);
+    // Swap the icon to the current cost resource (matters for cycling upgrades).
     const icon = this.upgCostIcons.get(upg.id);
-    if (icon) icon.setVisible(!maxed);
+    if (icon) {
+      const key = `icon_${resId}`;
+      if (!maxed && this.scene.textures.exists(key)) icon.setTexture(key).setVisible(true);
+      else icon.setVisible(false);
+    }
     const label = this.upgCostLabels.get(upg.id);
     if (label) {
+      // Always centered in the button; the cost icon sits as a left accent.
+      label.setOrigin(0.5, 0.5).setX(LX + UIManager.UPG_BTN_W / 2);
       if (maxed) {
-        // Green and centered in the button.
-        label.setText('MAXED').setColor('#7CFF7C')
-          .setOrigin(0.5, 0.5).setX(LX + UIManager.UPG_BTN_W / 2);
+        label.setText('MAXED').setColor('#7CFF7C');
       } else {
-        label.setText(`${fmt(owned)}/${fmt(cost)} ${resName}`).setColor('#FFFFFF')
-          .setOrigin(0, 0.5).setX(icon ? LX + 66 : LX + 18);
+        label.setText(`${fmt(owned)}/${fmt(cost)} ${resName}`).setColor('#FFFFFF');
       }
     }
   }
 
-  refreshUpgradePanel(): void {
-    for (const upg of UPGRADES) {
-      const lvl = this.state.getUpgradeLevel(upg.id);
-      const lvlTxt = this.upgLvlLabels.get(upg.id);
-      if (lvlTxt) lvlTxt.setText(`Lv ${lvl}/${upg.maxLevel}`);
-      this.updateCostButton(upg);
+  /**
+   * Render one upgrade row — either its real contents, or a "?????? Locked"
+   * placeholder until the upgrade's unlockFloor has been reached (progressive
+   * reveal). Drives name / description / level / cost button.
+   */
+  private renderUpgradeRow(upg: UpgradeDef): void {
+    const name = this.upgNameLabels.get(upg.id);
+    const desc = this.upgDescLabels.get(upg.id);
+    const lvlTxt = this.upgLvlLabels.get(upg.id);
+
+    if (!this.state.isUpgradeUnlocked(upg.id)) {
+      name?.setText('??????').setColor('#888888');
+      desc?.setText('(Locked)').setColor('#666666');
+      lvlTxt?.setVisible(false);
+      const bg = this.upgBuyBg.get(upg.id);
+      if (bg) bg.setFillStyle(0x222222);
+      this.upgCostIcons.get(upg.id)?.setVisible(false);
+      const label = this.upgCostLabels.get(upg.id);
+      label?.setText('\u{1F512} LOCKED').setColor('#777777')
+        .setOrigin(0.5, 0.5).setX(UIManager.UPG_LEFT + UIManager.UPG_BTN_W / 2);
+      return;
     }
+
+    name?.setText(upg.name).setColor('#EEEEEE');
+    desc?.setText(upg.description).setColor('#AAAAAA');
+    lvlTxt?.setVisible(true).setText(`Lv ${this.state.getUpgradeLevel(upg.id)}/${upg.maxLevel}`);
+    this.updateCostButton(upg);
+  }
+
+  refreshUpgradePanel(): void {
+    for (const upg of UPGRADES) this.renderUpgradeRow(upg);
     // A purchase can max a row (and, with hideMaxed on, remove it) → restack.
     this.relayoutUpgrades();
   }
@@ -2099,12 +2295,8 @@ export class UIManager {
     ).setOrigin(0.5).setDepth(302);
 
     // Stats
-    const statLines = [
-      `Resources found: ${summary.resourcesFound}`,
-      `Exploration gained: +${summary.explorationGained}`,
-    ];
     const statsTxt = makeText(this.scene, GAME_WIDTH / 2, GAME_HEIGHT / 2 - 20,
-      statLines.join('\n'), 22, '#CCCCCC', { align: 'center' },
+      `Resources found: ${summary.resourcesFound}`, 22, '#CCCCCC', { align: 'center' },
     ).setOrigin(0.5).setDepth(302);
 
     // Dismiss button
@@ -2202,6 +2394,62 @@ export class UIManager {
     if (!this.settingsModal) return;
     this.settingsModal.destroy(true);                     // destroy children too
     this.settingsModal = null;
+  }
+
+  /* ---- Stats modal ---- */
+
+  private showStats(): void {
+    if (this.statsModal) return;
+    const { GAME_WIDTH, GAME_HEIGHT } = LAYOUT;
+    const cx = GAME_WIDTH / 2;
+    const cy = GAME_HEIGHT / 2;
+    RundotGameAPI.triggerHapticAsync('light' as never);
+
+    const modal = this.scene.add.container(0, 0).setDepth(310);
+    const overlay = this.scene.add.rectangle(cx, cy, GAME_WIDTH, GAME_HEIGHT, 0x000000, 0.72).setInteractive();
+    modal.add(overlay);
+
+    const panelW = 560;
+    const panelH = 540;
+    const top = cy - panelH / 2;
+    const panel = this.scene.add.rectangle(cx, cy, panelW, panelH, 0x141414, 0.98)
+      .setStrokeStyle(2, 0x555555).setInteractive();
+    modal.add(panel);
+
+    modal.add(makeText(this.scene, cx, top + 34, 'STATS', 30, '#FFFFFF', { fontStyle: 'bold' }).setOrigin(0.5));
+    modal.add(makeBtn(this.scene, cx + panelW / 2 - 32, top + 32, '✕', 40, 40, 0x442222, () => this.closeStats()));
+    modal.add(this.scene.add.rectangle(cx, top + 66, panelW - 48, 1, 0x444444));
+
+    // Snapshot of the live values (reopen to refresh).
+    const s = this.state;
+    const rows: [string, string][] = [
+      ['Rewinds', `${s.prestigeCount}`],
+      ['Tap power', fmt(s.clickPower)],
+      ['Auto search', `${s.autoPerSecond}/s`],
+      ['Lucky Find (Crit %)', `${Math.round(s.critChance * 100)}%  ×${s.critMult}`],
+      ['Node respawn', `${s.nodeRespawnTime} ms`],
+      ['Hype boost', `×${s.hypeMultiplier} auto for ${s.hypeDuration / 1000}s`],
+      ['Hype cooldown', `${Math.round(s.hypeCooldown / 60000)} min`],
+      ['Auto-Capture (Moth)', `${Math.round(s.autoCaptureChance * 100)}%`],
+      ['Resources found', `${s.stats.resourcesFound.toLocaleString()}`],
+      ['Moths caught', fmt(s.resources['moth'] ?? D(0))],
+    ];
+    let y = top + 96;
+    const rowGap = 38;
+    for (const [label, val] of rows) {
+      modal.add(makeText(this.scene, cx - panelW / 2 + 36, y, label, 18, '#AAAAAA').setOrigin(0, 0.5));
+      modal.add(makeText(this.scene, cx + panelW / 2 - 36, y, val, 18, '#FFFFFF', { fontStyle: 'bold' }).setOrigin(1, 0.5));
+      y += rowGap;
+    }
+
+    modal.add(makeBtn(this.scene, cx, top + panelH - 36, 'CLOSE', 200, 46, 0x2a2a2a, () => this.closeStats()));
+    this.statsModal = modal;
+  }
+
+  private closeStats(): void {
+    if (!this.statsModal) return;
+    this.statsModal.destroy(true);
+    this.statsModal = null;
   }
 
   /* ---- Level change ---- */

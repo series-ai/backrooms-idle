@@ -67,6 +67,7 @@ export default class GameScene extends Phaser.Scene {
     this.load.image('icon_skin_stealer', 'icons/entities/skin_stealer.png');
     this.load.image('icon_partygoer', 'icons/entities/partygoer.png');
     this.load.image('icon_wretched', 'icons/entities/the_wretched.png');
+    this.load.image('icon_moth', 'icons/entities/moth.png');   // flying collectible + Moth resource
 
     // Abilities (3)
     this.load.image('icon_scavenge', 'icons/abilities/scavenge.png');
@@ -157,6 +158,8 @@ export default class GameScene extends Phaser.Scene {
       onHeal: () => this.handleHeal(),
       onEat: () => this.handleEat(),
       onSearch: () => this.handleSearch(),
+      onCollectMoth: () => this.handleCollectMoth(),
+      onActivateHype: () => this.handleActivateHype(),
       onBuyUpgrade: (id) => this.handleBuyUpgrade(id),
       onEscape: () => this.handleEscape(),
       onTravel: (lvl) => this.handleTravel(lvl),
@@ -165,6 +168,7 @@ export default class GameScene extends Phaser.Scene {
       onBuyVoidUpgrade: (id) => this.handleBuyVoidUpgrade(id),
       onUseAbility: (id) => this.handleUseAbility(id),
       onToggleAutoEscape: () => this.handleToggleAutoEscape(),
+      onToggleHideMaxed: () => this.handleToggleHideMaxed(),
       onCraft: (id) => this.handleCraft(id),
       onBuyShopItem: (id) => this.handleBuyShopItem(id),
       onOpenStore: () => this.handleOpenStore(),
@@ -199,6 +203,11 @@ export default class GameScene extends Phaser.Scene {
 
     // Count down node respawn (real-time, finer than the 1.5s tick).
     this.state.advanceRespawn(delta);
+
+    // Hype timers (cooldown → available → active). React to the transitions.
+    const hype = this.state.advanceHype(delta);
+    if (hype.becameAvailable) this.ui.showHypePrompt();
+    if (hype.ended) this.ui.endHype();
 
     // Smooth status bar animation every frame
     this.ui.updateStatusBars();
@@ -287,6 +296,11 @@ export default class GameScene extends Phaser.Scene {
       });
     }
 
+    // Show the drone's auto-search damage each tick (gold if it was a crit).
+    if (result.autoDamage) {
+      this.ui.showSearchHit(result.autoDamage, !!result.autoCrit);
+    }
+
     // Update resource display and ability cooldowns
     this.ui.updateResourceBar();
     this.ui.refreshAbilities();
@@ -332,6 +346,26 @@ export default class GameScene extends Phaser.Scene {
     this.ui.showSearchHit(hit.damage, hit.crit);
     this.ui.updateResourceBar();
     RundotGameAPI.triggerHapticAsync((hit.crit ? 'medium' : 'light') as never);
+  }
+
+  private handleActivateHype(): void {
+    if (!this.state.activateHype()) return;
+    this.ui.startHype();
+    this.ui.addLogMessage({
+      type: 'system',
+      message: `HYPE! ×${this.state.hypeMultiplier} auto search for ${this.state.hypeDuration / 1000}s`,
+      color: '#FFD24A',
+    });
+    RundotGameAPI.triggerHapticAsync('medium' as never);
+    RundotGameAPI.analytics.recordCustomEvent('hype_activated');
+  }
+
+  private handleCollectMoth(): void {
+    this.state.collectMoth();
+    this.ui.updateResourceBar();
+    this.ui.addLogMessage({ type: 'system', message: '+1 Moth', color: '#C9B6FF' });
+    RundotGameAPI.triggerHapticAsync('light' as never);
+    RundotGameAPI.analytics.recordCustomEvent('moth_collected');
   }
 
   private handleBuyUpgrade(id: string): void {
@@ -422,6 +456,12 @@ export default class GameScene extends Phaser.Scene {
       enabled: this.state.autoEscape,
     });
     RundotGameAPI.triggerHapticAsync('light' as never);
+    this.saveGame();
+  }
+
+  private handleToggleHideMaxed(): void {
+    this.state.hideMaxedUpgrades = !this.state.hideMaxedUpgrades;
+    this.ui.refreshHideMaxed();
     this.saveGame();
   }
 
