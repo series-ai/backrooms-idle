@@ -649,8 +649,8 @@ export class UIManager {
       { id: 'explore', label: 'EXPLORE' }, { id: 'items', label: 'ITEMS' }, { id: 'upgrades', label: 'UPGRADES' },
     ];
     const row2: { id: string; label: string }[] = showVoid
-      ? [{ id: 'void', label: 'VOID' }, { id: 'gear', label: 'GEAR' }, { id: 'shop', label: 'SHOP' }]
-      : [{ id: 'gear', label: 'GEAR' }, { id: 'shop', label: 'SHOP' }];
+      ? [{ id: 'void', label: 'VOID (wip)' }, { id: 'gear', label: 'GEAR (wip)' }, { id: 'shop', label: 'SHOP (wip)' }]
+      : [{ id: 'gear', label: 'GEAR (wip)' }, { id: 'shop', label: 'SHOP (wip)' }];
 
     const rowH = 42;
     const rowGap = 8;
