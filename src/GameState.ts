@@ -19,7 +19,7 @@ import {
   type GearDef,
   type GearTier,
 } from './data/GameData';
-import { MAX_OFFLINE_TICKS } from './config';
+import { MAX_OFFLINE_TICKS, TICK_INTERVAL_MS } from './config';
 import { type Big, D } from './num';
 
 /* ------------------------------------------------------------------ */
@@ -100,6 +100,7 @@ export interface SearchHit {
   events: GameEvent[];
   damage: Big;
   crit: boolean;
+  struck: boolean;   // false if there was no node to hit (mid-respawn)
 }
 
 export interface OfflineSummary {
@@ -122,6 +123,7 @@ export class GameState {
   exploration = 0;                 // ore mined on the current floor (toward `required`)
   explorationPerLevel: Record<number, number> = {};
   nodeDamage: Big = D(0);          // Integrity (HP) dealt to the current node — transient, not saved
+  respawnMsLeft = 0;               // >0 while the broken node is regrowing — transient, not saved
   resources: Record<string, Big> = {};
   upgrades: Record<string, number> = {};
   stats: GameStats = {
@@ -210,7 +212,7 @@ export class GameState {
    * into the thousands/millions as you descend — the big-number dopamine of an
    * idle clicker. Backed by Big, so the growth is genuinely unbounded (no
    * safe-integer ceiling, no clamp). */
-  private static readonly SCALE_BASE = 10;
+  private static readonly SCALE_BASE = 1;
   private static readonly SCALE_GROWTH = 1.45;
 
   /** Magnitude multiplier for the current floor (drives how big the numbers look). */
@@ -241,6 +243,29 @@ export class GameState {
   /** Damage multiplier on a lucky find. */
   get critMult(): number { return 5; }
 
+  /* ---- Node respawn ---- *
+   * After a node breaks it doesn't refill instantly — there's a short delay
+   * before the next one appears (so you actually see the Integrity hit zero, even
+   * on a one-shot). Upgrades will shorten this later. */
+  private static readonly RESPAWN_MS_BASE = 500;
+  /** Time (ms) a broken node takes to respawn. (Future upgrades will reduce it.) */
+  get nodeRespawnTime(): number { return GameState.RESPAWN_MS_BASE; }
+  /** True while the current node is broken and regrowing (no node to search). */
+  get isRespawning(): boolean { return this.respawnMsLeft > 0; }
+
+  /**
+   * Advance the respawn timer (called every frame with the frame delta). When it
+   * elapses, a fresh full node appears (Integrity reset to undamaged).
+   */
+  advanceRespawn(deltaMs: number): void {
+    if (this.respawnMsLeft <= 0) return;
+    this.respawnMsLeft -= deltaMs;
+    if (this.respawnMsLeft <= 0) {
+      this.respawnMsLeft = 0;
+      this.nodeDamage = D(0);   // new node, full Integrity
+    }
+  }
+
   getUpgradeLevel(id: string): number {
     return this.upgrades[id] ?? 0;
   }
@@ -249,7 +274,9 @@ export class GameState {
     const def = UPGRADES.find((u) => u.id === id);
     if (!def) return D(Number.MAX_VALUE);
     // baseCost × costMultiplier^level — full precision so it never overflows.
-    return D(def.baseCost).mul(D(def.costMultiplier).pow(this.getUpgradeLevel(id))).floor();
+    // Rounded (not floored) so hand-tuned curves land on exact numbers, e.g.
+    // Auto Explore's 5,6,7,9,… = round(5 × 1.2^level). (round = +0.5 then floor.)
+    return D(def.baseCost).mul(D(def.costMultiplier).pow(this.getUpgradeLevel(id))).add(0.5).floor();
   }
 
   canAffordUpgrade(id: string): boolean {
@@ -257,6 +284,11 @@ export class GameState {
     if (!def) return false;
     if (this.getUpgradeLevel(id) >= def.maxLevel) return false;
     return (this.resources[def.costResource] ?? D(0)).gte(this.getUpgradeCost(id));
+  }
+
+  /** True if any (non-maxed) upgrade is currently affordable — drives the tab alert dot. */
+  hasAffordableUpgrade(): boolean {
+    return UPGRADES.some((u) => this.canAffordUpgrade(u.id));
   }
 
   buyUpgrade(id: string): boolean {
@@ -300,8 +332,15 @@ export class GameState {
 
   /** Search power multiplier per tap (before the floor magnitude scale). */
   get clickPower(): Big { return this.upgradeMult('power'); }
-  /** Idle search multiplier per tick (before the floor magnitude scale). */
-  get autoMineRate(): Big { return D(0.25).mul(this.upgradeMult('autoMine')); }
+  /**
+   * Idle searches per TICK (before the floor magnitude scale).
+   * Driven entirely by Auto Explore: each level = +1 auto-search per second
+   * (independent of click/tap power), so a fresh game (level 0) has none.
+   * Converted from per-second to per-tick for the tick cadence.
+   */
+  get autoMineRate(): Big {
+    return D(this.getUpgradeLevel('auto_explore')).mul(TICK_INTERVAL_MS / 1000);
+  }
   /** Cooldown (ms) between taps — lowered by Mining Speed / Swift Hands. */
   get mineCooldownMs(): number {
     let m = 1;
@@ -372,27 +411,37 @@ export class GameState {
   /** One tap on the ore node (active search). Cooldown is enforced by the UI. */
   manualSearch(): SearchHit {
     const events: GameEvent[] = [];
+    // No node to hit while one is respawning.
+    if (this.isRespawning) return { events, damage: D(0), crit: false, struck: false };
     const crit = Math.random() < this.critChance;
     const damage = this.searchPower.mul(crit ? this.critMult : 1);
     this.nodeDamage = this.nodeDamage.add(damage);
     this.resolveNode(events);
-    return { events, damage, crit };
+    return { events, damage, crit, struck: true };
   }
 
-  /** Break any fully-damaged ore nodes into ore (active or idle). */
+  /**
+   * Break the current node if its Integrity has hit zero, collecting ONE resource
+   * and starting the respawn timer. At most one break per call: the node is then
+   * "gone" until it respawns, so overflow damage is discarded (no carry-over to
+   * the next node — that's what made the HP bar jump back up). Integrity is parked
+   * at zero (nodeDamage = full) for the duration so the empty bar is visible.
+   */
   private resolveNode(events: GameEvent[]): void {
+    if (this.isRespawning) return;
     const ore = this.floorOre;
     const dur = this.nodeIntegrityMax;
-    let loops = 0;
-    while (this.nodeDamage.gte(dur) && loops++ < 500) {
-      this.nodeDamage = this.nodeDamage.sub(dur);
-      let gain = 1;
-      if (Math.random() < this.bonusOreChance) gain += 1;
-      this.resources[ore.resource] = (this.resources[ore.resource] ?? D(0)).add(gain);   // inventory (uncapped)
-      this.stats.resourcesFound += gain;
-      this.exploration = Math.min(ore.required, this.exploration + gain);                 // descend progress (capped)
-      events.push({ type: 'resource', message: `+ ${RESOURCES[ore.resource].name}${tierSuffix(ore.tier)}`, color: '#7CFF7C', iconKey: ore.resource, value: gain });
-    }
+    if (this.nodeDamage.lt(dur)) return;
+
+    let gain = 1;
+    if (Math.random() < this.bonusOreChance) gain += 1;
+    this.resources[ore.resource] = (this.resources[ore.resource] ?? D(0)).add(gain);   // inventory (uncapped)
+    this.stats.resourcesFound += gain;
+    this.exploration = Math.min(ore.required, this.exploration + gain);                 // descend progress (capped)
+    events.push({ type: 'resource', message: `+ ${RESOURCES[ore.resource].name}${tierSuffix(ore.tier)}`, color: '#7CFF7C', iconKey: ore.resource, value: gain });
+
+    this.respawnMsLeft = this.nodeRespawnTime;
+    this.nodeDamage = dur;   // remaining Integrity = 0 (drained) until respawn completes
   }
 
   /* ---- Level escape / travel ---- */
@@ -400,6 +449,11 @@ export class GameState {
   canEscape(): boolean {
     // Descend as soon as the level is fully explored — no key, no combat gate.
     return this.explorationPct >= 100;
+  }
+
+  /** True when fully explored AND the next floor is new territory — drives the Explore tab alert dot. */
+  canDescendToNew(): boolean {
+    return this.canEscape() && !this.unlockedLevels.includes(this.currentLevel + 1);
   }
 
   escape(): boolean {
@@ -413,6 +467,7 @@ export class GameState {
     // New level starts at 0 (never visited)
     this.exploration = this.explorationPerLevel[this.currentLevel] ?? 0;
     this.nodeDamage = D(0);
+    this.respawnMsLeft = 0;
     this.stats.levelsEscaped++;
     this.totalDepth++;
     return true;
@@ -427,6 +482,7 @@ export class GameState {
     // Restore destination level's exploration
     this.exploration = this.explorationPerLevel[levelId] ?? 0;
     this.nodeDamage = D(0);
+    this.respawnMsLeft = 0;
     return true;
   }
 
@@ -481,9 +537,11 @@ export class GameState {
     const events: GameEvent[] = [];
     const lvl = this.level;
 
-    // 1. Idle auto-search (slow trickle of the floor's ore).
-    this.nodeDamage = this.nodeDamage.add(this.autoSearchPower);
-    this.resolveNode(events);
+    // 1. Idle auto-search (drone). Skipped while a node is respawning.
+    if (!this.isRespawning) {
+      this.nodeDamage = this.nodeDamage.add(this.autoSearchPower);
+      this.resolveNode(events);
+    }
 
     // 2. Atmosphere only — ambient flavor. No random loot. (Entities are coming
     //    back later; their flavor text is removed for now.)
@@ -714,13 +772,24 @@ export class GameState {
     const summary: OfflineSummary = { minutes: Math.floor(elapsedMs / 60000), resourcesFound: 0, explorationGained: 0 };
     if (ticks <= 0) return { events, summary };
 
-    // Auto-mine the floor's ore for the elapsed (capped) ticks.
+    // Drone-only while offline. Each resource takes one fill + one respawn:
+    //   fill time = Integrity / auto-damage-per-sec = durability / autoLevel  (the
+    //   floor magnitude cancels), plus the respawn delay. Count whole cycles that
+    //   fit in the elapsed (capped) time.
+    const autoLevel = this.getUpgradeLevel('auto_explore');
+    if (autoLevel <= 0) { this.explorationPerLevel[this.currentLevel] = this.exploration; return { events, summary }; }
+
     const ore = this.floorOre;
-    const before = this.resources[ore.resource] ?? D(0);
-    this.nodeDamage = this.nodeDamage.add(this.autoSearchPower.mul(ticks));
-    const mineEvents: GameEvent[] = [];
-    this.resolveNode(mineEvents);
-    summary.resourcesFound = Math.floor((this.resources[ore.resource] ?? D(0)).sub(before).toNumber());
+    const elapsedSec = ticks * 1.5;                       // capped ticks → seconds
+    const fillSec = this.nodeDurabilityMax / autoLevel;   // seconds to drain one node
+    const cycleSec = fillSec + this.nodeRespawnTime / 1000;
+    const count = Math.floor(elapsedSec / cycleSec);
+    if (count > 0) {
+      this.resources[ore.resource] = (this.resources[ore.resource] ?? D(0)).add(count);
+      this.stats.resourcesFound += count;
+      this.exploration = Math.min(ore.required, this.exploration + count);
+      summary.resourcesFound = count;
+    }
 
     this.explorationPerLevel[this.currentLevel] = this.exploration;
     return { events, summary };

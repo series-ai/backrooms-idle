@@ -73,7 +73,7 @@ export function getFloorOre(levelId: number): FloorOre {
     resource: ORE_SEQUENCE[levelId % n],
     tier: Math.floor(levelId / n) + 1,  // every full lap of the list bumps the tier
     required: 10 + levelId * 20,        // Floor 0: 10, Floor 1: 30, Floor 2: 50, ...
-    durability: 3 + levelId,            // deeper nodes are tougher
+    durability: 10 + levelId,           // node HP: Floor 0 (Almond Water) = 10, deeper = tougher
   };
 }
 
@@ -380,48 +380,18 @@ export const LEVELS: LevelDef[] = [
 
 // Mining upgrades. Every collectible resource feeds one, so each floor's ore is
 // useful. Effects are uncapped — escalating cost paces you, not a hard maxLevel.
+// The upgrade roster is being rebuilt from scratch (the old set was scrapped).
+// Auto Explore is the first — and currently only — upgrade. A fresh game has NO
+// auto-search; this is what grants it, so it's the cheap starter hook.
+//   - Effect: +1 auto-search per second per level (drone ticks every 1s).
+//   - Cost (Almond Water): 5,6,7,9,10,12,15,18,21,26,31,37,45,53,64
+//     = round(5 × 1.2^level), reproduced by baseCost 5 × multiplier 1.2.
 export const UPGRADES: UpgradeDef[] = [
   {
-    id: 'mining_speed', name: 'Explore Speed', icon: '\u{26A1}',
-    description: 'Lower the cooldown between taps',
-    baseCost: 5, costMultiplier: 1.7, maxLevel: 9999,
-    effectPerLevel: 6, effectUnit: '% faster', costResource: 'almond_water', effect: 'cooldown',
-  },
-  {
-    id: 'mining_power', name: 'Keen Search', icon: '\u{1F50D}',
-    description: 'Each tap explores more',
-    baseCost: 4, costMultiplier: 1.8, maxLevel: 9999,
-    effectPerLevel: 20, effectUnit: '% power', costResource: 'batteries', effect: 'power',
-  },
-  {
-    id: 'auto_miner', name: 'Auto-Explore', icon: '\u{1F916}',
-    description: 'Explore slowly on its own',
-    baseCost: 6, costMultiplier: 1.9, maxLevel: 9999,
-    effectPerLevel: 25, effectUnit: '% auto', costResource: 'cloth_scraps', effect: 'autoMine',
-  },
-  {
-    id: 'rich_veins', name: 'Lucky Find', icon: '\u{1F340}',
-    description: 'Chance for +1 bonus resource',
-    baseCost: 5, costMultiplier: 2.0, maxLevel: 40,
-    effectPerLevel: 2, effectUnit: '% bonus', costResource: 'lucky_coins', effect: 'bonusOre',
-  },
-  {
-    id: 'swift_hands', name: 'Quick Hands', icon: '\u{1F90C}',
-    description: 'Lower the cooldown between taps',
-    baseCost: 5, costMultiplier: 1.75, maxLevel: 9999,
-    effectPerLevel: 5, effectUnit: '% faster', costResource: 'canned_food', effect: 'cooldown',
-  },
-  {
-    id: 'heavy_pick', name: 'Sharp Eyes', icon: '\u{1F441}\u{FE0F}',
-    description: 'Each tap explores more',
-    baseCost: 5, costMultiplier: 1.85, maxLevel: 9999,
-    effectPerLevel: 18, effectUnit: '% power', costResource: 'scrap_metal', effect: 'power',
-  },
-  {
-    id: 'prospecting', name: 'Pathfinding', icon: '\u{1F9ED}',
-    description: 'Explore slowly on its own',
-    baseCost: 5, costMultiplier: 1.9, maxLevel: 9999,
-    effectPerLevel: 22, effectUnit: '% auto', costResource: 'firesalt', effect: 'autoMine',
+    id: 'auto_explore', name: 'Auto Explore', icon: '\u{1F916}',
+    description: 'A drone auto searches for resources every 1s (+1 per level)',
+    baseCost: 5, costMultiplier: 1.2, maxLevel: 15,
+    effectPerLevel: 1, effectUnit: '/s', costResource: 'almond_water', effect: 'autoMine',
   },
 ];
 

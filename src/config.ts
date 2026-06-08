@@ -9,6 +9,11 @@ export const LAYOUT = {
 
   CONTENT_TOP: 186,
   CONTENT_BOTTOM: 1280,
+  // On non-explore tabs the header collapses to just the menu title, so panels
+  // also start higher (CONTENT_TOP_WIDE) and end lower (CONTENT_BOTTOM_WIDE),
+  // reclaiming the freed space top and bottom.
+  CONTENT_TOP_WIDE: 110,
+  CONTENT_BOTTOM_WIDE: 1334,
 
   RESOURCE_BAR_Y: 1300,
 

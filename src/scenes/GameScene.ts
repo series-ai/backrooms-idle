@@ -86,6 +86,17 @@ export default class GameScene extends Phaser.Scene {
     this.load.image('icon_void_shard', 'icons/prestige/void_shard.png');
     this.load.image('icon_rewind_button', 'icons/prestige/rewind_button.png');
     this.load.image('icon_depth_counter', 'icons/prestige/depth_counter.png');
+
+    // Player character sprite sheets (buddy1..buddy6). Each sheet is a uniform
+    // 128px grid, 1024×3840 (8 cols × 30 rows). buddy1 = the starting character;
+    // buddy2..6 are alternate "suits" earned via upgrades later. See
+    // public/sprites/OuterBuddies/buddy_spritesheet.json for the full frame map.
+    for (let i = 1; i <= 6; i++) {
+      this.load.spritesheet(`buddy${i}`, `sprites/OuterBuddies/buddy${i}.png`, {
+        frameWidth: 128,
+        frameHeight: 128,
+      });
+    }
   }
 
   /* ================================================================ */
@@ -102,6 +113,44 @@ export default class GameScene extends Phaser.Scene {
 
     // Load saved progress
     await this.loadGame();
+
+    // Player run-cycle animations (one per buddy "suit").
+    // The run frames live on row 13 of the 8-wide sheet: run01..run04 =
+    // frame indices 104..107 (row 13 × 8 cols + column). Weapon variants live on
+    // the rows below (run_shotgun 112+, run_AR 120+, run_pistol 128+, run_gun 136+)
+    // for a future weapon-upgrade path.
+    // Frame indices (row × 8 cols): spawn01..04 = 16..19 (row 2),
+    // run01..04 = 104..107 (row 13), chat01..03 = 80..82 (row 10),
+    // stand00 = 56 (row 7, used as a static frame).
+    for (let i = 1; i <= 6; i++) {
+      const spawnKey = `buddy${i}_spawn`;
+      if (!this.anims.exists(spawnKey)) {
+        this.anims.create({
+          key: spawnKey,
+          frames: this.anims.generateFrameNumbers(`buddy${i}`, { frames: [16, 17, 18, 19] }),
+          frameRate: 8,
+          repeat: 0,
+        });
+      }
+      const runKey = `buddy${i}_run`;
+      if (!this.anims.exists(runKey)) {
+        this.anims.create({
+          key: runKey,
+          frames: this.anims.generateFrameNumbers(`buddy${i}`, { frames: [104, 105, 106, 107] }),
+          frameRate: 4,
+          repeat: -1,
+        });
+      }
+      const chatKey = `buddy${i}_chat`;
+      if (!this.anims.exists(chatKey)) {
+        this.anims.create({
+          key: chatKey,
+          frames: this.anims.generateFrameNumbers(`buddy${i}`, { frames: [80, 81, 82] }),
+          frameRate: 5,
+          repeat: 0,
+        });
+      }
+    }
 
     // Build UI
     this.ui = new UIManager(this, this.state, {
@@ -147,6 +196,9 @@ export default class GameScene extends Phaser.Scene {
 
   update(_time: number, delta: number): void {
     if (!this.ui) return;
+
+    // Count down node respawn (real-time, finer than the 1.5s tick).
+    this.state.advanceRespawn(delta);
 
     // Smooth status bar animation every frame
     this.ui.updateStatusBars();
@@ -238,6 +290,8 @@ export default class GameScene extends Phaser.Scene {
     // Update resource display and ability cooldowns
     this.ui.updateResourceBar();
     this.ui.refreshAbilities();
+    // Refresh only the visible panel's live affordability (no-op when off-screen).
+    this.ui.tickRefresh();
   }
 
   /* ================================================================ */
@@ -272,6 +326,8 @@ export default class GameScene extends Phaser.Scene {
 
   private handleSearch(): void {
     const hit = this.state.manualSearch();
+    // Nothing to hit mid-respawn — no floating number, no haptic.
+    if (!hit.struck) return;
     for (const evt of hit.events) this.ui.addLogMessage(evt);
     this.ui.showSearchHit(hit.damage, hit.crit);
     this.ui.updateResourceBar();

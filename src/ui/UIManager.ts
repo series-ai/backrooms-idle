@@ -1,7 +1,7 @@
 import Phaser from 'phaser';
 import RundotGameAPI from '@series-inc/rundot-game-sdk/api';
 import { LAYOUT } from '../config';
-import { UPGRADES, RESOURCES, RESOURCE_ORDER, VOID_UPGRADES, PRESTIGE_TIERS, ABILITIES, EQUIP_SLOTS, EQUIP_SLOT_ICONS, GEAR_POOL, GEAR_TIER_COLORS, RECIPES, SHOP_ITEMS, SHARD_MILESTONES, getTierColor, tierSuffix, getFloorOre } from '../data/GameData';
+import { UPGRADES, RESOURCES, RESOURCE_ORDER, VOID_UPGRADES, PRESTIGE_TIERS, ABILITIES, EQUIP_SLOTS, EQUIP_SLOT_ICONS, GEAR_POOL, GEAR_TIER_COLORS, RECIPES, SHOP_ITEMS, SHARD_MILESTONES, getTierColor, tierSuffix, getFloorOre, type UpgradeDef } from '../data/GameData';
 import { fmt, D, type Big } from '../num';
 import type { GameEvent, OfflineSummary } from '../GameState';
 import { GameState } from '../GameState';
@@ -95,6 +95,7 @@ export class UIManager {
   private levelText!: Phaser.GameObjects.Text;
 
   // Status bars
+  private progBarBg!: Phaser.GameObjects.Rectangle;
   private progFill!: Phaser.GameObjects.Rectangle;
   private progLabel!: Phaser.GameObjects.Text;
 
@@ -102,6 +103,14 @@ export class UIManager {
   private showcaseBig: Phaser.GameObjects.Image | null = null;
   private showcaseKey: string | null = null;
   private showcaseTier = 1;
+  /** The player avatar running across the explore screen (run01..run04 cycle). */
+  private buddyRunner: Phaser.GameObjects.Sprite | null = null;
+  /** Which buddy "suit" is active (1..6); future upgrades swap this. */
+  private buddySuit = 1;
+  /** What the avatar is currently doing — drives click interactions. */
+  private buddyState: 'run' | 'stand' | 'chat' = 'run';
+  /** Static frame for the idle "stand00" pose. */
+  private static readonly BUDDY_STAND_FRAME = 56;
   private lastPulseTime = 0;                           // throttles the tap pulse animation
   private flavorMsg?: Phaser.GameObjects.Text;         // reusable entity/ambient flavor line
   private flavorTween?: Phaser.Tweens.Tween;
@@ -109,14 +118,17 @@ export class UIManager {
   private roomsLabel!: Phaser.GameObjects.Text;
   private exploreBtnZone?: Phaser.GameObjects.Rectangle;
   private holdTimer?: Phaser.Time.TimerEvent;
-  private lastMineTime = 0;
   private durFill?: Phaser.GameObjects.Rectangle;
   private durLabel?: Phaser.GameObjects.Text;   // "N to collect" readout on the durability bar
 
   // Resource bar
   private resTexts: Map<string, Phaser.GameObjects.Text> = new Map();
   private floorCleared = false;                        // tracks the "Cleared!" flash on the counter
+  private headerCard?: Phaser.GameObjects.Rectangle;   // top header panel (resizes per tab)
+  private contentCard?: Phaser.GameObjects.Rectangle;  // main content panel (resizes per tab)
+  private resBarCard?: Phaser.GameObjects.Rectangle;   // bottom resource-bar background card
   private resBarIcon?: Phaser.GameObjects.Image;       // current floor's resource icon
+  private resBarName?: Phaser.GameObjects.Text;        // current floor's resource name
   private resBarText?: Phaser.GameObjects.Text;        // current floor's resource count
 
   // Tabs
@@ -126,8 +138,21 @@ export class UIManager {
 
   // Upgrade panel refs for live updates
   private upgCostLabels: Map<string, Phaser.GameObjects.Text> = new Map();
+  private upgCostIcons: Map<string, Phaser.GameObjects.Image> = new Map();
   private upgLvlLabels: Map<string, Phaser.GameObjects.Text> = new Map();
-  private upgBuyBtns: Map<string, Phaser.GameObjects.Container> = new Map();
+  private upgBuyBg: Map<string, Phaser.GameObjects.Rectangle> = new Map();
+  // Upgrade list: each row is a self-contained container; relayoutUpgrades()
+  // stacks the visible ones. This scales to any number of upgrades and supports
+  // filtering (e.g. a future "hide maxed" toggle) without touching row internals.
+  private upgRows: Map<string, Phaser.GameObjects.Container> = new Map();
+  private upgScroll?: Phaser.GameObjects.Container;
+  private upgMinScroll = 0;
+  private hideMaxedUpgrades = false;
+  // Drag-to-scroll state (a drag suppresses the button's buy on release).
+  private upgDragActive = false;
+  private upgDragMoved = false;
+  private upgDragStartPointer = 0;
+  private upgDragStartScroll = 0;
 
   // Void panel refs
   private voidFragLabel!: Phaser.GameObjects.Text;
@@ -168,6 +193,8 @@ export class UIManager {
   // Void prompt (stuck at max level)
   private voidPromptBanner: Phaser.GameObjects.Container | null = null;
   private voidNotifDot: Phaser.GameObjects.Container | null = null;
+  // Red "!" alert dots keyed by tab id (explore = new floor ready, upgrades = affordable).
+  private tabNotifDots: Map<string, Phaser.GameObjects.Container> = new Map();
 
   // Header extras
   private depthText!: Phaser.GameObjects.Text;
@@ -242,6 +269,56 @@ export class UIManager {
     this.showcaseKey = null;
   }
 
+  /**
+   * Swap the player avatar to a different buddy "suit" (1..6). Hook for a future
+   * cosmetic/upgrade path — each suit is its own sprite sheet, identically laid out.
+   */
+  setBuddySuit(suit: number): void {
+    const n = Phaser.Math.Clamp(Math.floor(suit), 1, 6);
+    if (n === this.buddySuit || !this.buddyRunner) return;
+    this.buddySuit = n;
+    this.buddyRunner.setTexture(`buddy${n}`);
+    if (this.buddyState === 'run') this.buddyRunner.play(`buddy${n}_run`);
+    else if (this.buddyState === 'chat') this.buddyRunner.play(`buddy${n}_chat`);
+    else this.buddyRunner.setFrame(UIManager.BUDDY_STAND_FRAME);
+  }
+
+  /**
+   * Steer the avatar from a tap anywhere on the explore screen:
+   *  - tap ON him → stop and stand; tap again → chat (chat01..03, resting at stand)
+   *  - tap OFF him → face the tap (left/right of center) and run
+   */
+  private onBuddyPointer(pointer: Phaser.Input.Pointer): void {
+    if (this.activeTab !== 'explore' || !this.buddyRunner) return;
+
+    if (Phaser.Geom.Rectangle.Contains(this.buddyRunner.getBounds(), pointer.x, pointer.y)) {
+      if (this.buddyState === 'run') {
+        // First tap: stop running, hold the idle pose.
+        this.buddyState = 'stand';
+        this.buddyRunner.anims.stop();
+        this.buddyRunner.setFrame(UIManager.BUDDY_STAND_FRAME);
+      } else {
+        // Already stopped: he chats, then settles back to standing.
+        this.buddyState = 'chat';
+        this.buddyRunner.play(`buddy${this.buddySuit}_chat`);
+        this.buddyRunner.once(Phaser.Animations.Events.ANIMATION_COMPLETE, () => {
+          if (this.buddyState === 'chat' && this.buddyRunner) {
+            this.buddyState = 'stand';
+            this.buddyRunner.setFrame(UIManager.BUDDY_STAND_FRAME);
+          }
+        });
+      }
+      return;
+    }
+
+    // Tapped off him: aim toward the tap and (re)start running.
+    this.buddyRunner.setFlipX(pointer.x < LAYOUT.CENTER_X);
+    if (this.buddyState !== 'run') {
+      this.buddyState = 'run';
+      this.buddyRunner.play(`buddy${this.buddySuit}_run`);
+    }
+  }
+
   /* ================================================================ */
   /*  Build all UI                                                     */
   /* ================================================================ */
@@ -305,18 +382,22 @@ export class UIManager {
     });
 
     // Dark panels behind UI sections for contrast
-    // Header card — one panel behind Title + Depth + explore bar + count, styled
-    // to match the content card below (no more two-bar seam in the top area).
-    this.scene.add.rectangle(GAME_WIDTH / 2, 87, GAME_WIDTH - 20, 158, 0x0a0a0a, 0.6)
+    // Header card — behind Title + Depth + explore bar + count on Explore; it
+    // shrinks to just the title band on other tabs (see setContentBounds).
+    this.headerCard = this.scene.add.rectangle(GAME_WIDTH / 2, 87, GAME_WIDTH - 20, 158, 0x0a0a0a, 0.6)
       .setDepth(3)
       .setStrokeStyle(1, 0x333333);
-    // Main content panel
-    this.scene.add.rectangle(GAME_WIDTH / 2, (LAYOUT.CONTENT_TOP + LAYOUT.CONTENT_BOTTOM) / 2,
+    // Main content panel. Its bottom edge moves with the active tab: on Explore
+    // it stops above the resource bar; on other tabs it expands down into that
+    // freed space (see setContentBottom, called from showTab).
+    this.contentCard = this.scene.add.rectangle(GAME_WIDTH / 2, (LAYOUT.CONTENT_TOP + LAYOUT.CONTENT_BOTTOM) / 2,
       GAME_WIDTH - 20, LAYOUT.CONTENT_BOTTOM - LAYOUT.CONTENT_TOP + 20, 0x0a0a0a, 0.6)
       .setDepth(3)
       .setStrokeStyle(1, 0x333333);
     // Resource-bar card — same inset card style as the header/content panels.
-    this.scene.add.rectangle(GAME_WIDTH / 2, LAYOUT.RESOURCE_BAR_Y + 20, GAME_WIDTH - 20, 52, 0x0a0a0a, 0.6)
+    // Only shown on the explore tab (toggled in showTab) since it reflects the
+    // resource you're actively collecting.
+    this.resBarCard = this.scene.add.rectangle(GAME_WIDTH / 2, LAYOUT.RESOURCE_BAR_Y + 20, GAME_WIDTH - 20, 52, 0x0a0a0a, 0.6)
       .setDepth(3)
       .setStrokeStyle(1, 0x333333);
     // Footer — one solid panel behind the tab buttons down to the screen bottom
@@ -374,7 +455,7 @@ export class UIManager {
     // Green EXPLORATION bar — even 34px rhythm with the header above
     // (Title 42, Depth 76, Bar 110, count 144).
     const y = 110 - BAR_HEIGHT / 2; // bar top (center at 110)
-    this.scene.add.rectangle(BAR_X + BAR_WIDTH / 2, y + BAR_HEIGHT / 2, BAR_WIDTH, BAR_HEIGHT, 0x16241a)
+    this.progBarBg = this.scene.add.rectangle(BAR_X + BAR_WIDTH / 2, y + BAR_HEIGHT / 2, BAR_WIDTH, BAR_HEIGHT, 0x16241a)
       .setDepth(10).setStrokeStyle(1, 0x2e4a2e);
     this.progFill = this.scene.add.rectangle(BAR_X, y, 0, BAR_HEIGHT, 0x4caf50).setOrigin(0, 0).setDepth(11);
     this.progLabel = makeText(this.scene, LAYOUT.CENTER_X, y + BAR_HEIGHT / 2, 'EXPLORING 0%', 16, '#FFFFFF', { fontStyle: 'bold' })
@@ -393,14 +474,38 @@ export class UIManager {
     const cx = LAYOUT.CENTER_X;
     // (Background is the resource-bar card drawn in createBackground.)
 
-    // Single readout: how many of the resource you're CURRENTLY collecting you
-    // have. Icon + count swap as you descend (see updateResourceBar).
+    // Single readout: which resource you're CURRENTLY collecting, its name, and
+    // how many you have. Icon + name + count all swap as you descend (see
+    // updateResourceBar). Laid out as: [icon] Name ............... count
     const res = this.state.floorOre.resource;
-    this.resBarIcon = this.createIcon(cx - 50, y + 20, res, 80) ?? undefined;
+    const cy = y + 20;                         // vertical center of the bar card
+
+    this.resBarIcon = this.createIcon(cx, cy, res, 72) ?? undefined;
     if (this.resBarIcon) this.resBarIcon.setDepth(11);
-    this.resBarText = makeText(this.scene, cx - 8, y + 6, `${fmt(this.state.resources[res] ?? D(0))}`, 24, '#DDDDDD', {
+
+    this.resBarName = makeText(this.scene, cx, cy, RESOURCES[res].name, 22, '#DDDDDD', {
       fontStyle: 'bold',
-    }).setOrigin(0, 0).setDepth(11);
+    }).setOrigin(0, 0.5).setDepth(11);
+
+    this.resBarText = makeText(this.scene, cx, cy, `${fmt(this.state.resources[res] ?? D(0))}`, 24, '#FFD700', {
+      fontStyle: 'bold',
+    }).setOrigin(0, 0.5).setDepth(11);
+
+    this.layoutResourceBar();
+  }
+
+  /** Center the [icon] Name count cluster as one tight, horizontally-centered group. */
+  private layoutResourceBar(): void {
+    const cx = LAYOUT.CENTER_X;
+    const gap = 14;
+    const iconW = this.resBarIcon?.visible ? this.resBarIcon.displayWidth : 0;
+    const nameW = this.resBarName?.width ?? 0;
+    const countW = this.resBarText?.width ?? 0;
+    const total = iconW + (iconW ? gap : 0) + nameW + gap + countW;
+    let x = cx - total / 2;
+    if (this.resBarIcon && iconW) { this.resBarIcon.x = x + iconW / 2; x += iconW + gap; }
+    if (this.resBarName) { this.resBarName.x = x; x += nameW + gap; }
+    if (this.resBarText) { this.resBarText.x = x; }
   }
 
   /* ---- Tab bar ---- */
@@ -446,11 +551,30 @@ export class UIManager {
 
         this.tabBGs.set(tabId, bg);
         (bg as unknown as Record<string, Phaser.GameObjects.Text>).__tabTxt = txt;
+
+        // Alert dot (red circle + "!") in the tab's top-right corner — shown when
+        // that tab has something waiting and you're on a DIFFERENT tab.
+        if (tabId === 'upgrades' || tabId === 'explore') {
+          const dot = this.scene.add.container(x + tabW / 2 - 6, centerY - rowH / 2 + 4).setDepth(12);
+          const circle = this.scene.add.circle(0, 0, 11, 0xff3030).setStrokeStyle(2, 0x000000);
+          const bang = makeText(this.scene, 0, 0, '!', 15, '#FFFFFF', { fontStyle: 'bold' }).setOrigin(0.5);
+          dot.add([circle, bang]);
+          dot.setVisible(false);
+          this.tabNotifDots.set(tabId, dot);
+        }
       }
     };
 
     buildRow(row1, row1Y);
     buildRow(row2, row2Y);
+  }
+
+  /** Show/hide the per-tab alert dots (only when you're on a different tab). */
+  private refreshTabNotifs(): void {
+    const up = this.tabNotifDots.get('upgrades');
+    if (up) up.setVisible(this.activeTab !== 'upgrades' && this.state.hasAffordableUpgrade());
+    const ex = this.tabNotifDots.get('explore');
+    if (ex) ex.setVisible(this.activeTab !== 'explore' && this.state.canDescendToNew());
   }
 
   /* ---- Explore panel (log + action buttons) ---- */
@@ -508,33 +632,54 @@ export class UIManager {
       .setOrigin(0.5).setDepth(16);
     panel.add(this.hintText);
 
+    // The player avatar — you, running endlessly through the backrooms. Sits
+    // up top, above the entity/ambient flavor line (flavor is at iconCy - 200),
+    // and loops the run cycle so the screen always feels like forward motion.
+    // The sprite sheet already bakes in its own shadow.
+    const runnerY = iconCy - 330;
+    this.buddyRunner = this.scene.add.sprite(cx, runnerY, `buddy${this.buddySuit}`)
+      .setScale(1.7).setDepth(16);
+    // Play the one-shot spawn ("appearing") animation, then settle into the run
+    // loop. If the player taps him during the intro, the click handler takes over.
+    this.buddyRunner.play(`buddy${this.buddySuit}_spawn`);
+    this.buddyRunner.once(Phaser.Animations.Events.ANIMATION_COMPLETE, () => {
+      if (this.buddyState === 'run' && this.buddyRunner) this.buddyRunner.play(`buddy${this.buddySuit}_run`);
+    });
+    panel.add(this.buddyRunner);
+
+    // Clicks steer the avatar: tap off him to point him toward the click and run
+    // (left of center = run left, right = run right); tap him to stop (stand00),
+    // and keep tapping him to chat. A chat finishes back to standing.
+    this.scene.input.on('pointerdown', (pointer: Phaser.Input.Pointer) => this.onBuddyPointer(pointer));
+
     this.panels.set('explore', panel);
 
     // Initial focal icon = this floor's ore.
     this.popShowcase(this.state.floorOre.resource, this.state.floorOre.tier);
   }
 
-  /* ---- Tap / hold to mine (cooldown-gated) ---- */
+  /* ---- Tap / hold to search ---- */
 
-  private tryMine(): void {
+  // Auto-repeat cadence while HOLDING. Discrete taps are NOT gated by this — every
+  // tap registers as one search, so fast tapping lands every hit.
+  private static readonly HOLD_REPEAT_MS = 200;
+
+  private doSearch(): void {
     if (this.activeTab !== 'explore') return;
-    const now = this.scene.time.now;
-    if (now - this.lastMineTime < this.state.mineCooldownMs) return;
-    this.lastMineTime = now;
     this.cb.onSearch();
     this.pulseShowcase();
   }
 
   private startHoldExplore(): void {
     if (this.activeTab !== 'explore') return;
-    // Discrete press: always replay the pop animation, even if the throttle from a
-    // previous tap is still cooling down.
+    // Every discrete press = exactly one search (no cooldown). The timer only
+    // drives auto-repeat for a held press; a quick tap releases before it fires.
     this.pulseShowcase(true);
-    this.tryMine();
+    this.doSearch();
     this.holdTimer?.remove();
-    // Poll often; tryMine self-gates by the (upgradeable) cooldown, and its pulses
-    // stay throttled so a held press doesn't jitter the icon.
-    this.holdTimer = this.scene.time.addEvent({ delay: 40, loop: true, callback: () => this.tryMine() });
+    this.holdTimer = this.scene.time.addEvent({
+      delay: UIManager.HOLD_REPEAT_MS, loop: true, callback: () => this.doSearch(),
+    });
   }
 
   private stopHoldExplore(): void {
@@ -611,12 +756,12 @@ export class UIManager {
 
   private createItemsPanel(): void {
     const panel = this.scene.add.container(0, 0).setDepth(15);
-    const startY = LAYOUT.CONTENT_TOP + 10;
+    const startY = LAYOUT.CONTENT_TOP_WIDE + 10;
     const rowH = 75;
 
     // Scrollable container — the resource list is far taller than the screen now.
     const scrollContainer = this.scene.add.container(0, 0);
-    const contentH = LAYOUT.CONTENT_BOTTOM - LAYOUT.CONTENT_TOP - 10;
+    const contentH = LAYOUT.CONTENT_BOTTOM_WIDE - LAYOUT.CONTENT_TOP_WIDE - 10;
 
     for (let i = 0; i < RESOURCE_ORDER.length; i++) {
       const resId = RESOURCE_ORDER[i];
@@ -661,14 +806,14 @@ export class UIManager {
     // Clip to the content area so scrolled rows don't bleed over the tab bar.
     const maskGfx = this.scene.add.graphics();
     maskGfx.setVisible(false);
-    maskGfx.fillRect(0, LAYOUT.CONTENT_TOP, LAYOUT.GAME_WIDTH, contentH);
+    maskGfx.fillRect(0, LAYOUT.CONTENT_TOP_WIDE, LAYOUT.GAME_WIDTH, contentH);
     panel.setMask(maskGfx.createGeometryMask());
 
     // Drag to scroll when the list overflows.
     const totalH = RESOURCE_ORDER.length * rowH;
     if (totalH > contentH) {
       const dragZone = this.scene.add.rectangle(
-        LAYOUT.CENTER_X, LAYOUT.CONTENT_TOP + contentH / 2,
+        LAYOUT.CENTER_X, LAYOUT.CONTENT_TOP_WIDE + contentH / 2,
         LAYOUT.GAME_WIDTH, contentH, 0x000000, 0,
       ).setDepth(16).setInteractive();
 
@@ -702,110 +847,137 @@ export class UIManager {
 
   /* ---- Upgrade panel ---- */
 
+  // One row's internal geometry, defined ONCE (local offsets from the row top).
+  // Rows are uniform and positioned by relayoutUpgrades(), so there is no
+  // per-index math and nothing can overlap regardless of how many upgrades exist.
+  private static readonly UPG_ROW_H = 162;   // includes the gap between cards
+  private static readonly UPG_LEFT = 40;
+  private static readonly UPG_BTN_W = 640;   // spans the card (676) with even padding
+  private static readonly UPG_BTN_H = 56;
+  private static readonly UPG_BTN_CY = 112;   // button vertical center within the row
+
   private createUpgradePanel(): void {
     const panel = this.scene.add.container(0, 0).setDepth(15);
-    const startY = LAYOUT.CONTENT_TOP + 10;
+    const contentH = LAYOUT.CONTENT_BOTTOM_WIDE - LAYOUT.CONTENT_TOP_WIDE - 10;
 
-    // Scrollable container for upgrades
     const scrollContainer = this.scene.add.container(0, 0);
-    const contentH = LAYOUT.CONTENT_BOTTOM - LAYOUT.CONTENT_TOP - 10;
+    this.upgScroll = scrollContainer;
 
-    for (let i = 0; i < UPGRADES.length; i++) {
-      const upg = UPGRADES[i];
-      const y = startY + i * 100;
+    const LX = UIManager.UPG_LEFT;
+    const BW = UIManager.UPG_BTN_W;
+    const BH = UIManager.UPG_BTN_H;
+    const BCY = UIManager.UPG_BTN_CY;
+
+    for (const upg of UPGRADES) {
+      // Row container; its y is assigned by relayoutUpgrades(). Children use
+      // fixed LOCAL offsets — name / desc / level stacked, then the cost button.
       const row = this.scene.add.container(0, 0);
 
-      // Name + level
+      const nameTxt = makeText(this.scene, LX, 0, upg.name, 22, '#EEEEEE', { fontStyle: 'bold' });
+      const descTxt = makeText(this.scene, LX, 32, upg.description, 14, '#AAAAAA');
       const lvl = this.state.getUpgradeLevel(upg.id);
-      const upgIcon = this.createIcon(58, y + 12, upg.id, 90);
-      let nameTxt: Phaser.GameObjects.Text;
-      if (upgIcon) {
-        row.add(upgIcon);
-        nameTxt = makeText(this.scene, 112, y, upg.name, 20, '#EEEEEE', { fontStyle: 'bold' });
-      } else {
-        nameTxt = makeText(this.scene, 40, y, `${upg.icon}  ${upg.name}`, 20, '#EEEEEE', { fontStyle: 'bold' });
-      }
-      const lvlTxt = makeText(this.scene, 640, y, `Lv.${lvl}/${upg.maxLevel}`, 16, '#AAAAAA')
-        .setOrigin(1, 0);
+      const lvlTxt = makeText(this.scene, LX, 58, `Lv ${lvl}/${upg.maxLevel}`, 16, '#9fd0a0');
       this.upgLvlLabels.set(upg.id, lvlTxt);
 
-      // Description + effect
-      const currentEffect = lvl * upg.effectPerLevel;
-      const descStr = `${upg.description}  |  +${currentEffect}${upg.effectUnit}`;
-      const descTxt = makeText(this.scene, upgIcon ? 112 : 60, y + 26, descStr, 14, '#AAAAAA');
-      this.upgCostLabels.set(`desc_${upg.id}`, descTxt);
+      // Cost line = the buy button (a pill): "[icon] owned/cost ResourceName".
+      const btnBg = this.scene.add.rectangle(LX + BW / 2, BCY, BW, BH, 0x333333, 1)
+        .setStrokeStyle(2, 0x555555)
+        .setInteractive({ useHandCursor: true });
+      // Buy on RELEASE, and only if this gesture wasn't a scroll-drag.
+      btnBg.on('pointerup', () => { if (!this.upgDragMoved) this.cb.onBuyUpgrade(upg.id); });
+      const costIcon = this.createIcon(LX + 34, BCY, upg.costResource, 48);
+      if (costIcon) this.upgCostIcons.set(upg.id, costIcon);
+      const costLabel = makeText(this.scene, LX + 66, BCY, '', 18, '#FFFFFF', { fontStyle: 'bold' })
+        .setOrigin(0, 0.5);
 
-      // Cost + buy button on same line
-      const cost = this.state.getUpgradeCost(upg.id);
-      const costRes = RESOURCES[upg.costResource];
-      const costTxt = makeText(this.scene, upgIcon ? 112 : 60, y + 50, `Cost: ${fmt(cost)} ${costRes.icon}`, 16, '#CCCCCC');
-      this.upgCostLabels.set(upg.id, costTxt);
+      // Each upgrade gets its own card (added first so it sits behind the content).
+      // Spans local y -6..138 around the stacked content; the row's extra height
+      // (UPG_ROW_H) leaves a gap to the next card.
+      const card = this.scene.add.rectangle(LAYOUT.CENTER_X, 70, 676, 152, 0x1e1e1e, 0.9)
+        .setStrokeStyle(1, 0x3a3a3a);
 
-      const canBuy = this.state.canAffordUpgrade(upg.id);
-      const btnColor = canBuy ? 0x336633 : 0x333333;
-      const buyBtn = makeBtn(this.scene, 600, y + 56, canBuy ? 'BUY' : '---', 110, 32, btnColor, () => {
-        this.cb.onBuyUpgrade(upg.id);
-      });
-      this.upgBuyBtns.set(upg.id, buyBtn);
-
-      row.add([nameTxt, lvlTxt, descTxt, costTxt, buyBtn]);
-
-      // Divider line
-      const divider = this.scene.add.rectangle(LAYOUT.CENTER_X, y + 88, 620, 1, 0x444444).setDepth(15);
-      row.add(divider);
+      row.add(card);
+      row.add([nameTxt, descTxt, lvlTxt, btnBg]);
+      if (costIcon) row.add(costIcon);
+      row.add(costLabel);
 
       scrollContainer.add(row);
+      this.upgRows.set(upg.id, row);
+      this.upgBuyBg.set(upg.id, btnBg);
+      this.upgCostLabels.set(upg.id, costLabel);
+      this.updateCostButton(upg);
     }
 
     panel.add(scrollContainer);
 
-    // Add mask to clip content to the content area
+    // Clip to the content area.
     const maskGfx = this.scene.add.graphics();
     maskGfx.setVisible(false);
-    maskGfx.fillRect(0, LAYOUT.CONTENT_TOP, LAYOUT.GAME_WIDTH, contentH);
+    maskGfx.fillRect(0, LAYOUT.CONTENT_TOP_WIDE, LAYOUT.GAME_WIDTH, contentH);
     panel.setMask(maskGfx.createGeometryMask());
 
-    // Enable drag scrolling when content overflows
-    const totalH = UPGRADES.length * 100;
-    if (totalH > contentH) {
-      const dragZone = this.scene.add.rectangle(
-        LAYOUT.CENTER_X, LAYOUT.CONTENT_TOP + contentH / 2,
-        LAYOUT.GAME_WIDTH, contentH, 0x000000, 0,
-      ).setDepth(16).setInteractive();
-
-      let dragging = false;
-      let lastY = 0;
-      const minScroll = -(totalH - contentH);
-
-      dragZone.on('pointerdown', (_p: Phaser.Input.Pointer) => {
-        dragging = true;
-        lastY = _p.y;
-      });
-      this.scene.input.on('pointermove', (_p: Phaser.Input.Pointer) => {
-        if (!dragging || !this.panels.get('upgrades')?.visible) return;
-        const dy = _p.y - lastY;
-        lastY = _p.y;
-        scrollContainer.y = Phaser.Math.Clamp(scrollContainer.y + dy, minScroll, 0);
-      });
-      this.scene.input.on('pointerup', () => { dragging = false; });
-
-      // Mouse-wheel scroll for PC players.
-      this.scene.input.on('wheel', (_p: Phaser.Input.Pointer, _o: unknown, _dx: number, dy: number) => {
-        if (!this.panels.get('upgrades')?.visible) return;
-        scrollContainer.y = Phaser.Math.Clamp(scrollContainer.y - dy, minScroll, 0);
-      });
-
-      panel.add(dragZone);
-    }
+    // Scroll via GLOBAL pointer drag (no covering hit-zone, so the row buttons
+    // stay tappable). A move past a small threshold marks the gesture a drag,
+    // which cancels the button's buy-on-release. Bounds come from relayout.
+    this.scene.input.on('pointerdown', (p: Phaser.Input.Pointer) => {
+      if (this.activeTab !== 'upgrades') return;
+      if (p.y < LAYOUT.CONTENT_TOP_WIDE || p.y > LAYOUT.CONTENT_BOTTOM_WIDE) return;
+      this.upgDragActive = true;
+      this.upgDragMoved = false;
+      this.upgDragStartPointer = p.y;
+      this.upgDragStartScroll = scrollContainer.y;
+    });
+    this.scene.input.on('pointermove', (p: Phaser.Input.Pointer) => {
+      if (!this.upgDragActive) return;
+      const dy = p.y - this.upgDragStartPointer;
+      if (Math.abs(dy) > 6) this.upgDragMoved = true;
+      scrollContainer.y = Phaser.Math.Clamp(this.upgDragStartScroll + dy, this.upgMinScroll, 0);
+    });
+    this.scene.input.on('pointerup', () => { this.upgDragActive = false; });
+    this.scene.input.on('wheel', (_p: Phaser.Input.Pointer, _o: unknown, _dx: number, dy: number) => {
+      if (this.activeTab !== 'upgrades' || !this.upgScroll) return;
+      this.upgScroll.y = Phaser.Math.Clamp(this.upgScroll.y - dy, this.upgMinScroll, 0);
+    });
 
     this.panels.set('upgrades', panel);
+    this.relayoutUpgrades();
+  }
+
+  /**
+   * Position the visible upgrade rows in a single stack and recompute scroll
+   * bounds. Hidden rows (e.g. maxed when hideMaxed is on) claim no space, so the
+   * list always packs tight no matter the count or filter.
+   */
+  private relayoutUpgrades(): void {
+    const startY = LAYOUT.CONTENT_TOP_WIDE + 10;
+    const contentH = LAYOUT.CONTENT_BOTTOM_WIDE - LAYOUT.CONTENT_TOP_WIDE - 10;
+    const rowH = UIManager.UPG_ROW_H;
+    let shown = 0;
+    for (const upg of UPGRADES) {
+      const row = this.upgRows.get(upg.id);
+      if (!row) continue;
+      const maxed = this.state.getUpgradeLevel(upg.id) >= upg.maxLevel;
+      const hidden = this.hideMaxedUpgrades && maxed;
+      row.setVisible(!hidden);
+      if (hidden) continue;
+      row.y = startY + shown * rowH;
+      shown++;
+    }
+    this.upgMinScroll = Math.min(0, contentH - shown * rowH);
+    if (this.upgScroll) this.upgScroll.y = Phaser.Math.Clamp(this.upgScroll.y, this.upgMinScroll, 0);
+  }
+
+  /** Toggle hiding fully-upgraded rows (ready for a future settings switch). */
+  setHideMaxedUpgrades(hide: boolean): void {
+    this.hideMaxedUpgrades = hide;
+    this.relayoutUpgrades();
   }
 
   /* ---- Void panel (prestige upgrades + rewind) ---- */
 
   private createVoidPanel(): void {
     const panel = this.scene.add.container(0, 0).setDepth(15);
-    const startY = LAYOUT.CONTENT_TOP + 10;
+    const startY = LAYOUT.CONTENT_TOP_WIDE + 10;
     const cx = LAYOUT.CENTER_X;
 
     // Title
@@ -930,16 +1102,16 @@ export class UIManager {
     panel.add(scrollContainer);
 
     // Mask and scroll
-    const contentH = LAYOUT.CONTENT_BOTTOM - LAYOUT.CONTENT_TOP - 10;
+    const contentH = LAYOUT.CONTENT_BOTTOM_WIDE - LAYOUT.CONTENT_TOP_WIDE - 10;
     const maskGfx = this.scene.add.graphics();
     maskGfx.setVisible(false);
-    maskGfx.fillRect(0, LAYOUT.CONTENT_TOP, LAYOUT.GAME_WIDTH, contentH);
+    maskGfx.fillRect(0, LAYOUT.CONTENT_TOP_WIDE, LAYOUT.GAME_WIDTH, contentH);
     panel.setMask(maskGfx.createGeometryMask());
 
     const totalH = rewindBtnY + 60 - startY;
     if (totalH > contentH) {
       const dragZone = this.scene.add.rectangle(
-        cx, LAYOUT.CONTENT_TOP + contentH / 2,
+        cx, LAYOUT.CONTENT_TOP_WIDE + contentH / 2,
         LAYOUT.GAME_WIDTH, contentH, 0x000000, 0,
       ).setDepth(16).setInteractive();
 
@@ -1017,7 +1189,7 @@ export class UIManager {
     const panel = this.scene.add.container(0, 0).setDepth(15);
     const scrollContainer = this.scene.add.container(0, 0);
     const cx = LAYOUT.CENTER_X;
-    let curY = LAYOUT.CONTENT_TOP + 10;
+    let curY = LAYOUT.CONTENT_TOP_WIDE + 10;
 
     // Equipment title
     const eqTitle = makeText(this.scene, cx, curY, 'EQUIPMENT', 22, '#AAAAAA', {
@@ -1121,16 +1293,16 @@ export class UIManager {
     panel.add(scrollContainer);
 
     // Mask and scroll
-    const contentH = LAYOUT.CONTENT_BOTTOM - LAYOUT.CONTENT_TOP - 10;
+    const contentH = LAYOUT.CONTENT_BOTTOM_WIDE - LAYOUT.CONTENT_TOP_WIDE - 10;
     const maskGfx = this.scene.add.graphics();
     maskGfx.setVisible(false);
-    maskGfx.fillRect(0, LAYOUT.CONTENT_TOP, LAYOUT.GAME_WIDTH, contentH);
+    maskGfx.fillRect(0, LAYOUT.CONTENT_TOP_WIDE, LAYOUT.GAME_WIDTH, contentH);
     panel.setMask(maskGfx.createGeometryMask());
 
-    const totalH = curY - LAYOUT.CONTENT_TOP;
+    const totalH = curY - LAYOUT.CONTENT_TOP_WIDE;
     if (totalH > contentH) {
       const dragZone = this.scene.add.rectangle(
-        cx, LAYOUT.CONTENT_TOP + contentH / 2,
+        cx, LAYOUT.CONTENT_TOP_WIDE + contentH / 2,
         LAYOUT.GAME_WIDTH, contentH, 0x000000, 0,
       ).setDepth(16).setInteractive();
 
@@ -1232,7 +1404,7 @@ export class UIManager {
     const panel = this.scene.add.container(0, 0).setDepth(15);
     const scrollContainer = this.scene.add.container(0, 0);
     const cx = LAYOUT.CENTER_X;
-    let curY = LAYOUT.CONTENT_TOP + 10;
+    let curY = LAYOUT.CONTENT_TOP_WIDE + 10;
 
     // Title with void shard icon
     const vsIcon = this.createIcon(cx - 148, curY + 14, 'void_shard', 80);
@@ -1369,16 +1541,16 @@ export class UIManager {
     panel.add(scrollContainer);
 
     // Mask and scroll
-    const contentH = LAYOUT.CONTENT_BOTTOM - LAYOUT.CONTENT_TOP - 10;
+    const contentH = LAYOUT.CONTENT_BOTTOM_WIDE - LAYOUT.CONTENT_TOP_WIDE - 10;
     const maskGfx = this.scene.add.graphics();
     maskGfx.setVisible(false);
-    maskGfx.fillRect(0, LAYOUT.CONTENT_TOP, LAYOUT.GAME_WIDTH, contentH);
+    maskGfx.fillRect(0, LAYOUT.CONTENT_TOP_WIDE, LAYOUT.GAME_WIDTH, contentH);
     panel.setMask(maskGfx.createGeometryMask());
 
-    const totalH = curY - LAYOUT.CONTENT_TOP;
+    const totalH = curY - LAYOUT.CONTENT_TOP_WIDE;
     if (totalH > contentH) {
       const dragZone = this.scene.add.rectangle(
-        cx, LAYOUT.CONTENT_TOP + contentH / 2,
+        cx, LAYOUT.CONTENT_TOP_WIDE + contentH / 2,
         LAYOUT.GAME_WIDTH, contentH, 0x000000, 0,
       ).setDepth(16).setInteractive();
 
@@ -1472,13 +1644,70 @@ export class UIManager {
     if (tab === 'void') this.refreshVoidPanel();
     if (tab === 'gear') this.refreshGearPanel();
     if (tab === 'shop') this.refreshShopPanel();
+    this.refreshTabNotifs();   // hide the current tab's dot, re-show others' as needed
 
     // Toggle showcase icon visibility with explore tab
     if (this.showcaseBig) this.showcaseBig.setVisible(tab === 'explore');
     if (tab !== 'explore') this.stopHoldExplore();
 
+    // The bottom resource readout reflects the resource you're actively
+    // collecting, so it only belongs on the explore page.
+    const onExplore = tab === 'explore';
+    this.resBarCard?.setVisible(onExplore);
+    this.resBarName?.setVisible(onExplore);
+    this.resBarText?.setVisible(onExplore);
+    if (onExplore) this.updateResourceBar();        // refreshes icon + relayout
+    else this.resBarIcon?.setVisible(false);
+
+    // Explore uses the full header + a resource bar below the content; other tabs
+    // collapse the header to a title band and reclaim the space top and bottom.
+    const cTop = onExplore ? LAYOUT.CONTENT_TOP : LAYOUT.CONTENT_TOP_WIDE;
+    const cBottom = onExplore ? LAYOUT.CONTENT_BOTTOM : LAYOUT.CONTENT_BOTTOM_WIDE;
+    this.setContentBounds(cTop, cBottom);
+
+    // Header: full floor status on Explore; just the menu title (centered in the
+    // slim header band) elsewhere.
+    this.levelText.setText(onExplore ? this.state.level.name : this.headerTitle(tab))
+      .setY(onExplore ? 42 : (8 + (cTop - 12)) / 2);
+    this.depthText.setVisible(onExplore);
+    this.progBarBg.setVisible(onExplore);
+    this.progFill.setVisible(onExplore);
+    this.progLabel.setVisible(onExplore);
+    this.roomsLabel.setVisible(onExplore);
+
     // Hide void notification dot when viewing VOID tab
     if (tab === 'void' && this.voidNotifDot) this.voidNotifDot.setVisible(false);
+  }
+
+  /** Header title shown on non-explore tabs (the menu name). */
+  private headerTitle(tab: string): string {
+    switch (tab) {
+      case 'items': return 'ITEMS';
+      case 'upgrades': return 'UPGRADES';
+      case 'void': return 'THE VOID';
+      case 'gear': return 'GEAR';
+      case 'shop': return 'SHOP';
+      default: return this.state.level.name;
+    }
+  }
+
+  /**
+   * Resize the header + content cards to a tab's vertical bounds. The content card
+   * spans `top`..`bottom`; the header card fills the strip above it (down to
+   * `top - 12`). On Explore that's the full header; on menus it's a slim title band.
+   */
+  private setContentBounds(top: number, bottom: number): void {
+    const W = LAYOUT.GAME_WIDTH;
+    if (this.contentCard) {
+      this.contentCard.setPosition(W / 2, (top + bottom) / 2);
+      this.contentCard.setSize(W - 20, bottom - top + 20);
+    }
+    if (this.headerCard) {
+      const hTop = 8;                 // header card starts just below the screen top
+      const hBottom = top - 12;       // ...and ends just above the content card
+      this.headerCard.setPosition(W / 2, (hTop + hBottom) / 2);
+      this.headerCard.setSize(W - 20, hBottom - hTop);
+    }
   }
 
   /* ================================================================ */
@@ -1532,6 +1761,9 @@ export class UIManager {
   /* ================================================================ */
 
   updateStatusBars(): void {
+    // Everything here is explore-screen content (exploration bar, node Integrity,
+    // floor arrows). Other tabs show only the menu title — see showTab.
+    if (this.activeTab !== 'explore') return;
     const { BAR_WIDTH, BAR_X } = LAYOUT;
     const s = this.state;
     const ore = s.floorOre;
@@ -1566,7 +1798,7 @@ export class UIManager {
       this.durFill.width = Phaser.Math.Linear(this.durFill.width, 240 * remainPct, 0.25);
       this.durFill.setFillStyle(remainPct > 0.5 ? 0xffcc44 : remainPct > 0.25 ? 0xff9933 : 0xff5544);
     }
-    // Explicit HP readout so it's clear how much is left to collect the resource.
+    // Explicit HP readout. During respawn this naturally reads "0 / max".
     if (this.durLabel) {
       this.durLabel.setText(`${fmt(remaining)} / ${fmt(integ)}`);
     }
@@ -1612,20 +1844,29 @@ export class UIManager {
     // the active floor.
     const res = this.state.floorOre.resource;
     const key = `icon_${res}`;
+    // The readout only lives on the explore tab; never re-show it elsewhere.
+    const onExplore = this.activeTab === 'explore';
     const hasIcon = this.scene.textures.exists(key);
     if (this.resBarIcon) {
-      if (hasIcon) {
-        this.resBarIcon.setTexture(key).setScale(80 / ICON_NATIVE).setVisible(true);
+      if (hasIcon && onExplore) {
+        this.resBarIcon.setTexture(key).setScale(72 / ICON_NATIVE).setVisible(true);
       } else {
         this.resBarIcon.setVisible(false);
       }
     }
-    if (this.resBarText) {
-      const count = fmt(this.state.resources[res] ?? D(0));
-      this.resBarText.setText(hasIcon ? `${count}` : `${RESOURCES[res].icon} ${count}`);
+    if (this.resBarName) {
+      // Fall back to the emoji glyph as a prefix when no PNG icon is loaded.
+      this.resBarName.setText(hasIcon ? RESOURCES[res].name : `${RESOURCES[res].icon} ${RESOURCES[res].name}`);
     }
+    if (this.resBarText) {
+      this.resBarText.setText(fmt(this.state.resources[res] ?? D(0)));
+    }
+    this.layoutResourceBar();
     // Keep item counts in sync when viewing items tab
     if (this.activeTab === 'items') this.refreshItemCounts();
+    // Collecting may have made an upgrade affordable or finished exploring a floor
+    // → refresh the tab alert dots.
+    this.refreshTabNotifs();
   }
 
   refreshItemCounts(): void {
@@ -1635,35 +1876,60 @@ export class UIManager {
     }
   }
 
+  /**
+   * Refresh the cost-line button: "[icon] owned/cost ResourceName" (or MAXED).
+   * Green when affordable, dark otherwise; the icon hides at max level.
+   */
+  private updateCostButton(upg: UpgradeDef): void {
+    const lvl = this.state.getUpgradeLevel(upg.id);
+    const maxed = lvl >= upg.maxLevel;
+    const canBuy = this.state.canAffordUpgrade(upg.id);
+    const owned = this.state.resources[upg.costResource] ?? D(0);
+    const cost = this.state.getUpgradeCost(upg.id);
+    const resName = RESOURCES[upg.costResource].name;
+    const LX = UIManager.UPG_LEFT;
+
+    const bg = this.upgBuyBg.get(upg.id);
+    if (bg) bg.setFillStyle(maxed ? 0x2a2a2a : canBuy ? 0x336633 : 0x333333);
+    const icon = this.upgCostIcons.get(upg.id);
+    if (icon) icon.setVisible(!maxed);
+    const label = this.upgCostLabels.get(upg.id);
+    if (label) {
+      if (maxed) {
+        // Green and centered in the button.
+        label.setText('MAXED').setColor('#7CFF7C')
+          .setOrigin(0.5, 0.5).setX(LX + UIManager.UPG_BTN_W / 2);
+      } else {
+        label.setText(`${fmt(owned)}/${fmt(cost)} ${resName}`).setColor('#FFFFFF')
+          .setOrigin(0, 0.5).setX(icon ? LX + 66 : LX + 18);
+      }
+    }
+  }
+
   refreshUpgradePanel(): void {
     for (const upg of UPGRADES) {
       const lvl = this.state.getUpgradeLevel(upg.id);
       const lvlTxt = this.upgLvlLabels.get(upg.id);
-      if (lvlTxt) lvlTxt.setText(`Lv.${lvl}/${upg.maxLevel}`);
+      if (lvlTxt) lvlTxt.setText(`Lv ${lvl}/${upg.maxLevel}`);
+      this.updateCostButton(upg);
+    }
+    // A purchase can max a row (and, with hideMaxed on, remove it) → restack.
+    this.relayoutUpgrades();
+  }
 
-      const descTxt = this.upgCostLabels.get(`desc_${upg.id}`);
-      if (descTxt) {
-        const currentEffect = lvl * upg.effectPerLevel;
-        descTxt.setText(`${upg.description}  |  +${currentEffect}${upg.effectUnit}`);
-      }
-
-      const costTxt = this.upgCostLabels.get(upg.id);
-      if (costTxt) {
-        const cost = this.state.getUpgradeCost(upg.id);
-        const costRes = RESOURCES[upg.costResource];
-        costTxt.setText(
-          lvl >= upg.maxLevel ? 'MAXED' : `Cost: ${fmt(cost)} ${costRes.icon}`,
-        );
-      }
-
-      const btn = this.upgBuyBtns.get(upg.id);
-      if (btn) {
-        const canBuy = this.state.canAffordUpgrade(upg.id);
-        const bg = btn.getAt(0) as Phaser.GameObjects.Rectangle;
-        const txt = btn.getAt(1) as Phaser.GameObjects.Text;
-        bg.setFillStyle(canBuy ? 0x336633 : 0x333333);
-        txt.setText(lvl >= upg.maxLevel ? 'MAX' : canBuy ? 'BUY' : '---');
-      }
+  /**
+   * Per-tick refresh of ONLY the currently-visible panel's live,
+   * resource-dependent bits (e.g. affordability / owned-vs-cost). Off-screen
+   * panels cost nothing — they re-sync when shown via showTab. This keeps the
+   * per-tick work bounded to one panel no matter how many upgrades/resources
+   * exist. Add new tabs here as they gain dynamic, resource-driven content.
+   */
+  tickRefresh(): void {
+    // The tab alert dots are checked every tick regardless of which tab is open.
+    this.refreshTabNotifs();
+    switch (this.activeTab) {
+      case 'upgrades': this.refreshUpgradePanel(); break;
+      // gear / shop / void affordability hook in here as they're built out.
     }
   }
 
@@ -1949,7 +2215,6 @@ export class UIManager {
     // New floor's ore becomes the focal node.
     this.clearShowcase();
     this.popShowcase(this.state.floorOre.resource, this.state.floorOre.tier);
-    this.lastMineTime = 0;
 
     // Clear void prompt banner + dot (conditions may have changed after rewind)
     if (this.voidPromptBanner) { this.voidPromptBanner.destroy(); this.voidPromptBanner = null; }
