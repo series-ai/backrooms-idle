@@ -81,6 +81,8 @@ export interface GameStats {
   totalExploration: number;
   entitiesEncountered: number;
   resourcesFound: number;
+  qualityFinds: number;
+  mintFinds: number;
   deaths: number;
   levelsEscaped: number;
 }
@@ -91,6 +93,8 @@ export interface GameEvent {
   color: string;
   iconKey?: string;
   value?: number;   // for resource events: the amount gained (drives floating "+N")
+  quality?: boolean; // for resource events: a "quality" find (yielded +1 extra)
+  mint?: boolean;    // for resource events: a "mint" find (yielded +9 extra)
 }
 
 export interface TickResult {
@@ -127,6 +131,8 @@ export class GameState {
   exploration = 0;                 // ore mined on the current floor (toward `required`)
   explorationPerLevel: Record<number, number> = {};
   nodeDamage: Big = D(0);          // Integrity (HP) dealt to the current node — transient, not saved
+  nodeIsQuality = false;           // current node pre-rolled as a quality find (+1) — shown before it breaks
+  nodeIsMint = false;              // current node pre-rolled as MINT (+9, ×1.5 HP) — shown before it breaks
   respawnMsLeft = 0;               // >0 while the broken node is regrowing — transient, not saved
   resources: Record<string, Big> = {};
   upgrades: Record<string, number> = {};
@@ -134,6 +140,8 @@ export class GameState {
     totalExploration: 0,
     entitiesEncountered: 0,
     resourcesFound: 0,
+    qualityFinds: 0,
+    mintFinds: 0,
     deaths: 0,
     levelsEscaped: 0,
   };
@@ -224,9 +232,14 @@ export class GameState {
     return D(GameState.SCALE_BASE).mul(D(GameState.SCALE_GROWTH).pow(this.currentLevel));
   }
 
-  /** Total Integrity (HP) of one node on this floor. */
+  /** A MINT node is tougher — more HP — but pays out far more on break. */
+  private static readonly MINT_HP_MULT = 1.5;
+  /** HP multiplier for the CURRENT node from its grade (mint = ×1.5, else ×1). */
+  get nodeHpMultiplier(): number { return this.nodeIsMint ? GameState.MINT_HP_MULT : 1; }
+
+  /** Total Integrity (HP) of one node on this floor (mint nodes are ×1.5). */
   get nodeIntegrityMax(): Big {
-    return D(this.nodeDurabilityMax).mul(this.nodeScale).floor().max(D(1));
+    return D(this.nodeDurabilityMax).mul(this.nodeScale).mul(this.nodeHpMultiplier).floor().max(D(1));
   }
 
   /** Damage one manual tap deals to a node's Integrity (before a crit roll). */
@@ -277,8 +290,20 @@ export class GameState {
     this.respawnMsLeft -= deltaMs;
     if (this.respawnMsLeft <= 0) {
       this.respawnMsLeft = 0;
-      this.nodeDamage = D(0);   // new node, full Integrity
+      this.spawnFreshNode();   // new node, full Integrity
     }
+  }
+
+  /**
+   * Stand up a fresh, undamaged node and decide NOW whether it's a quality find.
+   * Rolling at spawn (not at break) lets the UI show "QUALITY" above the node so
+   * the player is motivated to break it for the +1 extra.
+   */
+  spawnFreshNode(): void {
+    this.nodeDamage = D(0);
+    // Grades are mutually exclusive; roll the rarer/better MINT first, then quality.
+    this.nodeIsMint = Math.random() < this.mintChance;
+    this.nodeIsQuality = !this.nodeIsMint && Math.random() < this.qualityChance;
   }
 
   /* ---- Hype (timed auto-search boost) ---- *
@@ -419,9 +444,36 @@ export class GameState {
   /** Search power per tap (before the floor magnitude scale). Base 1 + flat + tap-only. */
   get clickPower(): Big { return D(1 + this.flatPower + this.tapPower); }
 
-  /** Auto-searches per SECOND: +1/level Auto Explore plus flat-power upgrades (NOT tap-only). */
+  /**
+   * Explorers the player commands. Each runs auto-searches. Only 1 today; later
+   * upgrades will raise this and every per-Explorer bonus scales with it.
+   */
+  get explorerCount(): number { return 1; }
+
+  /** Drone auto-search (Auto Explore). Feeds the total only — NOT any Explorer. */
+  get droneAuto(): number { return this.sumEffect('autoMine'); }
+
+  /** Per-Explorer auto power that EVERY Explorer gets (Heavy Sweep +2/lvl each). */
+  get explorerSharedAuto(): number { return this.sumEffect('explorerAuto'); }
+
+  /**
+   * Auto power belonging to a single Explorer: the shared per-Explorer power plus
+   * that Explorer's personal bonus. flat-power upgrades (Master Scav, Moth Powers)
+   * are credited to Explorer 1 only. `index` is 0-based (only 0 exists today).
+   */
+  explorerAuto(index = 0): number {
+    return this.explorerSharedAuto + (index === 0 ? this.flatPower : 0);
+  }
+
+  /**
+   * Auto-searches per SECOND (the grand total): drone + every Explorer's auto power.
+   * Heavy Sweep therefore multiplies by Explorer count; Master Scav (Explorer-1 only)
+   * is counted once.
+   */
   get autoPerSecond(): number {
-    return this.getUpgradeLevel('auto_explore') + this.flatPower;
+    let total = this.droneAuto;
+    for (let i = 0; i < this.explorerCount; i++) total += this.explorerAuto(i);
+    return total;
   }
   /**
    * Idle searches per TICK (before the floor magnitude scale). Converted from the
@@ -453,10 +505,40 @@ export class GameState {
       + this.getGearBonus('entityAvoidance') * 0.01);
   }
   /** Chance a broken node yields +1 bonus ore. */
-  get bonusOreChance(): number {
-    let c = 0;
+  /**
+   * Future per-floor output bonus to quality (improving a floor will raise its
+   * quality yield). 0 until that feature lands — this is the seam for it.
+   */
+  get levelQualityBonus(): number { return 0; }
+
+  /**
+   * Chance a collected resource is a "quality" find — yields +1 extra (2 instead
+   * of 1). Starts at 0%; raised by upgrades (effect 'quality') and, later, by
+   * improving floors (levelQualityBonus). Capped at 90%.
+   */
+  get qualityChance(): number {
+    let c = this.levelQualityBonus;
     for (const u of UPGRADES) {
-      if (u.effect === 'bonusOre') c += (u.effectPerLevel / 100) * this.getUpgradeLevel(u.id);
+      if (u.effect === 'quality' || u.effect === 'bonusOre') c += (u.effectPerLevel / 100) * this.getUpgradeLevel(u.id);
+    }
+    return Math.min(0.9, c);
+  }
+
+  /** Extra resources a QUALITY find yields: base +1, plus Quality Find upgrade (+1/lvl). */
+  get qualityBonus(): number { return 1 + this.sumEffect('qualityYield'); }
+
+  /** Future per-floor output bonus to mint chance — seam, 0 until floor-improving lands. */
+  get levelMintBonus(): number { return 0; }
+
+  /**
+   * Chance a collected resource is MINT — yields +9 extra (10 total) but the node
+   * has ×1.5 HP. Rarer/better than quality. Starts at 0%; raised by upgrades
+   * (effect 'mint') and, later, by improving floors. Capped at 90%.
+   */
+  get mintChance(): number {
+    let c = this.levelMintBonus;
+    for (const u of UPGRADES) {
+      if (u.effect === 'mint') c += (u.effectPerLevel / 100) * this.getUpgradeLevel(u.id);
     }
     return Math.min(0.9, c);
   }
@@ -528,12 +610,16 @@ export class GameState {
     const dur = this.nodeIntegrityMax;
     if (this.nodeDamage.lt(dur)) return;
 
+    // Grade decided when this node spawned (shown as "MINT"/"QUALITY" before break).
+    const mint = this.nodeIsMint;
+    const quality = !mint && this.nodeIsQuality;
     let gain = 1;
-    if (Math.random() < this.bonusOreChance) gain += 1;
+    if (mint) { gain += 9; this.stats.mintFinds += 1; }
+    else if (quality) { gain += this.qualityBonus; this.stats.qualityFinds += 1; }
     this.resources[ore.resource] = (this.resources[ore.resource] ?? D(0)).add(gain);   // inventory (uncapped)
     this.stats.resourcesFound += gain;
     this.exploration = Math.min(ore.required, this.exploration + gain);                 // descend progress (capped)
-    events.push({ type: 'resource', message: `+ ${RESOURCES[ore.resource].name}${tierSuffix(ore.tier)}`, color: '#7CFF7C', iconKey: ore.resource, value: gain });
+    events.push({ type: 'resource', message: `+ ${RESOURCES[ore.resource].name}${tierSuffix(ore.tier)}`, color: '#7CFF7C', iconKey: ore.resource, value: gain, quality, mint });
 
     this.respawnMsLeft = this.nodeRespawnTime;
     this.nodeDamage = dur;   // remaining Integrity = 0 (drained) until respawn completes
@@ -561,8 +647,8 @@ export class GameState {
     }
     // New level starts at 0 (never visited)
     this.exploration = this.explorationPerLevel[this.currentLevel] ?? 0;
-    this.nodeDamage = D(0);
     this.respawnMsLeft = 0;
+    this.spawnFreshNode();
     this.stats.levelsEscaped++;
     this.totalDepth++;
     return true;
@@ -576,8 +662,8 @@ export class GameState {
     this.currentLevel = levelId;
     // Restore destination level's exploration
     this.exploration = this.explorationPerLevel[levelId] ?? 0;
-    this.nodeDamage = D(0);
     this.respawnMsLeft = 0;
+    this.spawnFreshNode();
     return true;
   }
 
@@ -887,8 +973,10 @@ export class GameState {
     const effRate = autoRate * this.critMultiplierAvg;
     const fillSec = this.nodeDurabilityMax / effRate;     // seconds to drain one node
     const cycleSec = fillSec + this.nodeRespawnTime / 1000;
-    const count = Math.floor(elapsedSec / cycleSec);
-    if (count > 0) {
+    const cycles = Math.floor(elapsedSec / cycleSec);
+    if (cycles > 0) {
+      // Fold in the average quality (+qualityBonus) and mint (+9) bonuses so offline ≈ live.
+      const count = Math.round(cycles * (1 + this.qualityChance * this.qualityBonus + 9 * this.mintChance));
       this.resources[ore.resource] = (this.resources[ore.resource] ?? D(0)).add(count);
       this.stats.resourcesFound += count;
       this.exploration = Math.min(ore.required, this.exploration + count);
@@ -986,6 +1074,8 @@ export class GameState {
       totalExploration: 0,
       entitiesEncountered: 0,
       resourcesFound: 0,
+      qualityFinds: 0,
+      mintFinds: 0,
       deaths: 0,
       levelsEscaped: 0,
     };
@@ -1096,7 +1186,7 @@ export class GameState {
     const savedRes = (data.resources ?? {}) as Record<string, string | number>;
     for (const key of Object.keys(savedRes)) this.resources[key] = D(savedRes[key]);
     this.upgrades = data.upgrades;
-    this.stats = data.stats;
+    this.stats = { ...data.stats, qualityFinds: data.stats.qualityFinds ?? 0, mintFinds: data.stats.mintFinds ?? 0 };   // default new fields for old saves
     this.ghostWalkTicks = data.ghostWalkTicks ?? 0;
     this.adrenalineTicks = data.adrenalineTicks ?? 0;
     this.lastSaveTime = data.lastSaveTime;
@@ -1155,5 +1245,8 @@ export class GameState {
     // Recalculate max HP/Sanity from both void and run upgrades
     this.maxHealth = Math.max(this.maxHealth, this.baseMaxHealth + this.getUpgradeLevel('tough_body') * 10);
     this.maxSanity = Math.max(this.maxSanity, this.baseMaxSanity + this.getUpgradeLevel('strong_mind') * 10);
+
+    // Stand up the starting node and decide its quality (respawn isn't saved).
+    this.spawnFreshNode();
   }
 }

@@ -128,6 +128,7 @@ export class UIManager {
   private activeMoth?: Phaser.GameObjects.Image;
   private durFill?: Phaser.GameObjects.Rectangle;
   private durLabel?: Phaser.GameObjects.Text;   // "N to collect" readout on the durability bar
+  private qualityLabel?: Phaser.GameObjects.Text;   // "QUALITY" tag above a pre-rolled quality node
 
   // Resource bar
   private resTexts: Map<string, Phaser.GameObjects.Text> = new Map();
@@ -756,6 +757,13 @@ export class UIManager {
       fontStyle: 'bold', stroke: '#000000', strokeThickness: 3,
     }).setOrigin(0.5).setDepth(18);
     panel.add([durBg, this.durFill, this.durLabel]);
+
+    // "QUALITY" tag above the icon — shown only when the current node was pre-rolled
+    // as a quality find, so the player is motivated to break it for the +1 extra.
+    this.qualityLabel = makeText(this.scene, cx, iconCy - 140, 'QUALITY', 26, '#FFA500', {
+      fontStyle: 'bold', stroke: '#000000', strokeThickness: 4,
+    }).setOrigin(0.5).setDepth(18).setVisible(false);
+    panel.add(this.qualityLabel);
 
     // Persistent hint under the icon.
     this.hintText = makeText(this.scene, cx, iconCy + 198, 'Tap or hold to search', 18, '#FFFFFF')
@@ -1890,12 +1898,18 @@ export class UIManager {
         // Fixed spot just below the focal icon — centered, no drift.
         const mx = LAYOUT.CENTER_X;
         const my = this.showcaseCenterY() + 120;
-        const mote = makeText(this.scene, mx, my, `+${evt.value} ${resName}!`, 18, '#FFD700', {
+        // Special finds read big: mint = mint-green ✨ (biggest), quality = orange ✨,
+        // normal = plain gold. Sparkles + a bigger pop scale the rarer it is.
+        const special = evt.mint || evt.quality;
+        const label = special ? `✨ +${evt.value} ${resName}! ✨` : `+${evt.value} ${resName}!`;
+        const color = evt.mint ? '#5FFFC4' : evt.quality ? '#FFA500' : '#FFD700';
+        const popScale = evt.mint ? 1.4 : evt.quality ? 1.25 : 1;
+        const mote = makeText(this.scene, mx, my, label, 18, color, {
           fontStyle: 'bold',
         }).setOrigin(0.5).setDepth(20).setScale(0.4).setAlpha(0);
         this.panels.get('explore')?.add(mote);
         this.scene.tweens.add({
-          targets: mote, scale: 1, alpha: 1, duration: 140, ease: 'Back.easeOut',
+          targets: mote, scale: popScale, alpha: 1, duration: 140, ease: 'Back.easeOut',
           onComplete: () => this.scene.tweens.add({
             targets: mote, alpha: 0, delay: 260, duration: 280, ease: 'Sine.easeIn',
             onComplete: () => mote.destroy(),
@@ -1967,6 +1981,27 @@ export class UIManager {
     // Explicit HP readout. During respawn this naturally reads "0 / max".
     if (this.durLabel) {
       this.durLabel.setText(`${fmt(remaining)} / ${fmt(integ)}`);
+    }
+
+    // Grade tag above the icon: "MINT" (mint green) or "QUALITY" (orange), shown only
+    // on a live pre-rolled node (hidden mid-respawn) so the player breaks it on purpose.
+    if (this.qualityLabel) {
+      const live = !s.isRespawning;
+      const show = live && (s.nodeIsMint || s.nodeIsQuality);
+      if (show) {
+        this.qualityLabel.setText(s.nodeIsMint ? 'MINT' : 'QUALITY');
+        this.qualityLabel.setColor(s.nodeIsMint ? '#5FFFC4' : '#FFA500');
+        if (!this.qualityLabel.visible) {
+          this.qualityLabel.setVisible(true);
+          this.scene.tweens.add({
+            targets: this.qualityLabel, scale: { from: 1, to: 1.12 },
+            duration: 600, yoyo: true, repeat: -1, ease: 'Sine.easeInOut',
+          });
+        }
+      } else if (this.qualityLabel.visible) {
+        this.scene.tweens.killTweensOf(this.qualityLabel);
+        this.qualityLabel.setScale(1).setVisible(false);
+      }
     }
 
     // Right arrow (go deeper): GREEN only when you can descend into NEW territory
@@ -2410,7 +2445,7 @@ export class UIManager {
     modal.add(overlay);
 
     const panelW = 560;
-    const panelH = 540;
+    const panelH = 740;
     const top = cy - panelH / 2;
     const panel = this.scene.add.rectangle(cx, cy, panelW, panelH, 0x141414, 0.98)
       .setStrokeStyle(2, 0x555555).setInteractive();
@@ -2426,12 +2461,19 @@ export class UIManager {
       ['Rewinds', `${s.prestigeCount}`],
       ['Tap power', fmt(s.clickPower)],
       ['Auto search', `${s.autoPerSecond}/s`],
+      // Explorer 1's own auto power (shared per-Explorer power + its personal bonus;
+      // excludes the drone). More Explorers will each get their own line here later.
+      ['Explorer 1', `${s.explorerAuto(0)}/s auto`],
       ['Lucky Find (Crit %)', `${Math.round(s.critChance * 100)}%  ×${s.critMult}`],
       ['Node respawn', `${s.nodeRespawnTime} ms`],
       ['Hype boost', `×${s.hypeMultiplier} auto for ${s.hypeDuration / 1000}s`],
       ['Hype cooldown', `${Math.round(s.hypeCooldown / 60000)} min`],
       ['Auto-Capture (Moth)', `${Math.round(s.autoCaptureChance * 100)}%`],
+      ['Quality chance', `${Math.round(s.qualityChance * 100)}%  (+${s.qualityBonus})`],
+      ['Mint chance', `${Math.round(s.mintChance * 100)}%  (+9)`],
       ['Resources found', `${s.stats.resourcesFound.toLocaleString()}`],
+      ['Quality finds', `${s.stats.qualityFinds.toLocaleString()}`],
+      ['Mint finds', `${s.stats.mintFinds.toLocaleString()}`],
       ['Moths caught', fmt(s.resources['moth'] ?? D(0))],
     ];
     let y = top + 96;

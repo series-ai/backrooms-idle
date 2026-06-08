@@ -39,7 +39,7 @@ export interface EntityDef {
   defeatMessage: string;
 }
 
-export type UpgradeEffect = 'cooldown' | 'power' | 'autoMine' | 'bonusOre' | 'flatPower' | 'critChance' | 'autoCapture' | 'hypeDuration';
+export type UpgradeEffect = 'cooldown' | 'power' | 'autoMine' | 'explorerAuto' | 'bonusOre' | 'quality' | 'qualityYield' | 'mint' | 'flatPower' | 'critChance' | 'autoCapture' | 'hypeDuration';
 
 /* ------------------------------------------------------------------ */
 /*  Floor ores — each level is ONE ore you mine toward a target.       */
@@ -467,6 +467,34 @@ export const UPGRADES: UpgradeDef[] = [
     baseCost: 50, costMultiplier: 1.3, maxLevel: 30,
     effectPerLevel: 0.5, effectUnit: 's hype', costResource: 'carpet_swatch', effect: 'hypeDuration',
     unlockFloor: 2,
+  },
+  // +1% crit chance per level (crits deal ×3). Cost = round(5 × 1.2^level) in
+  // Ceiling Tile — same curve as Auto Explore: 5,6,7,9,10,…,64. Locked until floor 3.
+  {
+    id: 'lucky_find', name: 'Lucky Find', icon: '\u{1F340}',
+    description: '+1% Crit Chance per level (3x damage)',
+    baseCost: 5, costMultiplier: 1.2, maxLevel: 15,
+    effectPerLevel: 1, effectUnit: '% crit', costResource: 'ceiling_tile', effect: 'critChance',
+    unlockFloor: 3,
+  },
+  // Per-EXPLORER auto power (effect 'explorerAuto'): each level gives every Explorer
+  // +2 auto/s, so the auto-search total adds 2×level × (Explorer count). Cost = round(5 ×
+  // 1.2^level) in Fluorescent Tube — same curve as Auto Explore: 5,6,7,9,10,…,64. Locked until floor 4.
+  {
+    id: 'heavy_sweep', name: 'Heavy Sweep', icon: '\u{1F9F9}',
+    description: '+2 auto search power per Explorer per level',
+    baseCost: 5, costMultiplier: 1.2, maxLevel: 15,
+    effectPerLevel: 2, effectUnit: '/s', costResource: 'fluorescent_tube', effect: 'explorerAuto',
+    unlockFloor: 4,
+  },
+  // Boosts the YIELD of a quality find (not the chance): base quality is +1, each
+  // level adds +1 more. Cost = round(1000 × 1.5^level): 1000, 1500. Locked until floor 4.
+  {
+    id: 'quality_find', name: 'Quality Find', icon: '\u{2728}',
+    description: '+1 resource from quality resources per level',
+    baseCost: 1000, costMultiplier: 1.5, maxLevel: 2,
+    effectPerLevel: 1, effectUnit: ' quality resource', costResource: 'fluorescent_tube', effect: 'qualityYield',
+    unlockFloor: 4,
   },
 ];
 
