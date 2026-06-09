@@ -26,6 +26,9 @@ function makeText(
     fontSize: `${size}px`,
     color,
     wordWrap: { width: 640 },
+    // Render at 2× and downsample — keeps small text crisp when the FIT-scaled
+    // canvas resizes (at 1× the rescale smears glyphs into a dark fringe).
+    resolution: 2,
     ...extra,
   });
 }
@@ -156,7 +159,8 @@ export class UIManager {
   private upgLvlLabels: Map<string, Phaser.GameObjects.Text> = new Map();
   private upgNameLabels: Map<string, Phaser.GameObjects.Text> = new Map();
   private upgDescLabels: Map<string, Phaser.GameObjects.Text> = new Map();
-  private upgBuyBg: Map<string, Phaser.GameObjects.Rectangle> = new Map();
+  private upgBuyBg: Map<string, Phaser.GameObjects.Image> = new Map();   // gradient button images
+  private upgCards: Map<string, Phaser.GameObjects.Rectangle> = new Map();   // card backgrounds (dim when maxed)
   // Upgrade list: each row is a self-contained container; relayoutUpgrades()
   // stacks the visible ones. This scales to any number of upgrades and supports
   // filtering (e.g. a future "hide maxed" toggle) without touching row internals.
@@ -193,7 +197,8 @@ export class UIManager {
   private shopLvlLabels: Map<string, Phaser.GameObjects.Text> = new Map();
   private shopCostLabels: Map<string, Phaser.GameObjects.Text> = new Map();
   private shopCostIcons: Map<string, Phaser.GameObjects.Image> = new Map();
-  private shopBuyBg: Map<string, Phaser.GameObjects.Rectangle> = new Map();
+  private shopBuyBg: Map<string, Phaser.GameObjects.Image> = new Map();   // gradient button images
+  private shopCards: Map<string, Phaser.GameObjects.Rectangle> = new Map();   // card backgrounds (dim when maxed)
   private shopScroll?: Phaser.GameObjects.Container;
   private shopMinScroll = 0;
   private shopDragActive = false;
@@ -209,7 +214,8 @@ export class UIManager {
   private achLvlLabels: Map<string, Phaser.GameObjects.Text> = new Map();
   private achProgLabels: Map<string, Phaser.GameObjects.Text> = new Map();
   private achProgFill: Map<string, Phaser.GameObjects.Rectangle> = new Map();
-  private achBtnBg: Map<string, Phaser.GameObjects.Rectangle> = new Map();
+  private achBtnBg: Map<string, Phaser.GameObjects.Image> = new Map();   // gradient button images
+  private achCards: Map<string, Phaser.GameObjects.Rectangle> = new Map();   // card backgrounds (dim when all claimed)
   private achBtnLabels: Map<string, Phaser.GameObjects.Text> = new Map();
   private achBtnIcons: Map<string, Phaser.GameObjects.Image> = new Map();
   private achScroll?: Phaser.GameObjects.Container;
@@ -1120,61 +1126,110 @@ export class UIManager {
 
   /* ---- Upgrade panel ---- */
 
-  // One row's internal geometry, defined ONCE (local offsets from the row top).
-  // Rows are uniform and positioned by relayoutUpgrades(), so there is no
-  // per-index math and nothing can overlap regardless of how many upgrades exist.
-  private static readonly UPG_ROW_H = 162;   // includes the gap between cards
-  private static readonly UPG_LEFT = 40;
-  private static readonly UPG_BTN_W = 640;   // spans the card (676) with even padding
-  private static readonly UPG_BTN_H = 56;
-  private static readonly UPG_BTN_CY = 112;   // button vertical center within the row
+  // One CARD's internal geometry, defined ONCE (local offsets from the card's
+  // container origin). Cards are uniform and laid out in a TWO-COLUMN grid by
+  // relayoutUpgrades(), so there is no per-index math and nothing can overlap
+  // regardless of how many upgrades exist.
+  // Cards are FLUSH: the grid pitch equals the card height and the column
+  // offset equals the card width, so adjacent cards share edges (their 1px
+  // strokes form the grid lines).
+  private static readonly UPG_ROW_H = 158;    // vertical pitch = card height
+  private static readonly UPG_COL_W = 338;    // right-column x offset = card width
+  private static readonly UPG_GRID_X = 8;     // grid left inset (centers 2 × 338 in 720)
+  private static readonly UPG_CARD_W = 338;   // card width
+  private static readonly UPG_CARD_CX = 183;  // card center x within its container
+  private static readonly UPG_LEFT = 28;
+  private static readonly UPG_BTN_W = 310;    // spans the card with even padding
+  private static readonly UPG_BTN_H = 50;
+  private static readonly UPG_BTN_CY = 108;   // button vertical center within the card
+
+  /**
+   * Lazily bake the shared buy-button texture: a bluish-purple vertical
+   * gradient with rounded corners + a light border. One texture, every button
+   * is an Image of it — affordability is shown by ALPHA, not a color swap.
+   *
+   * Drawn directly on a CanvasTexture: Graphics.fillGradientStyle is
+   * WebGL-only and silently drops the FILL when baked via generateTexture
+   * (canvas path), which left only the stroke outline.
+   */
+  private ensureUpgradeBtnTexture(): void {
+    if (this.scene.textures.exists('upg_btn_grad')) return;
+    const w = UIManager.UPG_BTN_W;
+    const h = UIManager.UPG_BTN_H;
+    const r = 12;
+    const tex = this.scene.textures.createCanvas('upg_btn_grad', w, h);
+    if (!tex) return;
+    const ctx = tex.getContext();
+    const grad = ctx.createLinearGradient(0, 0, 0, h);
+    grad.addColorStop(0, '#8a7bff');
+    grad.addColorStop(1, '#5440c8');
+    ctx.beginPath();
+    if (typeof ctx.roundRect === 'function') ctx.roundRect(1, 1, w - 2, h - 2, r);
+    else ctx.rect(1, 1, w - 2, h - 2);   // ancient-browser fallback: square corners
+    ctx.fillStyle = grad;
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = 'rgba(168, 155, 255, 0.9)';
+    ctx.stroke();
+    tex.refresh();
+  }
 
   private createUpgradePanel(): void {
     const panel = this.scene.add.container(0, 0).setDepth(15);
     const contentH = LAYOUT.CONTENT_BOTTOM_WIDE - LAYOUT.CONTENT_TOP_WIDE - 10;
+    this.ensureUpgradeBtnTexture();
 
     const scrollContainer = this.scene.add.container(0, 0);
     this.upgScroll = scrollContainer;
 
     const LX = UIManager.UPG_LEFT;
     const BW = UIManager.UPG_BTN_W;
-    const BH = UIManager.UPG_BTN_H;
     const BCY = UIManager.UPG_BTN_CY;
 
     for (const upg of UPGRADES) {
-      // Row container; its y is assigned by relayoutUpgrades(). Children use
-      // fixed LOCAL offsets — name / desc / level stacked, then the cost button.
+      // Card container; relayoutUpgrades() assigns its grid slot (x = column,
+      // y = row). Children use fixed LOCAL offsets — name / desc / level
+      // stacked, then the gradient buy button.
       const row = this.scene.add.container(0, 0);
 
-      const nameTxt = makeText(this.scene, LX, 0, upg.name, 22, '#EEEEEE', { fontStyle: 'bold' });
-      const descTxt = makeText(this.scene, LX, 32, upg.description, 14, '#AAAAAA');
+      const nameTxt = makeText(this.scene, LX, 4, upg.name, 17, '#EEEEEE', { fontStyle: 'bold' });
+      // Description is HARD-CAPPED at 3 wrapped lines (maxLines) and the Lv
+      // counter lives top-right, so no description length can ever collide.
+      const descTxt = makeText(this.scene, LX, 30, upg.description, 13, '#D8D8D8', {
+        wordWrap: { width: UIManager.UPG_CARD_W - 38 }, maxLines: 3,
+      });
       const lvl = this.state.getUpgradeLevel(upg.id);
-      const lvlTxt = makeText(this.scene, LX, 58, `Lv ${lvl}/${upg.maxLevel}`, 16, '#9fd0a0');
+      const lvlTxt = makeText(this.scene, LX + BW, 6, `Lv ${lvl}/${upg.maxLevel}`, 13, '#9fd0a0')
+        .setOrigin(1, 0);
       this.upgNameLabels.set(upg.id, nameTxt);
       this.upgDescLabels.set(upg.id, descTxt);
       this.upgLvlLabels.set(upg.id, lvlTxt);
 
-      // Cost line = the buy button (a pill): "[icon] owned/cost ResourceName".
-      const btnBg = this.scene.add.rectangle(LX + BW / 2, BCY, BW, BH, 0x333333, 1)
-        .setStrokeStyle(2, 0x555555)
+      // Cost line = the buy button: "[icon] owned/cost ResourceName".
+      const btnBg = this.scene.add.image(LX + BW / 2, BCY, 'upg_btn_grad')
         .setInteractive({ useHandCursor: true });
-      // Buy on RELEASE, and only if this gesture wasn't a scroll-drag.
+      // Press feedback: a quick squeeze while held.
+      btnBg.on('pointerdown', () => btnBg.setScale(0.96));
+      btnBg.on('pointerout', () => btnBg.setScale(1));
       // Buy on RELEASE, only if the gesture wasn't a scroll-drag AND the pointer is
       // inside the content area — masked overflow rows still hit-test over the
       // header/tab strips, where a buy must never trigger.
       btnBg.on('pointerup', (p: Phaser.Input.Pointer) => {
+        btnBg.setScale(1);
         if (!this.upgDragMoved && this.inWideContent(p)) this.cb.onBuyUpgrade(upg.id);
       });
-      const costIcon = this.createIcon(LX + 34, BCY, upg.costResource, 48);
+      // Oversized on purpose — the icon overhangs the button top/bottom for pop.
+      const costIcon = this.createIcon(LX + 38, BCY, upg.costResource, 76);
       if (costIcon) this.upgCostIcons.set(upg.id, costIcon);
-      const costLabel = makeText(this.scene, LX + 66, BCY, '', 18, '#FFFFFF', { fontStyle: 'bold' })
-        .setOrigin(0, 0.5);
+      const costLabel = makeText(this.scene, LX + BW / 2, BCY, '', 13, '#FFFFFF', { fontStyle: 'bold' })
+        .setOrigin(0.5, 0.5);
 
       // Each upgrade gets its own card (added first so it sits behind the content).
-      // Spans local y -6..138 around the stacked content; the row's extra height
-      // (UPG_ROW_H) leaves a gap to the next card.
-      const card = this.scene.add.rectangle(LAYOUT.CENTER_X, 70, 676, 152, 0x1e1e1e, 0.9)
+      // Spans local y -10..148 — ~15px clear under the button (which ends at 133);
+      // full opacity until maxed (updateCostButton dims it).
+      const card = this.scene.add.rectangle(UIManager.UPG_CARD_CX, 69, UIManager.UPG_CARD_W, 158, 0x1e1e1e, 1)
         .setStrokeStyle(1, 0x3a3a3a);
+      this.upgCards.set(upg.id, card);
 
       row.add(card);
       row.add([nameTxt, descTxt, lvlTxt, btnBg]);
@@ -1224,9 +1279,10 @@ export class UIManager {
   }
 
   /**
-   * Position the visible upgrade rows in a single stack and recompute scroll
-   * bounds. Hidden rows (e.g. maxed when hideMaxed is on) claim no space, so the
-   * list always packs tight no matter the count or filter.
+   * Position the visible upgrade cards in a TWO-COLUMN grid (fill order:
+   * left→right, then down) and recompute scroll bounds. Hidden cards (e.g.
+   * maxed when hideMaxed is on) claim no slot, so the grid always packs tight
+   * no matter the count or filter.
    */
   private relayoutUpgrades(): void {
     const startY = LAYOUT.CONTENT_TOP_WIDE + 10;
@@ -1240,10 +1296,12 @@ export class UIManager {
       const hidden = this.state.hideMaxedUpgrades && maxed;
       row.setVisible(!hidden);
       if (hidden) continue;
-      row.y = startY + shown * rowH;
+      row.x = UIManager.UPG_GRID_X + (shown % 2) * UIManager.UPG_COL_W;
+      row.y = startY + Math.floor(shown / 2) * rowH;
       shown++;
     }
-    this.upgMinScroll = Math.min(0, contentH - shown * rowH);
+    const gridRows = Math.ceil(shown / 2);
+    this.upgMinScroll = Math.min(0, contentH - gridRows * rowH);
     if (this.upgScroll) this.upgScroll.y = Phaser.Math.Clamp(this.upgScroll.y, this.upgMinScroll, 0);
   }
 
@@ -1712,9 +1770,9 @@ export class UIManager {
     const scrollContainer = this.scene.add.container(0, 0);
     this.shopScroll = scrollContainer;
 
+    this.ensureUpgradeBtnTexture();
     const LX = UIManager.UPG_LEFT;
     const BW = UIManager.UPG_BTN_W;
-    const BH = UIManager.UPG_BTN_H;
     const BCY = UIManager.UPG_BTN_CY;
     const rowH = UIManager.UPG_ROW_H;
 
@@ -1736,32 +1794,45 @@ export class UIManager {
 
     for (let i = 0; i < SHOP_UPGRADES.length; i++) {
       const sup = SHOP_UPGRADES[i];
-      // Card row — mirrors the upgrade panel (name / desc / level stacked, cost button below).
-      const row = this.scene.add.container(0, firstCardY + i * rowH);
+      // Card in the two-column grid — mirrors the upgrade panel (name / desc /
+      // level stacked, gradient cost button below).
+      const row = this.scene.add.container(
+        UIManager.UPG_GRID_X + (i % 2) * UIManager.UPG_COL_W,
+        firstCardY + Math.floor(i / 2) * rowH,
+      );
 
       // Name line: a loaded PNG icon (iconTexture, e.g. the Lamp Trap's lamp art —
       // same as its explore-page button) beats the emoji prefix; emoji is the fallback.
-      const nameIcon = sup.iconTexture ? this.createIcon(LX + 20, 11, sup.iconTexture, 44) : null;
-      const nameTxt = makeText(this.scene, nameIcon ? LX + 50 : LX, 0,
-        !nameIcon && sup.icon ? `${sup.icon}  ${sup.name}` : sup.name, 22, '#EEEEEE', { fontStyle: 'bold' });
-      const descTxt = makeText(this.scene, LX, 32, sup.description, 14, '#AAAAAA', { wordWrap: { width: 620 } });
+      const nameIcon = sup.iconTexture ? this.createIcon(LX + 16, 12, sup.iconTexture, 36) : null;
+      const nameTxt = makeText(this.scene, nameIcon ? LX + 40 : LX, 4,
+        !nameIcon && sup.icon ? `${sup.icon} ${sup.name}` : sup.name, 17, '#EEEEEE', { fontStyle: 'bold' });
+      // Hard-capped at 3 wrapped lines + top-right Lv counter — a description can
+      // never run into the level line no matter how long it gets.
+      const descTxt = makeText(this.scene, LX, 30, sup.description, 13, '#D8D8D8', {
+        wordWrap: { width: UIManager.UPG_CARD_W - 38 }, maxLines: 3,
+      });
       const lvl = this.state.getShopLevel(sup.id);
-      const lvlTxt = makeText(this.scene, LX, 58, `Lv ${lvl}/${sup.maxLevel}`, 16, '#c8a8ff');
+      const lvlTxt = makeText(this.scene, LX + BW, 6, `Lv ${lvl}/${sup.maxLevel}`, 13, '#c8a8ff')
+        .setOrigin(1, 0);
       this.shopLvlLabels.set(sup.id, lvlTxt);
 
-      const btnBg = this.scene.add.rectangle(LX + BW / 2, BCY, BW, BH, 0x333333, 1)
-        .setStrokeStyle(2, 0x555555)
+      const btnBg = this.scene.add.image(LX + BW / 2, BCY, 'upg_btn_grad')
         .setInteractive({ useHandCursor: true });
+      btnBg.on('pointerdown', () => btnBg.setScale(0.96));
+      btnBg.on('pointerout', () => btnBg.setScale(1));
       btnBg.on('pointerup', (p: Phaser.Input.Pointer) => {
+        btnBg.setScale(1);
         if (!this.shopDragMoved && this.inWideContent(p)) this.cb.onBuyShopUpgrade(sup.id);
       });
-      const costIcon = this.createIcon(LX + 34, BCY, 'void_shard', 44);
+      // Oversized on purpose — overhangs the button top/bottom for pop.
+      const costIcon = this.createIcon(LX + 38, BCY, 'void_shard', 76);
       if (costIcon) this.shopCostIcons.set(sup.id, costIcon);
-      const costLabel = makeText(this.scene, LX + BW / 2, BCY, '', 18, '#FFFFFF', { fontStyle: 'bold' })
+      const costLabel = makeText(this.scene, LX + BW / 2, BCY, '', 13, '#FFFFFF', { fontStyle: 'bold' })
         .setOrigin(0.5, 0.5);
 
-      const card = this.scene.add.rectangle(LAYOUT.CENTER_X, 70, 676, 152, 0x1e1e1e, 0.9)
+      const card = this.scene.add.rectangle(UIManager.UPG_CARD_CX, 69, UIManager.UPG_CARD_W, 158, 0x1e1e1e, 1)
         .setStrokeStyle(1, 0x3a3a3a);
+      this.shopCards.set(sup.id, card);
 
       row.add(card);
       if (nameIcon) row.add(nameIcon);
@@ -1784,7 +1855,8 @@ export class UIManager {
     maskGfx.fillRect(0, LAYOUT.CONTENT_TOP_WIDE, LAYOUT.GAME_WIDTH, contentH);
     panel.setMask(maskGfx.createGeometryMask());
 
-    const totalH = (firstCardY + SHOP_UPGRADES.length * rowH) - (LAYOUT.CONTENT_TOP_WIDE + 10);
+    const gridRows = Math.ceil(SHOP_UPGRADES.length / 2);
+    const totalH = (firstCardY + gridRows * rowH) - (LAYOUT.CONTENT_TOP_WIDE + 10);
     this.shopMinScroll = Math.min(0, contentH - totalH);
 
     // Drag-to-scroll (same gesture model as the upgrade panel, gated to this tab).
@@ -1820,18 +1892,21 @@ export class UIManager {
 
     this.shopLvlLabels.get(sup.id)?.setText(`Lv ${lvl}/${sup.maxLevel}`);
 
-    // When maxed, HIDE the button (and disable its tap) but keep the MAXED label.
+    // When maxed, HIDE the button (and disable its tap) but keep the MAXED label,
+    // and fade the whole card back — it needs no more attention.
+    // Affordability reads as OPACITY on the gradient, same as the upgrade panel.
+    this.shopCards.get(sup.id)?.setAlpha(maxed ? 0.5 : 1);
     const bg = this.shopBuyBg.get(sup.id);
     if (bg) {
       bg.setVisible(!maxed);
       if (bg.input) bg.input.enabled = !maxed;
-      if (!maxed) bg.setFillStyle(canBuy ? 0x443366 : 0x333333);
+      if (!maxed) bg.setAlpha(canBuy ? 1 : 0.35);
     }
-    this.shopCostIcons.get(sup.id)?.setVisible(!maxed);
+    this.shopCostIcons.get(sup.id)?.setVisible(!maxed).setAlpha(canBuy ? 1 : 0.6);
     const label = this.shopCostLabels.get(sup.id);
     if (label) {
-      if (maxed) label.setText('MAXED').setColor('#c8a8ff');
-      else label.setText(`${cost} Void Shards`).setColor(canBuy ? '#FFFFFF' : '#AAAAAA');
+      if (maxed) label.setText('MAXED').setColor('#c8a8ff').setAlpha(1);
+      else label.setText(`${cost} Void Shards`).setColor('#FFFFFF').setAlpha(canBuy ? 1 : 0.7);
     }
   }
 
@@ -1851,16 +1926,17 @@ export class UIManager {
     this.achScroll = scrollContainer;
 
     // Achievement cards are TALLER than upgrade/shop cards to fit a progress bar
-    // between the level line and the claim button. (Local geometry, not the UPG_* set.)
+    // between the level line and the claim button, but share the two-column
+    // grid geometry (UPG_COL_W / UPG_CARD_W).
+    this.ensureUpgradeBtnTexture();
     const LX = UIManager.UPG_LEFT;
-    const BW = UIManager.UPG_BTN_W;        // 640 — shared horizontal span
-    const BH = 50;                         // claim button height
-    const CARD_H = 188;
-    const CARD_CY = 88;                    // card local center (spans -6..182)
-    const BAR_Y = 88;                      // progress bar center
-    const BAR_H = 22;
-    const BCY = 138;                       // claim button center
-    const rowH = CARD_H + 14;              // card + gap
+    const BW = UIManager.UPG_BTN_W;        // 310 — shared horizontal span
+    const CARD_H = 190;
+    const CARD_CY = 85;                    // card local center (spans -10..180 — ~15px under the button)
+    const BAR_Y = 92;                      // progress bar center
+    const BAR_H = 20;
+    const BCY = 140;                       // claim button center
+    const rowH = CARD_H;                   // flush — no gap between cards
     const startY = LAYOUT.CONTENT_TOP_WIDE + 10;
 
     // Header (scrolls with the cards). Line 1: the Void Shard balance (matches the
@@ -1877,18 +1953,26 @@ export class UIManager {
 
     this.achBonusLabel = makeText(this.scene, LX, startY + 44, '', 18, '#9fd0a0', { fontStyle: 'bold' })
       .setOrigin(0, 0);
-    this.achLevelsLabel = makeText(this.scene, LX + BW, startY + 44, '', 16, '#8aa88a')
+    this.achLevelsLabel = makeText(this.scene, LAYOUT.GAME_WIDTH - LX, startY + 44, '', 16, '#8aa88a')
       .setOrigin(1, 0);
     scrollContainer.add([this.achBonusLabel, this.achLevelsLabel]);
     const firstCardY = startY + 84;
 
     for (let i = 0; i < ACHIEVEMENTS.length; i++) {
       const ach = ACHIEVEMENTS[i];
-      const row = this.scene.add.container(0, firstCardY + i * rowH);
+      // Card in the two-column grid.
+      const row = this.scene.add.container(
+        UIManager.UPG_GRID_X + (i % 2) * UIManager.UPG_COL_W,
+        firstCardY + Math.floor(i / 2) * rowH,
+      );
 
-      const nameTxt = makeText(this.scene, LX, 0, ach.name, 22, '#EEEEEE', { fontStyle: 'bold' });
-      const descTxt = makeText(this.scene, LX, 30, ach.description, 14, '#AAAAAA', { wordWrap: { width: 620 } });
-      const lvlTxt = makeText(this.scene, LX, 56, `Lv ${this.state.getAchievementLevel(ach.id)}/${ach.thresholds.length}`, 16, '#c8a8ff');
+      const nameTxt = makeText(this.scene, LX, 4, ach.name, 17, '#EEEEEE', { fontStyle: 'bold' });
+      // Same overlap-proofing as the upgrade/shop cards: 3-line cap + Lv top-right.
+      const descTxt = makeText(this.scene, LX, 30, ach.description, 13, '#D8D8D8', {
+        wordWrap: { width: UIManager.UPG_CARD_W - 38 }, maxLines: 3,
+      });
+      const lvlTxt = makeText(this.scene, LX + BW, 6, `Lv ${this.state.getAchievementLevel(ach.id)}/${ach.thresholds.length}`, 13, '#c8a8ff')
+        .setOrigin(1, 0);
       this.achLvlLabels.set(ach.id, lvlTxt);
 
       // Progress bar toward the NEXT tier: track + green fill (scaled by ratio) + a
@@ -1897,24 +1981,28 @@ export class UIManager {
         .setStrokeStyle(1, 0x444444);
       const barFill = this.scene.add.rectangle(LX, BAR_Y, BW, BAR_H, 0x3a9a3a, 1).setOrigin(0, 0.5);
       this.achProgFill.set(ach.id, barFill);
-      const progTxt = makeText(this.scene, LX + BW / 2, BAR_Y, '', 14, '#FFFFFF', { fontStyle: 'bold' })
+      const progTxt = makeText(this.scene, LX + BW / 2, BAR_Y, '', 12, '#FFFFFF', { fontStyle: 'bold' })
         .setOrigin(0.5);
       this.achProgLabels.set(ach.id, progTxt);
 
-      // Claim button.
-      const btnBg = this.scene.add.rectangle(LX + BW / 2, BCY, BW, BH, 0x333333, 1)
-        .setStrokeStyle(2, 0x555555)
+      // Claim button (gradient, same treatment as the upgrade/shop buy buttons).
+      const btnBg = this.scene.add.image(LX + BW / 2, BCY, 'upg_btn_grad')
         .setInteractive({ useHandCursor: true });
+      btnBg.on('pointerdown', () => btnBg.setScale(0.96));
+      btnBg.on('pointerout', () => btnBg.setScale(1));
       btnBg.on('pointerup', (p: Phaser.Input.Pointer) => {
+        btnBg.setScale(1);
         if (!this.achDragMoved && this.inWideContent(p)) this.cb.onClaimAchievement(ach.id);
       });
-      const rewardIcon = this.createIcon(LX + BW - 40, BCY, 'void_shard', 38);
+      // Oversized on purpose — overhangs the button top/bottom for pop.
+      const rewardIcon = this.createIcon(LX + BW - 38, BCY, 'void_shard', 68);
       if (rewardIcon) this.achBtnIcons.set(ach.id, rewardIcon);
-      const btnLabel = makeText(this.scene, LX + BW / 2, BCY, '', 18, '#FFFFFF', { fontStyle: 'bold' })
+      const btnLabel = makeText(this.scene, LX + BW / 2, BCY, '', 13, '#FFFFFF', { fontStyle: 'bold' })
         .setOrigin(0.5, 0.5);
 
-      const card = this.scene.add.rectangle(LAYOUT.CENTER_X, CARD_CY, 676, CARD_H, 0x1e1e1e, 0.9)
+      const card = this.scene.add.rectangle(UIManager.UPG_CARD_CX, CARD_CY, UIManager.UPG_CARD_W, CARD_H, 0x1e1e1e, 1)
         .setStrokeStyle(1, 0x3a3a3a);
+      this.achCards.set(ach.id, card);
 
       row.add(card);
       row.add([nameTxt, descTxt, lvlTxt, barBg, barFill, progTxt, btnBg]);
@@ -1934,7 +2022,7 @@ export class UIManager {
     maskGfx.fillRect(0, LAYOUT.CONTENT_TOP_WIDE, LAYOUT.GAME_WIDTH, contentH);
     panel.setMask(maskGfx.createGeometryMask());
 
-    this.achMinScroll = Math.min(0, contentH - (84 + ACHIEVEMENTS.length * rowH));
+    this.achMinScroll = Math.min(0, contentH - (84 + Math.ceil(ACHIEVEMENTS.length / 2) * rowH));
 
     this.scene.input.on('pointerdown', (p: Phaser.Input.Pointer) => {
       if (this.activeTab !== 'achievements') return;
@@ -1981,19 +2069,22 @@ export class UIManager {
       progLabel?.setText(`${fmt(D(progress))} / ${fmt(D(threshold))}`);
     }
 
-    // Claim button — when fully claimed, HIDE the button but keep the ALL CLAIMED label.
+    // Claim button — when fully claimed, HIDE the button but keep the ALL CLAIMED
+    // label and fade the whole card back. Claimability reads as OPACITY on the
+    // gradient, like the buy buttons.
+    this.achCards.get(ach.id)?.setAlpha(maxed ? 0.5 : 1);
     const bg = this.achBtnBg.get(ach.id);
     if (bg) {
       bg.setVisible(!maxed);
       if (bg.input) bg.input.enabled = !maxed;
-      if (!maxed) bg.setFillStyle(claimable ? 0x336633 : 0x333333);
+      if (!maxed) bg.setAlpha(claimable ? 1 : 0.35);
     }
     const icon = this.achBtnIcons.get(ach.id);
-    if (icon) icon.setVisible(!maxed);
+    if (icon) icon.setVisible(!maxed).setAlpha(claimable ? 1 : 0.6);
     const label = this.achBtnLabels.get(ach.id);
     if (label) {
-      if (maxed) label.setText('ALL CLAIMED').setColor('#c8a8ff');
-      else label.setText(`CLAIM  +${this.state.getAchievementReward(ach.id)}`).setColor(claimable ? '#9fffa0' : '#777777');
+      if (maxed) label.setText('ALL CLAIMED').setColor('#c8a8ff').setAlpha(1);
+      else label.setText(`CLAIM  +${this.state.getAchievementReward(ach.id)}`).setColor(claimable ? '#FFFFFF' : '#CCCCCC').setAlpha(claimable ? 1 : 0.7);
     }
   }
 
@@ -2345,7 +2436,8 @@ export class UIManager {
 
   /**
    * Refresh the cost-line button: "[icon] owned/cost ResourceName" (or MAXED).
-   * Green when affordable, dark otherwise; the icon hides at max level.
+   * The gradient stays the same color in every state — affordability reads as
+   * OPACITY (full when buyable, faded when not); the icon hides at max level.
    */
   private updateCostButton(upg: UpgradeDef): void {
     const lvl = this.state.getUpgradeLevel(upg.id);
@@ -2358,24 +2450,26 @@ export class UIManager {
     const resName = RESOURCES[resId]?.name ?? resId;
     const LX = UIManager.UPG_LEFT;
 
-    // When maxed, HIDE the button (and disable its tap) but keep the MAXED label.
+    // When maxed, HIDE the button (and disable its tap) but keep the MAXED
+    // label, and fade the whole card back — it needs no more attention.
+    this.upgCards.get(upg.id)?.setAlpha(maxed ? 0.5 : 1);
     const bg = this.upgBuyBg.get(upg.id);
     if (bg) {
       bg.setVisible(!maxed);
       if (bg.input) bg.input.enabled = !maxed;
-      if (!maxed) bg.setFillStyle(canBuy ? 0x336633 : 0x333333);
+      if (!maxed) bg.clearTint().setAlpha(canBuy ? 1 : 0.35);
     }
     // Swap the icon to the current cost resource (matters for cycling upgrades).
     const icon = this.upgCostIcons.get(upg.id);
     if (icon) {
       const key = `icon_${resId}`;
-      if (!maxed && this.scene.textures.exists(key)) icon.setTexture(key).setVisible(true);
+      if (!maxed && this.scene.textures.exists(key)) icon.setTexture(key).setVisible(true).setAlpha(canBuy ? 1 : 0.6);
       else icon.setVisible(false);
     }
     const label = this.upgCostLabels.get(upg.id);
     if (label) {
       // Always centered in the button; the cost icon sits as a left accent.
-      label.setOrigin(0.5, 0.5).setX(LX + UIManager.UPG_BTN_W / 2);
+      label.setOrigin(0.5, 0.5).setX(LX + UIManager.UPG_BTN_W / 2).setAlpha(maxed || canBuy ? 1 : 0.7);
       if (maxed) {
         label.setText('MAXED').setColor('#7CFF7C');
       } else {
@@ -2398,17 +2492,17 @@ export class UIManager {
       name?.setText('??????').setColor('#888888');
       desc?.setText('(Locked)').setColor('#666666');
       lvlTxt?.setVisible(false);
-      const bg = this.upgBuyBg.get(upg.id);
-      if (bg) bg.setFillStyle(0x222222);
+      // Locked: the gradient goes ghostly — desaturated tint + heavy fade.
+      this.upgBuyBg.get(upg.id)?.setTint(0x666677).setAlpha(0.25).setVisible(true);
       this.upgCostIcons.get(upg.id)?.setVisible(false);
       const label = this.upgCostLabels.get(upg.id);
-      label?.setText('\u{1F512} LOCKED').setColor('#777777')
+      label?.setText('\u{1F512} LOCKED').setColor('#777777').setAlpha(1)
         .setOrigin(0.5, 0.5).setX(UIManager.UPG_LEFT + UIManager.UPG_BTN_W / 2);
       return;
     }
 
     name?.setText(upg.name).setColor('#EEEEEE');
-    desc?.setText(upg.description).setColor('#AAAAAA');
+    desc?.setText(upg.description).setColor('#D8D8D8');
     lvlTxt?.setVisible(true).setText(`Lv ${this.state.getUpgradeLevel(upg.id)}/${upg.maxLevel}`);
     this.updateCostButton(upg);
   }
