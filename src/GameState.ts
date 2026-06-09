@@ -12,6 +12,8 @@ import {
   RECIPES,
   SHOP_UPGRADES,
   ACHIEVEMENTS,
+  FLOOR_BASE_STAGES,
+  PETS,
   type AchievementStat,
   getLevel,
   getFloorOre,
@@ -69,7 +71,17 @@ export interface SaveData {
   highestLevelReached: number;    // deepest level index that has paid out a shard for advancing
   // Achievements (lifetime — never reset on rewind)
   lifetimeResourcesCollected: number;
+  lifetimeCritsLanded: number;
+  lifetimeCreaturesCaught: number;
+  lifetimeHypeTriggered: number;
+  lifetimeStructuresBuilt: number;             // floor-base stages constructed (Base Builder)
+  lifetimePetLevelsGained: number;             // pet level-ups, excluding unlocks (Pet Trainer)
+  lifetimeSuperCritsLanded: number;            // Pet Lion crit-on-crit hits (Super Crits)
   achievementClaims: Record<string, number>;   // achievement id → tiers claimed
+  // Floor bases (permanent — never reset on rewind)
+  floorBases: Record<number, number>;          // floor location (0-30) → base stage built
+  // Pets (permanent — never reset on rewind)
+  petLevels: Record<string, number>;           // pet id → level (absent/0 = not unlocked)
   // Preferences
   autoEscape: boolean;
   hideMaxedUpgrades?: boolean;
@@ -87,7 +99,7 @@ export interface GameStats {
 }
 
 export interface GameEvent {
-  type: 'ambient' | 'resource' | 'entity' | 'damage' | 'death' | 'system' | 'milestone' | 'event';
+  type: 'ambient' | 'resource' | 'entity' | 'damage' | 'death' | 'system' | 'milestone' | 'event' | 'pet';
   message: string;
   color: string;
   iconKey?: string;
@@ -100,6 +112,7 @@ export interface TickResult {
   events: GameEvent[];
   autoDamage?: Big;         // auto-search damage dealt this tick (for a floating number)
   autoCrit?: boolean;       // whether that auto-search was a lucky find (crit)
+  autoSuperCrit?: boolean;  // whether that crit rolled into a SUPER crit (Pet Lion)
 }
 
 /** Result of one active tap on the node: damage dealt + whether it was a lucky find (crit). */
@@ -107,7 +120,8 @@ export interface SearchHit {
   events: GameEvent[];
   damage: Big;
   crit: boolean;
-  struck: boolean;   // false if there was no node to hit (mid-respawn)
+  superCrit: boolean;   // crit that rolled into a SUPER crit (Pet Lion)
+  struck: boolean;      // false if there was no node to hit (mid-respawn)
 }
 
 export interface OfflineSummary {
@@ -182,7 +196,21 @@ export class GameState {
 
   // Achievements — lifetime progress + claimed tiers (persist across rewinds)
   lifetimeResourcesCollected = 0;
+  lifetimeCritsLanded = 0;
+  lifetimeCreaturesCaught = 0;
+  lifetimeHypeTriggered = 0;
+  lifetimeStructuresBuilt = 0;
+  lifetimePetLevelsGained = 0;
+  lifetimeSuperCritsLanded = 0;
   achievementClaims: Record<string, number> = {};
+
+  // Floor bases — permanent per-floor construction (never reset). Keyed by floor
+  // LOCATION (currentLevel % 31), so a base keeps paying out on deeper tier laps.
+  floorBases: Record<number, number> = {};
+
+  // Pets — permanent companions (never reset). Unlocked at level 1 by their
+  // same-id shop purchase; level up by catching creatures (see PETS).
+  petLevels: Record<string, number> = {};
 
   // Preferences
   autoEscape = true;
@@ -251,9 +279,15 @@ export class GameState {
       * (this.nodeIsEasyAccess ? GameState.EASY_ACCESS_HP_MULT : 1);
   }
 
+  /** Permanent node-HP multiplier from Boxed Supplies (shop): ×0.75 on EVERY floor. */
+  get boxedSuppliesMult(): number {
+    return this.getShopLevel('boxed_supplies') > 0 ? 0.75 : 1;
+  }
+
   /** Total Integrity (HP) of one node on this floor — floored to a whole number, min 1. */
   get nodeIntegrityMax(): Big {
-    return D(this.nodeDurabilityMax).mul(this.nodeScale).mul(this.nodeHpMultiplier).floor().max(D(1));
+    return D(this.nodeDurabilityMax).mul(this.nodeScale).mul(this.nodeHpMultiplier)
+      .mul(this.boxedSuppliesMult).floor().max(D(1));
   }
 
   /** Damage one manual tap deals to a node's Integrity (before a crit roll). Always an int. */
@@ -277,21 +311,113 @@ export class GameState {
   /** Damage multiplier on a lucky find: base ×3, +0.2× per Metal Head level. */
   get critMult(): number { return 3 + this.sumEffect('critDamage'); }
 
-  /** Average damage multiplier from crits (used to fold crits into offline auto). */
-  get critMultiplierAvg(): number { return 1 + this.critChance * (this.critMult - 1); }
+  /** Average damage multiplier from crits + super crits (folds them into offline auto). */
+  get critMultiplierAvg(): number {
+    const avgCritMult = this.critMult * (1 + this.superCritChance * (this.superCritMult - 1));
+    return 1 + this.critChance * (avgCritMult - 1);
+  }
 
-  /** Chance (0–1) a passing moth is auto-captured without a click — from Trapper. */
+  /* ---- Pets (permanent — survive Rewind) ---- */
+
+  /** A pet's level; 0 = not unlocked. */
+  getPetLevel(id: string): number { return this.petLevels[id] ?? 0; }
+
+  /** Lamp Trap level — its auto-catch bonus is +1% per level. */
+  get lampTrapLevel(): number { return this.getPetLevel('lamp_trap'); }
+
+  /**
+   * Denominator of a pet's NEXT level-up roll (1-in-N per growth trigger) —
+   * steepens ×levelChanceGrowth per level: round(levelChance × growth^(level − 1)).
+   * 0 = no roll (locked/maxed).
+   */
+  petLevelUpOdds(id: string): number {
+    const pet = PETS.find((p) => p.id === id);
+    const lvl = this.getPetLevel(id);
+    if (!pet || lvl <= 0 || lvl >= pet.maxLevel) return 0;
+    return Math.round(pet.levelChance * Math.pow(pet.levelChanceGrowth, lvl - 1));
+  }
+
+  /**
+   * Roll a pet's level-up (1-in-petLevelUpOdds; no-op while locked/maxed). On
+   * success the level is banked (permanent) and a 'pet' event is pushed —
+   * milestone levels announce the milestone, others the per-level bonus.
+   */
+  private tryPetLevelUp(id: string, events: GameEvent[]): void {
+    const pet = PETS.find((p) => p.id === id);
+    const odds = this.petLevelUpOdds(id);
+    if (!pet || odds <= 0 || Math.random() >= 1 / odds) return;
+    const lvl = this.getPetLevel(id) + 1;
+    this.petLevels[id] = lvl;
+    this.lifetimePetLevelsGained += 1;   // Pet Trainer achievement
+    const ms = pet.milestones.find((m) => m.level === lvl);
+    const bonus = +(lvl * pet.bonusPerLevel).toFixed(2);   // strip float noise (0.25 steps)
+    events.push({
+      type: 'pet',
+      message: `${pet.name} grew to Lv ${lvl}!${ms ? ` ${ms.desc}!` : ` +${bonus}% ${pet.bonusLabel}.`}`,
+      color: '#FFE08A',
+      iconKey: pet.iconKey,
+    });
+  }
+
+  /** Pet Lion level — Super Crit chance is +1% per level. */
+  get petLionLevel(): number { return this.getPetLevel('pet_lion'); }
+
+  /** Pet Magpie level — Mint chance is +0.25% per level (+milestone bumps). */
+  get petMagpieLevel(): number { return this.getPetLevel('pet_magpie'); }
+
+  /** Pet Bear level — +5% Explorer power per level while hyped (+milestone bumps). */
+  get petBearLevel(): number { return this.getPetLevel('pet_bear'); }
+
+  /** Chance a LANDED crit rolls again into a Super Crit (Pet Lion: +1%/lvl). */
+  get superCritChance(): number { return Math.min(1, this.petLionLevel / 100); }
+
+  /**
+   * Extra damage multiplier a Super Crit applies ON TOP of the crit multiplier:
+   * ×2 base, +1× at Lion Lv 10, +1× more (Ultra) at Lv 20. ×1 while no Lion.
+   */
+  get superCritMult(): number {
+    if (this.petLionLevel <= 0) return 1;
+    return 2 + (this.petLionLevel >= 10 ? 1 : 0) + (this.petLionLevel >= 20 ? 1 : 0);
+  }
+
+  /** Chance (0–1) a passing moth is auto-captured without a click — Trapper + Lamp Trap (+1%/lvl). */
   get autoCaptureChance(): number {
-    return Math.min(1, this.sumEffect('autoCapture') / 100);
+    return Math.min(1, (this.sumEffect('autoCapture') + this.lampTrapLevel) / 100);
+  }
+
+  /* ---- Floor bases (permanent per-floor construction) ---- *
+   * Each node break rolls to construct the floor's NEXT base stage (odds in
+   * FLOOR_BASE_STAGES). Stages stack bonuses for THIS floor only — extra yield,
+   * quality, faster respawn, mint — and survive Rewind. */
+
+  /** Location key for the current floor's base (tier laps share one base). */
+  get baseLocation(): number { return this.currentLevel % ORE_SEQUENCE.length; }
+
+  /** Base stage built on the current floor: 0 (none) .. FLOOR_BASE_STAGES.length. */
+  get floorBaseStage(): number { return this.floorBases[this.baseLocation] ?? 0; }
+
+  /** The stage definitions already built on this floor (their bonuses are live). */
+  private get builtBaseStages() { return FLOOR_BASE_STAGES.slice(0, this.floorBaseStage); }
+
+  /** Extra resources every node break on this floor yields (Secured Room). */
+  get floorBaseYield(): number {
+    return this.builtBaseStages.reduce((s, st) => s + (st.yieldBonus ?? 0), 0);
+  }
+
+  /** Multiplier on every base-construction roll — Stealth Camping (shop) doubles it. */
+  get baseChanceMult(): number {
+    return this.getShopLevel('stealth_camping') > 0 ? 2 : 1;
   }
 
   /* ---- Node respawn ---- *
    * After a node breaks it doesn't refill instantly — there's a short delay
    * before the next one appears (so you actually see the Integrity hit zero, even
-   * on a one-shot). Upgrades will shorten this later. */
+   * on a one-shot). */
   private static readonly RESPAWN_MS_BASE = 500;
-  /** Time (ms) a broken node takes to respawn. (Future upgrades will reduce it.) */
-  get nodeRespawnTime(): number { return GameState.RESPAWN_MS_BASE; }
+  /** Time (ms) a broken node takes to respawn — shortened by this floor's base (Outpost). */
+  get nodeRespawnTime(): number {
+    return GameState.RESPAWN_MS_BASE * this.builtBaseStages.reduce((m, st) => m * (st.respawnMult ?? 1), 1);
+  }
   /** True while the current node is broken and regrowing (no node to search). */
   get isRespawning(): boolean { return this.respawnMsLeft > 0; }
 
@@ -336,8 +462,11 @@ export class GameState {
 
   get hypeActive(): boolean { return this.hypeActiveMsLeft > 0; }
   get hypeMultiplier(): number { return 3; }                          // upgradable later
-  /** Buff length: base 15s + 0.5s per Rally Cry level (effect in seconds). */
-  get hypeDuration(): number { return GameState.HYPE_DURATION_MS + this.sumEffect('hypeDuration') * 1000; }
+  /** Buff length: base 15s + 0.5s per Rally Cry level; ×1.5 at Pet Bear Lv 10. */
+  get hypeDuration(): number {
+    const base = GameState.HYPE_DURATION_MS + this.sumEffect('hypeDuration') * 1000;
+    return this.petBearLevel >= 10 ? base * 1.5 : base;
+  }
   get hypeCooldown(): number { return GameState.HYPE_COOLDOWN_MS; }   // upgradable later
 
   /**
@@ -382,11 +511,12 @@ export class GameState {
     return { becameAvailable, ended, selfActivated };
   }
 
-  /** Activate the hype buff if it's available. */
+  /** Activate the hype buff if it's available. (Both manual taps and Hype Train self-hype route here.) */
   activateHype(): boolean {
     if (!this.hypeAvailable || this.hypeActive) return false;
     this.hypeAvailable = false;
     this.hypeActiveMsLeft = this.hypeDuration;
+    this.lifetimeHypeTriggered += 1;   // Hype Train achievement
     return true;
   }
 
@@ -559,11 +689,15 @@ export class GameState {
    * count; Master Scav (Explorer-1 only) is counted once.
    */
   get autoPerSecond(): number {
-    let total = this.droneAuto;
-    for (let i = 0; i < this.explorerCount; i++) total += this.explorerAuto(i);
-    // The achievement bonus (and other multipliers) make this fractional — auto
-    // search is always a whole number, so round to the nearest int.
-    return Math.round(total * this.achievementAutoBonus);
+    let explorers = 0;
+    for (let i = 0; i < this.explorerCount; i++) explorers += this.explorerAuto(i);
+    // Pet Bear: Explorers hit harder WHILE HYPED (+5%/lvl, on top of the hype ×).
+    if (this.hypeActive) explorers *= 1 + this.petBearLevel * 0.05;
+    let total = (this.droneAuto + explorers) * this.achievementAutoBonus;
+    if (this.petBearLevel >= 20) total *= 1.15;   // Bear Lv 20: +15% gathering speed, always on
+    // The multipliers make this fractional — auto search is always a whole
+    // number, so round to the nearest int.
+    return Math.round(total);
   }
   /**
    * Idle searches per TICK (before the floor magnitude scale). Converted from the
@@ -594,42 +728,45 @@ export class GameState {
     return Math.min(0.60, this.getUpgradeLevel('quiet_steps') * 0.08
       + this.getGearBonus('entityAvoidance') * 0.01);
   }
-  /** Chance a broken node yields +1 bonus ore. */
-  /**
-   * Future per-floor output bonus to quality (improving a floor will raise its
-   * quality yield). 0 until that feature lands — this is the seam for it.
-   */
-  get levelQualityBonus(): number { return 0; }
+  /** Per-floor quality-chance bonus from this floor's base (Supply Cache). */
+  get levelQualityBonus(): number {
+    return this.builtBaseStages.reduce((s, st) => s + (st.qualityBonus ?? 0), 0);
+  }
 
   /**
    * Chance a collected resource is a "quality" find — yields +1 extra (2 instead
-   * of 1). Starts at 0%; raised by upgrades (effect 'quality') and, later, by
-   * improving floors (levelQualityBonus). Capped at 90%.
+   * of 1). Starts at 0%; raised by upgrades (effect 'quality') and this floor's
+   * base (levelQualityBonus). Capped at 90%.
    */
   get qualityChance(): number {
     let c = this.levelQualityBonus;
     for (const u of UPGRADES) {
       if (u.effect === 'quality' || u.effect === 'bonusOre') c += (u.effectPerLevel / 100) * this.getUpgradeLevel(u.id);
     }
+    if (this.petMagpieLevel >= 10) c += 0.03;   // Magpie Lv 10 milestone
     return Math.min(0.9, c);
   }
 
   /** Extra resources a QUALITY find yields: base +1, plus Quality Find upgrade (+1/lvl). */
   get qualityBonus(): number { return 1 + this.sumEffect('qualityYield'); }
 
-  /** Future per-floor output bonus to mint chance — seam, 0 until floor-improving lands. */
-  get levelMintBonus(): number { return 0; }
+  /** Per-floor mint-chance bonus from this floor's base (Safe Room of Operations). */
+  get levelMintBonus(): number {
+    return this.builtBaseStages.reduce((s, st) => s + (st.mintBonus ?? 0), 0);
+  }
 
   /**
    * Chance a collected resource is MINT — yields +9 extra (10 total) but the node
    * has ×1.5 HP. Rarer/better than quality. Starts at 0%; raised by upgrades
-   * (effect 'mint') and, later, by improving floors. Capped at 90%.
+   * (effect 'mint') and this floor's base (levelMintBonus). Capped at 90%.
    */
   get mintChance(): number {
     let c = this.levelMintBonus;
     for (const u of UPGRADES) {
       if (u.effect === 'mint') c += (u.effectPerLevel / 100) * this.getUpgradeLevel(u.id);
     }
+    c += this.petMagpieLevel * 0.0025;          // Pet Magpie: +0.25%/lvl...
+    if (this.petMagpieLevel >= 20) c += 0.03;   // ...and +3% at its Lv 20 milestone
     return Math.min(0.9, c);
   }
 
@@ -681,20 +818,36 @@ export class GameState {
   manualSearch(): SearchHit {
     const events: GameEvent[] = [];
     // No node to hit while one is respawning.
-    if (this.isRespawning) return { events, damage: D(0), crit: false, struck: false };
+    if (this.isRespawning) return { events, damage: D(0), crit: false, superCrit: false, struck: false };
     const crit = Math.random() < this.critChance;
+    let superCrit = false;
+    if (crit) {
+      this.lifetimeCritsLanded += 1;   // Crit Master achievement
+      superCrit = Math.random() < this.superCritChance;   // Pet Lion: crit on top of the crit
+      if (superCrit) this.lifetimeSuperCritsLanded += 1;  // Super Crits achievement
+      this.tryPetLevelUp('pet_lion', events);             // the Lion grows on landed crits
+    }
     // critMult can be fractional (Metal Head +0.2x); round so damage is always an int.
-    const damage = roundD(this.searchPower.mul(crit ? this.critMult : 1));
+    const damage = roundD(this.searchPower.mul(crit ? this.critMult : 1).mul(superCrit ? this.superCritMult : 1));
     this.nodeDamage = this.nodeDamage.add(damage);
     this.resolveNode(events);
-    return { events, damage, crit, struck: true };
+    return { events, damage, crit, superCrit, struck: true };
   }
 
-  /** Collect one Moth (the floor-independent click-to-catch rare). */
-  collectMoth(): void {
-    this.resources['moth'] = (this.resources['moth'] ?? D(0)).add(1);
-    this.stats.resourcesFound += 1;
-    this.lifetimeResourcesCollected += 1;
+  /**
+   * Collect one Moth (the floor-independent click-to-catch rare). Returns the
+   * Moths actually banked (Lamp Trap Lv10+ doubles every catch) plus any pet
+   * level-up events: each catch rolls 1-in-levelChance for the Lamp Trap to grow.
+   */
+  collectMoth(): { gain: number; events: GameEvent[] } {
+    const events: GameEvent[] = [];
+    const gain = this.lampTrapLevel >= 10 ? 2 : 1;   // Lv10 milestone: ×2 Moths per catch
+    this.resources['moth'] = (this.resources['moth'] ?? D(0)).add(gain);
+    this.stats.resourcesFound += gain;
+    this.lifetimeResourcesCollected += gain;
+    this.lifetimeCreaturesCaught += 1;   // Mob Farm achievement — one CATCH, however much loot
+    this.tryPetLevelUp('lamp_trap', events);   // the Lamp grows on catches
+    return { gain, events };
   }
 
   /**
@@ -715,13 +868,33 @@ export class GameState {
     const quality = !mint && this.nodeIsQuality;
     let gain = 1;
     if (mint) { gain += 9; this.stats.mintFinds += 1; }
-    else if (quality) { gain += this.qualityBonus; this.stats.qualityFinds += 1; }
+    else if (quality) {
+      gain += this.qualityBonus;
+      this.stats.qualityFinds += 1;
+      this.tryPetLevelUp('pet_magpie', events);   // the Magpie grows on quality finds
+    }
+    gain += this.floorBaseYield;   // this floor's base pays its flat bonus on EVERY break
     if (this.nodeIsEasyAccess) this.stats.easyAccessFinds += 1;   // brittle node mined (independent of grade)
     this.resources[ore.resource] = (this.resources[ore.resource] ?? D(0)).add(gain);   // inventory (uncapped)
     this.stats.resourcesFound += gain;
     this.lifetimeResourcesCollected += gain;
     this.exploration = Math.min(ore.required, this.exploration + gain);                 // descend progress (capped)
     events.push({ type: 'resource', message: `+ ${RESOURCES[ore.resource].name}${tierSuffix(ore.tier)}`, color: '#7CFF7C', iconKey: ore.resource, value: gain, quality, mint });
+
+    // Every break also works on this floor's base: roll 1-in-N to construct the
+    // NEXT stage (sequential; odds per stage in FLOOR_BASE_STAGES, doubled by
+    // Stealth Camping). Permanent.
+    const built = this.floorBaseStage;
+    const nextStage = FLOOR_BASE_STAGES[built];
+    if (nextStage && Math.random() < this.baseChanceMult / nextStage.chance) {
+      this.floorBases[this.baseLocation] = built + 1;
+      this.lifetimeStructuresBuilt += 1;   // Base Builder achievement
+      events.push({
+        type: 'event',
+        message: `Base constructed: ${nextStage.name}! ${nextStage.desc} on this floor — forever.`,
+        color: '#FFD24A',
+      });
+    }
 
     this.respawnMsLeft = this.nodeRespawnTime;
     this.nodeDamage = dur;   // remaining Integrity = 0 (drained) until respawn completes
@@ -825,16 +998,32 @@ export class GameState {
     const events: GameEvent[] = [];
     const lvl = this.level;
     let autoCrit = false;
+    let autoSuperCrit = false;
     let autoDamage: Big | undefined;
 
+    // Pet Bear grows from hyped exploring: one roll per tick while hype runs
+    // (~10-15 rolls per burst, more with longer hype).
+    if (this.hypeActive) this.tryPetLevelUp('pet_bear', events);
+
     // 1. Idle auto-search (drone). Skipped while a node is respawning. The batch
-    //    can roll a lucky find (crit) just like a manual tap — same chance/×.
+    //    can roll a lucky find (crit) just like a manual tap — same chance/×,
+    //    including the Pet Lion's super-crit roll on top.
     if (!this.isRespawning) {
       autoCrit = Math.random() < this.critChance;
+      const superCrit = autoCrit && Math.random() < this.superCritChance;
       const hypeMult = this.hypeActive ? this.hypeMultiplier : 1;
-      // crit (Metal Head can make it fractional) + hype multipliers → round to an int.
-      const dmg = roundD(this.autoSearchPower.mul(autoCrit ? this.critMult : 1).mul(hypeMult));
-      if (dmg.gt(0)) autoDamage = dmg;   // only surface a number when the drone is active
+      // crit (Metal Head can make it fractional) + super crit + hype multipliers → round to an int.
+      const dmg = roundD(this.autoSearchPower.mul(autoCrit ? this.critMult : 1)
+        .mul(superCrit ? this.superCritMult : 1).mul(hypeMult));
+      if (dmg.gt(0)) {
+        autoDamage = dmg;   // only surface a number when the drone is active
+        autoSuperCrit = superCrit;
+        if (autoCrit) {
+          this.lifetimeCritsLanded += 1;          // Crit Master — only a real hit counts
+          if (superCrit) this.lifetimeSuperCritsLanded += 1;   // Super Crits achievement
+          this.tryPetLevelUp('pet_lion', events); // the Lion grows on landed crits
+        }
+      }
       this.nodeDamage = this.nodeDamage.add(dmg);
       this.resolveNode(events);
     }
@@ -846,7 +1035,7 @@ export class GameState {
       events.push({ type: 'ambient', message: msgs[Math.floor(Math.random() * msgs.length)], color: lvl.textColor });
     }
 
-    return { events, autoDamage, autoCrit };
+    return { events, autoDamage, autoCrit, autoSuperCrit };
   }
 
   /* ---- Gear drops & equipping ---- */
@@ -987,6 +1176,8 @@ export class GameState {
     if (!def || !this.canAffordShopUpgrade(id)) return false;
     this.voidShards -= this.getShopUpgradeCost(id);
     this.shopUpgrades[id] = this.getShopLevel(id) + 1;
+    // A pet-unlocking purchase (same id as a PETS entry) starts that pet at Lv 1.
+    if (PETS.some((p) => p.id === id) && this.getPetLevel(id) === 0) this.petLevels[id] = 1;
     return true;
   }
 
@@ -1001,6 +1192,12 @@ export class GameState {
   getAchievementProgress(stat: AchievementStat): number {
     switch (stat) {
       case 'resourcesCollected': return this.lifetimeResourcesCollected;
+      case 'critsLanded': return this.lifetimeCritsLanded;
+      case 'creaturesCaught': return this.lifetimeCreaturesCaught;
+      case 'hypeTriggered': return this.lifetimeHypeTriggered;
+      case 'structuresBuilt': return this.lifetimeStructuresBuilt;
+      case 'petLevelsGained': return this.lifetimePetLevelsGained;
+      case 'superCritsLanded': return this.lifetimeSuperCritsLanded;
       default: return 0;
     }
   }
@@ -1055,12 +1252,14 @@ export class GameState {
     const elapsedSec = ticks * 1.5;                       // capped ticks → seconds
     // Fold the average crit bonus into the auto rate so offline matches live.
     const effRate = autoRate * this.critMultiplierAvg;
-    const fillSec = this.nodeDurabilityMax / effRate;     // seconds to drain one node
+    const fillSec = this.nodeDurabilityMax * this.boxedSuppliesMult / effRate;   // seconds to drain one node
     const cycleSec = fillSec + this.nodeRespawnTime / 1000;
     const cycles = Math.floor(elapsedSec / cycleSec);
     if (cycles > 0) {
-      // Fold in the average quality (+qualityBonus) and mint (+9) bonuses so offline ≈ live.
-      const count = Math.round(cycles * (1 + this.qualityChance * this.qualityBonus + 9 * this.mintChance));
+      // Fold in the average quality (+qualityBonus) and mint (+9) bonuses, plus the
+      // floor base's flat yield, so offline ≈ live. (Base CONSTRUCTION rolls don't
+      // happen offline — stages only advance while playing.)
+      const count = Math.round(cycles * (1 + this.floorBaseYield + this.qualityChance * this.qualityBonus + 9 * this.mintChance));
       this.resources[ore.resource] = (this.resources[ore.resource] ?? D(0)).add(count);
       this.stats.resourcesFound += count;
       this.lifetimeResourcesCollected += count;
@@ -1141,6 +1340,8 @@ export class GameState {
     // Reset milestones (they reset on prestige)
     this.claimedMilestones = {};
     // memoryFragments persist across prestiges
+    // floorBases persist too — a constructed base can NEVER be lost
+    // petLevels persist too — pets are forever
 
     // Reset equipment & bosses (gear resets on prestige)
     this.equipment = { head: null, body: null, feet: null, accessory: null };
@@ -1241,7 +1442,17 @@ export class GameState {
       highestLevelReached: this.highestLevelReached,
       // Achievements (lifetime)
       lifetimeResourcesCollected: this.lifetimeResourcesCollected,
+      lifetimeCritsLanded: this.lifetimeCritsLanded,
+      lifetimeCreaturesCaught: this.lifetimeCreaturesCaught,
+      lifetimeHypeTriggered: this.lifetimeHypeTriggered,
+      lifetimeStructuresBuilt: this.lifetimeStructuresBuilt,
+      lifetimePetLevelsGained: this.lifetimePetLevelsGained,
+      lifetimeSuperCritsLanded: this.lifetimeSuperCritsLanded,
       achievementClaims: { ...this.achievementClaims },
+      // Floor bases (permanent)
+      floorBases: { ...this.floorBases },
+      // Pets (permanent)
+      petLevels: { ...this.petLevels },
       // Preferences
       autoEscape: this.autoEscape,
       hideMaxedUpgrades: this.hideMaxedUpgrades,
@@ -1319,7 +1530,29 @@ export class GameState {
 
     // Achievements (lifetime — never reset)
     this.lifetimeResourcesCollected = data.lifetimeResourcesCollected ?? 0;
+    this.lifetimeCritsLanded = data.lifetimeCritsLanded ?? 0;
+    this.lifetimeCreaturesCaught = data.lifetimeCreaturesCaught ?? 0;
+    this.lifetimeHypeTriggered = data.lifetimeHypeTriggered ?? 0;
+    // Saves that built bases before this counter existed: bases are permanent and
+    // only ever go up, so the current stage total IS the lifetime build count.
+    this.lifetimeStructuresBuilt = data.lifetimeStructuresBuilt
+      ?? Object.values(data.floorBases ?? {}).reduce((s, v) => s + v, 0);
+    // Same backfill idea for pets: levels only ever go up, so levels beyond each
+    // pet's Lv-1 unlock are exactly the level-ups ever gained.
+    this.lifetimePetLevelsGained = data.lifetimePetLevelsGained
+      ?? Object.values(data.petLevels ?? {}).reduce((s, v) => s + Math.max(0, v - 1), 0);
+    this.lifetimeSuperCritsLanded = data.lifetimeSuperCritsLanded ?? 0;
     this.achievementClaims = data.achievementClaims ?? {};
+
+    // Floor bases (permanent — default empty for old saves)
+    this.floorBases = data.floorBases ?? {};
+
+    // Pets (permanent — default empty for old saves). A save that bought the
+    // lamp_trap shop unlock before pets serialized still gets its pet at Lv 1.
+    this.petLevels = data.petLevels ?? {};
+    for (const p of PETS) {
+      if (this.getShopLevel(p.id) > 0 && this.getPetLevel(p.id) === 0) this.petLevels[p.id] = 1;
+    }
 
     // Preferences
     this.autoEscape = data.autoEscape ?? true;

@@ -1,7 +1,7 @@
 import Phaser from 'phaser';
 import RundotGameAPI from '@series-inc/rundot-game-sdk/api';
 import { LAYOUT } from '../config';
-import { UPGRADES, RESOURCES, RESOURCE_ORDER, VOID_UPGRADES, PRESTIGE_TIERS, ABILITIES, EQUIP_SLOTS, EQUIP_SLOT_ICONS, GEAR_POOL, GEAR_TIER_COLORS, RECIPES, SHOP_UPGRADES, ACHIEVEMENTS, getTierColor, tierSuffix, getFloorOre, type UpgradeDef, type ShopUpgradeDef, type AchievementDef } from '../data/GameData';
+import { UPGRADES, RESOURCES, RESOURCE_ORDER, VOID_UPGRADES, PRESTIGE_TIERS, ABILITIES, EQUIP_SLOTS, EQUIP_SLOT_ICONS, GEAR_POOL, GEAR_TIER_COLORS, RECIPES, SHOP_UPGRADES, ACHIEVEMENTS, FLOOR_BASE_STAGES, PETS, getTierColor, tierSuffix, getFloorOre, type UpgradeDef, type ShopUpgradeDef, type AchievementDef } from '../data/GameData';
 import { fmt, D, type Big } from '../num';
 import type { GameEvent, OfflineSummary } from '../GameState';
 import { GameState } from '../GameState';
@@ -67,7 +67,7 @@ export interface UICallbacks {
   onHeal: () => void;
   onEat: () => void;
   onSearch: () => void;
-  onCollectMoth: () => void;
+  onCollectMoth: () => number;   // returns Moths banked (Lamp Trap Lv10+ doubles a catch)
   onActivateHype: () => void;
   onBuyUpgrade: (id: string) => void;
   onEscape: () => void;
@@ -128,7 +128,12 @@ export class UIManager {
   private activeMoth?: Phaser.GameObjects.Image;
   private durFill?: Phaser.GameObjects.Rectangle;
   private durLabel?: Phaser.GameObjects.Text;   // "N to collect" readout on the durability bar
-  private qualityLabel?: Phaser.GameObjects.Text;   // "QUALITY" tag above a pre-rolled quality node
+  private qualityLabel?: Phaser.GameObjects.Text;   // "QUALITY"/"MINT" tag above a pre-rolled node
+  private easyAccessLabel?: Phaser.GameObjects.Text;   // "EASY ACCESS" tag (independent of grade)
+  private baseLabel?: Phaser.GameObjects.Text;   // floor-base status line under the search hint
+  private baseDescLabel?: Phaser.GameObjects.Text;   // its bonus readout (what the base GIVES you)
+  private lastBaseLoc = -1;     // floor location the base line last showed...
+  private lastBaseStage = -1;   // ...and its stage — so a stage-up on THIS floor pops the line
 
   // Resource bar
   private resTexts: Map<string, Phaser.GameObjects.Text> = new Map();
@@ -183,6 +188,7 @@ export class UIManager {
 
   // Shop panel refs (mirrors the upgrade panel: scrollable cards + cost buttons)
   private shopShardLabel!: Phaser.GameObjects.Text;
+  private shopShardIcon?: Phaser.GameObjects.Image;
   private shopRows: Map<string, Phaser.GameObjects.Container> = new Map();
   private shopLvlLabels: Map<string, Phaser.GameObjects.Text> = new Map();
   private shopCostLabels: Map<string, Phaser.GameObjects.Text> = new Map();
@@ -196,6 +202,8 @@ export class UIManager {
   private shopDragStartScroll = 0;
 
   // Achievements panel refs (mirrors the shop panel: scrollable cards + claim buttons)
+  private achShardLabel?: Phaser.GameObjects.Text;
+  private achShardIcon?: Phaser.GameObjects.Image;
   private achBonusLabel?: Phaser.GameObjects.Text;
   private achLevelsLabel?: Phaser.GameObjects.Text;
   private achLvlLabels: Map<string, Phaser.GameObjects.Text> = new Map();
@@ -239,10 +247,20 @@ export class UIManager {
   private settingsModal: Phaser.GameObjects.Container | null = null;
   private statsModal: Phaser.GameObjects.Container | null = null;
 
+  // Pets row (explore bottom-left): one small button per pet, shown when unlocked.
+  private petBtns: Map<string, Phaser.GameObjects.Container> = new Map();
+  private petLvlBadges: Map<string, Phaser.GameObjects.Text> = new Map();
+  private petModal: Phaser.GameObjects.Container | null = null;
+
   constructor(scene: Phaser.Scene, state: GameState, cb: UICallbacks) {
     this.scene = scene;
     this.state = state;
     this.cb = cb;
+  }
+
+  /** True when a pointer is inside the wide-tab content area (where card lists render). */
+  private inWideContent(p: Phaser.Input.Pointer): boolean {
+    return p.y >= LAYOUT.CONTENT_TOP_WIDE && p.y <= LAYOUT.CONTENT_BOTTOM_WIDE;
   }
 
   /* ================================================================ */
@@ -463,9 +481,9 @@ export class UIManager {
   private catchMoth(): void {
     const moth = this.activeMoth;
     if (!moth) return;
-    this.cb.onCollectMoth();
-    // Floating "+1" where it was caught.
-    const pop = makeText(this.scene, moth.x, moth.y, '+1', 30, '#C9B6FF', {
+    const gain = this.cb.onCollectMoth();
+    // Floating "+N" where it was caught (Lamp Trap Lv10+ makes this +2).
+    const pop = makeText(this.scene, moth.x, moth.y, `+${gain}`, 30, '#C9B6FF', {
       fontStyle: 'bold', stroke: '#000000', strokeThickness: 4,
     }).setOrigin(0.5).setDepth(23);
     this.panels.get('explore')?.add(pop);
@@ -574,21 +592,25 @@ export class UIManager {
       fontStyle: 'bold',
     }).setOrigin(0.5, 0.5).setDepth(10);
 
+    // Header buttons sit at depth 30 — above the content panels (15) for the same
+    // reason as the tab bar: masked scroll lists still hit-test over the header,
+    // and an invisible overflow row would otherwise swallow these clicks.
+
     // Settings button — top-right corner of the header card.
     const settingsBtn = makeBtn(this.scene, LAYOUT.GAME_WIDTH - 78, 30, 'SETTINGS', 120, 36, 0x2a2a2a, () => this.openSettings());
     (settingsBtn.getAt(1) as Phaser.GameObjects.Text).setFontSize(16);
-    settingsBtn.setDepth(12);
+    settingsBtn.setDepth(30);
 
     // Stats button — top-LEFT corner, mirroring Settings (temporary placement).
     const statsBtn = makeBtn(this.scene, 78, 30, 'STATS', 120, 36, 0x2a2a2a, () => this.showStats());
     (statsBtn.getAt(1) as Phaser.GameObjects.Text).setFontSize(16);
-    statsBtn.setDepth(12);
+    statsBtn.setDepth(30);
 
     // "Hide maxed" toggle — same style as Settings, tucked just beneath it.
     // Only shown on the Upgrades tab (toggled in showTab).
     this.hideMaxedBtn = makeBtn(this.scene, LAYOUT.GAME_WIDTH - 78, 72, 'HIDE MAXED', 120, 34, 0x2a2a2a, () => this.cb.onToggleHideMaxed());
     (this.hideMaxedBtn.getAt(1) as Phaser.GameObjects.Text).setFontSize(14);
-    this.hideMaxedBtn.setDepth(12).setVisible(false);
+    this.hideMaxedBtn.setDepth(30).setVisible(false);
     this.updateHideMaxedBtn();   // sync initial color/label to state
   }
 
@@ -697,12 +719,16 @@ export class UIManager {
 
       for (let i = 0; i < count; i++) {
         const x = startX + i * gap + tabW / 2;
+        // Depth 30: ABOVE the content panels (15). Panel scroll lists are masked
+        // to the content area, but masks don't clip INPUT — overflow rows sit
+        // invisibly over the tab bar and would otherwise swallow tab clicks
+        // (Phaser routes input to the topmost object only).
         const bg = this.scene.add.rectangle(x, centerY, tabW, rowH, 0x222222)
-          .setDepth(10)
+          .setDepth(30)
           .setStrokeStyle(1, 0x444444);
         const txt = makeText(this.scene, x, centerY, tabs[i].label, 17, '#888888', {
           fontStyle: 'bold',
-        }).setOrigin(0.5).setDepth(11);
+        }).setOrigin(0.5).setDepth(31);
 
         // Shop tab gets the Void Shard icon to the left of its label (icon + text
         // centered together within the button).
@@ -711,7 +737,7 @@ export class UIManager {
           const iconGap = 6;
           const icon = this.createIcon(0, centerY, 'void_shard', iconSize);
           if (icon) {
-            icon.setDepth(11);
+            icon.setDepth(31);
             const total = iconSize + iconGap + txt.width;
             icon.x = x - total / 2 + iconSize / 2;
             txt.setX(icon.x + iconSize / 2 + iconGap + txt.width / 2);
@@ -731,7 +757,7 @@ export class UIManager {
         // Alert dot (red circle + "!") in the tab's top-right corner — shown when
         // that tab has something waiting and you're on a DIFFERENT tab.
         if (tabId === 'upgrades' || tabId === 'explore' || tabId === 'achievements') {
-          const dot = this.scene.add.container(x + tabW / 2 - 6, centerY - rowH / 2 + 4).setDepth(12);
+          const dot = this.scene.add.container(x + tabW / 2 - 6, centerY - rowH / 2 + 4).setDepth(32);
           const circle = this.scene.add.circle(0, 0, 11, 0xff3030).setStrokeStyle(2, 0x000000);
           const bang = makeText(this.scene, 0, 0, '!', 15, '#FFFFFF', { fontStyle: 'bold' }).setOrigin(0.5);
           dot.add([circle, bang]);
@@ -813,10 +839,27 @@ export class UIManager {
     }).setOrigin(0.5).setDepth(18).setVisible(false);
     panel.add(this.qualityLabel);
 
+    // "EASY ACCESS" tag — independent of grade (a node can be MINT and easy-access),
+    // so it sits just below the grade tag and shows on its own roll.
+    this.easyAccessLabel = makeText(this.scene, cx, iconCy - 108, 'EASY ACCESS', 22, '#66CCFF', {
+      fontStyle: 'bold', stroke: '#000000', strokeThickness: 4,
+    }).setOrigin(0.5).setDepth(18).setVisible(false);
+    panel.add(this.easyAccessLabel);
+
     // Persistent hint under the icon.
     this.hintText = makeText(this.scene, cx, iconCy + 198, 'Tap or hold to search', 18, '#FFFFFF')
       .setOrigin(0.5).setDepth(16);
     panel.add(this.hintText);
+
+    // Floor-base status under the hint — this floor's permanent construction
+    // (FLOOR_BASE_STAGES) plus a smaller line spelling out the bonuses it grants
+    // (or, with no base, what the first stage would give). Node breaks roll to
+    // advance it; text/color follow the current floor in updateStatusBars.
+    this.baseLabel = makeText(this.scene, cx, iconCy + 226, '', 16, '#777777')
+      .setOrigin(0.5).setDepth(16);
+    this.baseDescLabel = makeText(this.scene, cx, iconCy + 252, '', 14, '#666666')
+      .setOrigin(0.5).setDepth(16);
+    panel.add([this.baseLabel, this.baseDescLabel]);
 
     // The player avatar — you, running endlessly through the backrooms. Sits
     // up top, above the entity/ambient flavor line (flavor is at iconCy - 200),
@@ -851,6 +894,31 @@ export class UIManager {
     // (left of center = run left, right = run right); tap him to stop (stand00),
     // and keep tapping him to chat. A chat finishes back to standing.
     this.scene.input.on('pointerdown', (pointer: Phaser.Input.Pointer) => this.onBuddyPointer(pointer));
+
+    // Pets row — unlocked pets (PETS, e.g. the Lamp Trap) line up bottom-left of
+    // the explore content, below the moth flight band. Each is a small icon with
+    // a level badge; tap for a popup of what it's doing. Hidden until owned —
+    // refreshPetRow syncs visibility/levels.
+    const petY = LAYOUT.CONTENT_BOTTOM - 46;
+    PETS.forEach((pet, i) => {
+      const btn = this.scene.add.container(58 + i * 78, petY).setDepth(18).setVisible(false);
+      const bg = this.scene.add.rectangle(0, 0, 66, 66, 0x1e1e1e, 0.95).setStrokeStyle(2, 0x6a5a2a);
+      bg.setInteractive({ useHandCursor: true });
+      bg.on('pointerdown', () => this.showPetPopup(pet.id));
+      btn.add(bg);
+      // PNG art when loaded; the pet's emoji stands in until art exists (Pet Lion).
+      const petIcon = this.createIcon(0, -6, pet.iconKey, 46);
+      if (petIcon) btn.add(petIcon);
+      else btn.add(makeText(this.scene, 0, -6, pet.icon, 30, '#FFFFFF').setOrigin(0.5));
+      const lvlTxt = makeText(this.scene, 0, 24, 'Lv 1', 13, '#FFE08A', {
+        fontStyle: 'bold', stroke: '#000000', strokeThickness: 3,
+      }).setOrigin(0.5);
+      btn.add(lvlTxt);
+      panel.add(btn);
+      this.petBtns.set(pet.id, btn);
+      this.petLvlBadges.set(pet.id, lvlTxt);
+    });
+    this.refreshPetRow();
 
     this.panels.set('explore', panel);
 
@@ -929,27 +997,29 @@ export class UIManager {
   /**
    * Floating damage number on each search tap — the "big number" juice. A normal
    * hit is a small white number; a lucky find (crit) is a large gold number that
-   * pops bigger and drifts higher.
+   * pops bigger and drifts higher; a SUPER crit (Pet Lion) is bigger still,
+   * burning orange with a double bang.
    */
-  showSearchHit(damage: Big, crit: boolean): void {
+  showSearchHit(damage: Big, crit: boolean, superCrit = false): void {
     if (this.activeTab !== 'explore') return;
     const cx = LAYOUT.CENTER_X + Phaser.Math.Between(-50, 50);
     const cy = this.showcaseCenterY() + Phaser.Math.Between(-30, 10);
-    const label = crit ? `${fmt(damage)}!` : fmt(damage);
+    const label = superCrit ? `${fmt(damage)}!!` : crit ? `${fmt(damage)}!` : fmt(damage);
     // Hype mode pumps up the numbers — bigger and chunkier.
     const hyped = this.state.hypeActive;
-    const size = Math.round((crit ? 54 : 30) * (hyped ? 1.6 : 1));
-    const mote = makeText(this.scene, cx, cy, label, size, crit ? '#FFD24A' : '#FFFFFF', {
-      fontStyle: 'bold', stroke: '#000000', strokeThickness: crit ? 6 : 4,
+    const size = Math.round((superCrit ? 66 : crit ? 54 : 30) * (hyped ? 1.6 : 1));
+    const color = superCrit ? '#FF8A3C' : crit ? '#FFD24A' : '#FFFFFF';
+    const mote = makeText(this.scene, cx, cy, label, size, color, {
+      fontStyle: 'bold', stroke: '#000000', strokeThickness: superCrit ? 7 : crit ? 6 : 4,
     }).setOrigin(0.5).setDepth(21);
     this.panels.get('explore')?.add(mote);
     this.scene.tweens.add({
       targets: mote,
       x: cx + Phaser.Math.Between(-40, 40),
-      y: cy - (crit ? 180 : 120),
+      y: cy - (superCrit ? 220 : crit ? 180 : 120),
       alpha: { from: 1, to: 0 },
-      scale: crit ? { from: 1.35, to: 1 } : { from: 1, to: 0.9 },
-      duration: crit ? 950 : 680,
+      scale: superCrit ? { from: 1.5, to: 1 } : crit ? { from: 1.35, to: 1 } : { from: 1, to: 0.9 },
+      duration: superCrit ? 1100 : crit ? 950 : 680,
       ease: 'Cubic.easeOut',
       onComplete: () => mote.destroy(),
     });
@@ -1089,7 +1159,12 @@ export class UIManager {
         .setStrokeStyle(2, 0x555555)
         .setInteractive({ useHandCursor: true });
       // Buy on RELEASE, and only if this gesture wasn't a scroll-drag.
-      btnBg.on('pointerup', () => { if (!this.upgDragMoved) this.cb.onBuyUpgrade(upg.id); });
+      // Buy on RELEASE, only if the gesture wasn't a scroll-drag AND the pointer is
+      // inside the content area — masked overflow rows still hit-test over the
+      // header/tab strips, where a buy must never trigger.
+      btnBg.on('pointerup', (p: Phaser.Input.Pointer) => {
+        if (!this.upgDragMoved && this.inWideContent(p)) this.cb.onBuyUpgrade(upg.id);
+      });
       const costIcon = this.createIcon(LX + 34, BCY, upg.costResource, 48);
       if (costIcon) this.upgCostIcons.set(upg.id, costIcon);
       const costLabel = makeText(this.scene, LX + 66, BCY, '', 18, '#FFFFFF', { fontStyle: 'bold' })
@@ -1612,6 +1687,21 @@ export class UIManager {
     }
   }
 
+  /**
+   * Center an "[icon] Void Shards: N" header group horizontally around `cx`. Called
+   * on build AND on refresh (the number's width changes as the balance grows, so the
+   * group must be re-centered). Label keeps a left (0) origin; only x positions move.
+   */
+  private centerShardHeader(icon: Phaser.GameObjects.Image | undefined, label: Phaser.GameObjects.Text, cx: number): void {
+    const iconSize = 60;
+    const gap = icon ? 12 : 0;
+    const iconW = icon ? iconSize : 0;
+    const total = iconW + gap + label.width;
+    let x = cx - total / 2;
+    if (icon) { icon.setX(x + iconW / 2); x += iconW + gap; }
+    label.setOrigin(0, 0).setX(x);
+  }
+
   /* ---- Shop panel (Phase 5) ---- */
 
   private createShopPanel(): void {
@@ -1628,14 +1718,15 @@ export class UIManager {
     const BCY = UIManager.UPG_BTN_CY;
     const rowH = UIManager.UPG_ROW_H;
 
-    // Header (scrolls with the list): shard balance + how to earn.
+    // Header (scrolls with the list): shard balance (icon + count, centered) + how to earn.
     const headerY = LAYOUT.CONTENT_TOP_WIDE + 10;
-    const vsIcon = this.createIcon(cx - 150, headerY + 16, 'void_shard', 60);
+    const vsIcon = this.createIcon(0, headerY + 14, 'void_shard', 60) ?? undefined;
+    this.shopShardIcon = vsIcon;
+    this.shopShardLabel = makeText(this.scene, 0, headerY,
+      `Void Shards: ${this.state.voidShards}`, 22, '#CC88FF', { fontStyle: 'bold' }).setOrigin(0, 0);
     if (vsIcon) scrollContainer.add(vsIcon);
-    this.shopShardLabel = makeText(this.scene, vsIcon ? cx - 120 : cx, headerY,
-      `Void Shards: ${this.state.voidShards}`, 22, '#CC88FF', { fontStyle: 'bold' })
-      .setOrigin(vsIcon ? 0 : 0.5, 0);
     scrollContainer.add(this.shopShardLabel);
+    this.centerShardHeader(vsIcon, this.shopShardLabel, cx);
     const earnInfo = makeText(this.scene, cx, headerY + 36,
       'Earn a Void Shard by maxing an upgrade or reaching a new floor.',
       13, '#8888AA').setOrigin(0.5, 0);
@@ -1648,7 +1739,11 @@ export class UIManager {
       // Card row — mirrors the upgrade panel (name / desc / level stacked, cost button below).
       const row = this.scene.add.container(0, firstCardY + i * rowH);
 
-      const nameTxt = makeText(this.scene, LX, 0, sup.icon ? `${sup.icon}  ${sup.name}` : sup.name, 22, '#EEEEEE', { fontStyle: 'bold' });
+      // Name line: a loaded PNG icon (iconTexture, e.g. the Lamp Trap's lamp art —
+      // same as its explore-page button) beats the emoji prefix; emoji is the fallback.
+      const nameIcon = sup.iconTexture ? this.createIcon(LX + 20, 11, sup.iconTexture, 44) : null;
+      const nameTxt = makeText(this.scene, nameIcon ? LX + 50 : LX, 0,
+        !nameIcon && sup.icon ? `${sup.icon}  ${sup.name}` : sup.name, 22, '#EEEEEE', { fontStyle: 'bold' });
       const descTxt = makeText(this.scene, LX, 32, sup.description, 14, '#AAAAAA', { wordWrap: { width: 620 } });
       const lvl = this.state.getShopLevel(sup.id);
       const lvlTxt = makeText(this.scene, LX, 58, `Lv ${lvl}/${sup.maxLevel}`, 16, '#c8a8ff');
@@ -1657,7 +1752,9 @@ export class UIManager {
       const btnBg = this.scene.add.rectangle(LX + BW / 2, BCY, BW, BH, 0x333333, 1)
         .setStrokeStyle(2, 0x555555)
         .setInteractive({ useHandCursor: true });
-      btnBg.on('pointerup', () => { if (!this.shopDragMoved) this.cb.onBuyShopUpgrade(sup.id); });
+      btnBg.on('pointerup', (p: Phaser.Input.Pointer) => {
+        if (!this.shopDragMoved && this.inWideContent(p)) this.cb.onBuyShopUpgrade(sup.id);
+      });
       const costIcon = this.createIcon(LX + 34, BCY, 'void_shard', 44);
       if (costIcon) this.shopCostIcons.set(sup.id, costIcon);
       const costLabel = makeText(this.scene, LX + BW / 2, BCY, '', 18, '#FFFFFF', { fontStyle: 'bold' })
@@ -1667,6 +1764,7 @@ export class UIManager {
         .setStrokeStyle(1, 0x3a3a3a);
 
       row.add(card);
+      if (nameIcon) row.add(nameIcon);
       row.add([nameTxt, descTxt, lvlTxt, btnBg]);
       if (costIcon) row.add(costIcon);
       row.add(costLabel);
@@ -1722,8 +1820,13 @@ export class UIManager {
 
     this.shopLvlLabels.get(sup.id)?.setText(`Lv ${lvl}/${sup.maxLevel}`);
 
+    // When maxed, HIDE the button (and disable its tap) but keep the MAXED label.
     const bg = this.shopBuyBg.get(sup.id);
-    if (bg) bg.setFillStyle(maxed ? 0x2a2a2a : canBuy ? 0x443366 : 0x333333);
+    if (bg) {
+      bg.setVisible(!maxed);
+      if (bg.input) bg.input.enabled = !maxed;
+      if (!maxed) bg.setFillStyle(canBuy ? 0x443366 : 0x333333);
+    }
     this.shopCostIcons.get(sup.id)?.setVisible(!maxed);
     const label = this.shopCostLabels.get(sup.id);
     if (label) {
@@ -1734,6 +1837,7 @@ export class UIManager {
 
   refreshShopPanel(): void {
     this.shopShardLabel.setText(`Void Shards: ${this.state.voidShards}`);
+    this.centerShardHeader(this.shopShardIcon, this.shopShardLabel, LAYOUT.CENTER_X);
     for (const sup of SHOP_UPGRADES) this.renderShopRow(sup);
   }
 
@@ -1759,15 +1863,24 @@ export class UIManager {
     const rowH = CARD_H + 14;              // card + gap
     const startY = LAYOUT.CONTENT_TOP_WIDE + 10;
 
-    // Header (scrolls with the cards): the global auto-search bonus every claimed
-    // tier grants (+0.5% each, summed across ALL achievements). Total on the left,
-    // the "N levels x 0.5%" breakdown on the right.
-    this.achBonusLabel = makeText(this.scene, LX, startY, '', 18, '#9fd0a0', { fontStyle: 'bold' })
+    // Header (scrolls with the cards). Line 1: the Void Shard balance (matches the
+    // Shop header). Line 2: the global auto-search bonus from claimed tiers (+0.5%
+    // each across ALL achievements) on the left, the "N levels x 0.5%" breakdown right.
+    const cx = LAYOUT.CENTER_X;
+    const vsIcon = this.createIcon(0, startY + 14, 'void_shard', 60) ?? undefined;
+    this.achShardIcon = vsIcon;
+    this.achShardLabel = makeText(this.scene, 0, startY,
+      `Void Shards: ${this.state.voidShards}`, 22, '#CC88FF', { fontStyle: 'bold' }).setOrigin(0, 0);
+    if (vsIcon) scrollContainer.add(vsIcon);
+    scrollContainer.add(this.achShardLabel);
+    this.centerShardHeader(vsIcon, this.achShardLabel, cx);
+
+    this.achBonusLabel = makeText(this.scene, LX, startY + 44, '', 18, '#9fd0a0', { fontStyle: 'bold' })
       .setOrigin(0, 0);
-    this.achLevelsLabel = makeText(this.scene, LX + BW, startY, '', 16, '#8aa88a')
+    this.achLevelsLabel = makeText(this.scene, LX + BW, startY + 44, '', 16, '#8aa88a')
       .setOrigin(1, 0);
     scrollContainer.add([this.achBonusLabel, this.achLevelsLabel]);
-    const firstCardY = startY + 44;
+    const firstCardY = startY + 84;
 
     for (let i = 0; i < ACHIEVEMENTS.length; i++) {
       const ach = ACHIEVEMENTS[i];
@@ -1792,7 +1905,9 @@ export class UIManager {
       const btnBg = this.scene.add.rectangle(LX + BW / 2, BCY, BW, BH, 0x333333, 1)
         .setStrokeStyle(2, 0x555555)
         .setInteractive({ useHandCursor: true });
-      btnBg.on('pointerup', () => { if (!this.achDragMoved) this.cb.onClaimAchievement(ach.id); });
+      btnBg.on('pointerup', (p: Phaser.Input.Pointer) => {
+        if (!this.achDragMoved && this.inWideContent(p)) this.cb.onClaimAchievement(ach.id);
+      });
       const rewardIcon = this.createIcon(LX + BW - 40, BCY, 'void_shard', 38);
       if (rewardIcon) this.achBtnIcons.set(ach.id, rewardIcon);
       const btnLabel = makeText(this.scene, LX + BW / 2, BCY, '', 18, '#FFFFFF', { fontStyle: 'bold' })
@@ -1819,7 +1934,7 @@ export class UIManager {
     maskGfx.fillRect(0, LAYOUT.CONTENT_TOP_WIDE, LAYOUT.GAME_WIDTH, contentH);
     panel.setMask(maskGfx.createGeometryMask());
 
-    this.achMinScroll = Math.min(0, contentH - (44 + ACHIEVEMENTS.length * rowH));
+    this.achMinScroll = Math.min(0, contentH - (84 + ACHIEVEMENTS.length * rowH));
 
     this.scene.input.on('pointerdown', (p: Phaser.Input.Pointer) => {
       if (this.activeTab !== 'achievements') return;
@@ -1866,9 +1981,13 @@ export class UIManager {
       progLabel?.setText(`${fmt(D(progress))} / ${fmt(D(threshold))}`);
     }
 
-    // Claim button.
+    // Claim button — when fully claimed, HIDE the button but keep the ALL CLAIMED label.
     const bg = this.achBtnBg.get(ach.id);
-    if (bg) bg.setFillStyle(maxed ? 0x2a2a2a : claimable ? 0x336633 : 0x333333);
+    if (bg) {
+      bg.setVisible(!maxed);
+      if (bg.input) bg.input.enabled = !maxed;
+      if (!maxed) bg.setFillStyle(claimable ? 0x336633 : 0x333333);
+    }
     const icon = this.achBtnIcons.get(ach.id);
     if (icon) icon.setVisible(!maxed);
     const label = this.achBtnLabels.get(ach.id);
@@ -1879,6 +1998,10 @@ export class UIManager {
   }
 
   refreshAchievementsPanel(): void {
+    if (this.achShardLabel) {
+      this.achShardLabel.setText(`Void Shards: ${this.state.voidShards}`);
+      this.centerShardHeader(this.achShardIcon, this.achShardLabel, LAYOUT.CENTER_X);
+    }
     const levels = this.state.totalAchievementLevels;
     this.achBonusLabel?.setText(`Auto Search Bonus: +${(levels * 0.5).toFixed(1)}%`);
     this.achLevelsLabel?.setText(`${levels} levels x 0.5%`);
@@ -2104,6 +2227,49 @@ export class UIManager {
       }
     }
 
+    // Floor-base lines: gold stage name + its active bonuses once anything is
+    // built; until then a dim hint teasing what the first stage grants. A
+    // stage-up on the floor we're already watching gets a celebratory pop.
+    if (this.baseLabel && this.baseDescLabel) {
+      const stage = s.floorBaseStage;
+      const loc = s.baseLocation;
+      if (loc !== this.lastBaseLoc || stage !== this.lastBaseStage) {
+        if (stage > 0) {
+          const name = FLOOR_BASE_STAGES[stage - 1].name;
+          const bonuses = FLOOR_BASE_STAGES.slice(0, stage).map((st) => st.desc).join(' · ');
+          this.baseLabel.setText(`⛺ Base: ${name} (${stage}/${FLOOR_BASE_STAGES.length})`).setColor('#FFD24A');
+          this.baseDescLabel.setText(`${bonuses} — on this floor`).setColor('#C8B878');
+        } else {
+          this.baseLabel.setText('No base on this floor yet').setColor('#777777');
+          this.baseDescLabel.setText(`Keep searching to secure one: ${FLOOR_BASE_STAGES[0].desc} here, forever`).setColor('#666666');
+        }
+        if (loc === this.lastBaseLoc && stage > this.lastBaseStage) {
+          this.scene.tweens.add({
+            targets: [this.baseLabel, this.baseDescLabel], scale: { from: 1.6, to: 1 }, duration: 500, ease: 'Back.easeOut',
+          });
+        }
+        this.lastBaseLoc = loc;
+        this.lastBaseStage = stage;
+      }
+    }
+
+    // "EASY ACCESS" tag (independent of grade) — same live-only, pulsing treatment.
+    if (this.easyAccessLabel) {
+      const show = !s.isRespawning && s.nodeIsEasyAccess;
+      if (show) {
+        if (!this.easyAccessLabel.visible) {
+          this.easyAccessLabel.setVisible(true);
+          this.scene.tweens.add({
+            targets: this.easyAccessLabel, scale: { from: 1, to: 1.12 },
+            duration: 600, yoyo: true, repeat: -1, ease: 'Sine.easeInOut',
+          });
+        }
+      } else if (this.easyAccessLabel.visible) {
+        this.scene.tweens.killTweensOf(this.easyAccessLabel);
+        this.easyAccessLabel.setScale(1).setVisible(false);
+      }
+    }
+
     // Right arrow (go deeper): GREEN only when you can descend into NEW territory
     // you haven't unlocked yet (the "move forward" signal). Once the next floor
     // is already unlocked, it's just navigation — gray like the left arrow.
@@ -2192,8 +2358,13 @@ export class UIManager {
     const resName = RESOURCES[resId]?.name ?? resId;
     const LX = UIManager.UPG_LEFT;
 
+    // When maxed, HIDE the button (and disable its tap) but keep the MAXED label.
     const bg = this.upgBuyBg.get(upg.id);
-    if (bg) bg.setFillStyle(maxed ? 0x2a2a2a : canBuy ? 0x336633 : 0x333333);
+    if (bg) {
+      bg.setVisible(!maxed);
+      if (bg.input) bg.input.enabled = !maxed;
+      if (!maxed) bg.setFillStyle(canBuy ? 0x336633 : 0x333333);
+    }
     // Swap the icon to the current cost resource (matters for cycling upgrades).
     const icon = this.upgCostIcons.get(upg.id);
     if (icon) {
@@ -2542,21 +2713,6 @@ export class UIManager {
     const cy = GAME_HEIGHT / 2;
     RundotGameAPI.triggerHapticAsync('light' as never);
 
-    const modal = this.scene.add.container(0, 0).setDepth(310);
-    const overlay = this.scene.add.rectangle(cx, cy, GAME_WIDTH, GAME_HEIGHT, 0x000000, 0.72).setInteractive();
-    modal.add(overlay);
-
-    const panelW = 560;
-    const panelH = 740;
-    const top = cy - panelH / 2;
-    const panel = this.scene.add.rectangle(cx, cy, panelW, panelH, 0x141414, 0.98)
-      .setStrokeStyle(2, 0x555555).setInteractive();
-    modal.add(panel);
-
-    modal.add(makeText(this.scene, cx, top + 34, 'STATS', 30, '#FFFFFF', { fontStyle: 'bold' }).setOrigin(0.5));
-    modal.add(makeBtn(this.scene, cx + panelW / 2 - 32, top + 32, '✕', 40, 40, 0x442222, () => this.closeStats()));
-    modal.add(this.scene.add.rectangle(cx, top + 66, panelW - 48, 1, 0x444444));
-
     // Snapshot of the live values (reopen to refresh).
     const s = this.state;
     const rows: [string, string][] = [
@@ -2567,12 +2723,14 @@ export class UIManager {
       // excludes the drone). More Explorers will each get their own line here later.
       ['Explorer 1', `${s.explorerAuto(0)}/s auto`],
       ['Lucky Find (Crit %)', `${Math.round(s.critChance * 100)}%  ×${s.critMult}`],
+      // (Super Crit row spliced in below when the Pet Lion is owned.)
       ['Node respawn', `${s.nodeRespawnTime} ms`],
       ['Hype boost', `×${s.hypeMultiplier} auto for ${s.hypeDuration / 1000}s`],
       ['Hype cooldown', `${Math.round(s.hypeCooldown / 60000)} min`],
       ['Auto-Capture (Moth)', `${Math.round(s.autoCaptureChance * 100)}%`],
-      ['Quality chance', `${Math.round(s.qualityChance * 100)}%  (+${s.qualityBonus})`],
-      ['Mint chance', `${Math.round(s.mintChance * 100)}%  (+9)`],
+      // Two decimals (noise-stripped): Quality Sense and the Magpie move in 0.25% steps.
+      ['Quality chance', `${+(s.qualityChance * 100).toFixed(2)}%  (+${s.qualityBonus})`],
+      ['Mint chance', `${+(s.mintChance * 100).toFixed(2)}%  (+9)`],
       ['Easy Access chance', `${(s.easyAccessChance * 100).toFixed(1)}%  (½ HP)`],
       ['Resources found', `${s.stats.resourcesFound.toLocaleString()}`],
       ['Quality finds', `${s.stats.qualityFinds.toLocaleString()}`],
@@ -2580,12 +2738,66 @@ export class UIManager {
       ['Easy Access finds', `${s.stats.easyAccessFinds.toLocaleString()}`],
       ['Moths caught', fmt(s.resources['moth'] ?? D(0))],
     ];
-    let y = top + 96;
+    if (s.petLionLevel > 0) {
+      const critIdx = rows.findIndex(([label]) => label.startsWith('Lucky Find'));
+      rows.splice(critIdx + 1, 0, ['Super Crit (Pet Lion)', `${s.petLionLevel}%  ×${s.superCritMult}`]);
+    }
+
+    // Panel grows with the row count but is capped to the screen; if the content
+    // would exceed the cap it scrolls instead of crowding the close button.
+    const panelW = 560;
     const rowGap = 38;
+    const headPad = 92;   // panel top → first row center (title + divider above)
+    const footPad = 88;   // last row → CLOSE button + margin below
+    const maxH = GAME_HEIGHT - 80;
+    const contentH = rows.length * rowGap;
+    const panelH = Math.min(headPad + contentH + footPad, maxH);
+    const top = cy - panelH / 2;
+
+    const modal = this.scene.add.container(0, 0).setDepth(310);
+    const overlay = this.scene.add.rectangle(cx, cy, GAME_WIDTH, GAME_HEIGHT, 0x000000, 0.72).setInteractive();
+    modal.add(overlay);
+    const panel = this.scene.add.rectangle(cx, cy, panelW, panelH, 0x141414, 0.98)
+      .setStrokeStyle(2, 0x555555).setInteractive();
+    modal.add(panel);
+
+    modal.add(makeText(this.scene, cx, top + 34, 'STATS', 30, '#FFFFFF', { fontStyle: 'bold' }).setOrigin(0.5));
+    modal.add(makeBtn(this.scene, cx + panelW / 2 - 32, top + 32, '✕', 40, 40, 0x442222, () => this.closeStats()));
+    modal.add(this.scene.add.rectangle(cx, top + 66, panelW - 48, 1, 0x444444));
+
+    // Rows live in a scroll container, clipped to the region between the divider
+    // and the CLOSE button so nothing ever bleeds over either.
+    const viewTop = top + 74;
+    const viewBottom = top + panelH - 64;
+    const scroll = this.scene.add.container(0, 0);
+    let y = top + headPad;
     for (const [label, val] of rows) {
-      modal.add(makeText(this.scene, cx - panelW / 2 + 36, y, label, 18, '#AAAAAA').setOrigin(0, 0.5));
-      modal.add(makeText(this.scene, cx + panelW / 2 - 36, y, val, 18, '#FFFFFF', { fontStyle: 'bold' }).setOrigin(1, 0.5));
+      scroll.add(makeText(this.scene, cx - panelW / 2 + 36, y, label, 18, '#AAAAAA').setOrigin(0, 0.5));
+      scroll.add(makeText(this.scene, cx + panelW / 2 - 36, y, val, 18, '#FFFFFF', { fontStyle: 'bold' }).setOrigin(1, 0.5));
       y += rowGap;
+    }
+    modal.add(scroll);
+
+    const maskGfx = this.scene.add.graphics().setVisible(false);
+    maskGfx.fillRect(cx - panelW / 2, viewTop, panelW, viewBottom - viewTop);
+    scroll.setMask(maskGfx.createGeometryMask());
+    modal.add(maskGfx);   // parented so it's destroyed with the modal
+
+    // Drag-scroll only when the content overflows the visible region. Listeners are
+    // on the panel itself (destroyed with the modal) — no scene-level leak per open.
+    const overflow = (y - rowGap / 2) - viewBottom;
+    if (overflow > 0) {
+      const minScroll = -(overflow + 12);
+      let dragging = false;
+      let lastY = 0;
+      panel.on('pointerdown', (p: Phaser.Input.Pointer) => { dragging = true; lastY = p.y; });
+      panel.on('pointermove', (p: Phaser.Input.Pointer) => {
+        if (!dragging) return;
+        scroll.y = Phaser.Math.Clamp(scroll.y + (p.y - lastY), minScroll, 0);
+        lastY = p.y;
+      });
+      panel.on('pointerup', () => { dragging = false; });
+      panel.on('pointerout', () => { dragging = false; });
     }
 
     modal.add(makeBtn(this.scene, cx, top + panelH - 36, 'CLOSE', 200, 46, 0x2a2a2a, () => this.closeStats()));
@@ -2596,6 +2808,84 @@ export class UIManager {
     if (!this.statsModal) return;
     this.statsModal.destroy(true);
     this.statsModal = null;
+  }
+
+  /* ---- Pets (explore bottom-left row + popup) ---- */
+
+  /** Sync the pets row to what's unlocked + current levels (call after buys/level-ups). */
+  refreshPetRow(): void {
+    for (const pet of PETS) {
+      const btn = this.petBtns.get(pet.id);
+      if (!btn) continue;
+      const lvl = this.state.getPetLevel(pet.id);
+      btn.setVisible(lvl > 0);
+      this.petLvlBadges.get(pet.id)?.setText(`Lv ${lvl}`);
+    }
+  }
+
+  /** Popup explaining what a pet is doing right now (level, bonuses, milestones). */
+  private showPetPopup(petId: string): void {
+    if (this.petModal) return;
+    const pet = PETS.find((p) => p.id === petId);
+    if (!pet) return;
+    RundotGameAPI.triggerHapticAsync('light' as never);
+    const { GAME_WIDTH, GAME_HEIGHT } = LAYOUT;
+    const cx = GAME_WIDTH / 2;
+    const cy = GAME_HEIGHT / 2;
+    const s = this.state;
+    const lvl = s.getPetLevel(petId);
+
+    const panelW = 560;
+    const panelH = 600;
+    const top = cy - panelH / 2;
+
+    const modal = this.scene.add.container(0, 0).setDepth(310);
+    const overlay = this.scene.add.rectangle(cx, cy, GAME_WIDTH, GAME_HEIGHT, 0x000000, 0.72).setInteractive();
+    modal.add(overlay);
+    const panel = this.scene.add.rectangle(cx, cy, panelW, panelH, 0x141414, 0.98)
+      .setStrokeStyle(2, 0x6a5a2a).setInteractive();
+    modal.add(panel);
+
+    modal.add(makeText(this.scene, cx, top + 34, pet.name.toUpperCase(), 30, '#FFE08A', { fontStyle: 'bold' }).setOrigin(0.5));
+    modal.add(makeText(this.scene, cx, top + 62, 'PET', 14, '#8a7a4a', { fontStyle: 'bold' }).setOrigin(0.5));
+    modal.add(makeBtn(this.scene, cx + panelW / 2 - 32, top + 32, '✕', 40, 40, 0x442222, () => this.closePetPopup()));
+    modal.add(this.scene.add.rectangle(cx, top + 80, panelW - 48, 1, 0x444444));
+
+    const petIcon = this.createIcon(cx, top + 146, pet.iconKey, 104);
+    if (petIcon) modal.add(petIcon);
+    else modal.add(makeText(this.scene, cx, top + 146, pet.icon, 72, '#FFFFFF').setOrigin(0.5));
+    modal.add(makeText(this.scene, cx, top + 214, pet.description, 15, '#AAAAAA', {
+      align: 'center', wordWrap: { width: panelW - 80 },
+    }).setOrigin(0.5, 0));
+
+    // Live readout: what it gives, how it grows, milestone status (green = active).
+    const rows: [string, string, string?][] = [
+      ['Level', `${lvl} / ${pet.maxLevel}`],
+      [pet.bonusLabel, `+${+(lvl * pet.bonusPerLevel).toFixed(2)}%`],
+    ];
+    if (petId === 'lamp_trap') rows.push(['Your total auto-catch', `${Math.round(s.autoCaptureChance * 100)}%`]);
+    if (petId === 'pet_lion') rows.push(['Super Crit multiplier', `×${s.superCritMult}`]);
+    if (petId === 'pet_magpie') rows.push(['Your total Mint chance', `${+(s.mintChance * 100).toFixed(2)}%`]);
+    if (petId === 'pet_bear') rows.push(['Current hype duration', `${s.hypeDuration / 1000}s`]);
+    rows.push(['Grows', lvl >= pet.maxLevel ? 'MAX level reached' : `1-in-${s.petLevelUpOdds(petId)} per ${pet.growsOn}`]);
+    for (const m of pet.milestones) {
+      rows.push([`Lv ${m.level} bonus`, m.desc, lvl >= m.level ? '#7CFF7C' : '#777777']);
+    }
+    let y = top + 296;
+    for (const [label, val, color] of rows) {
+      modal.add(makeText(this.scene, cx - panelW / 2 + 36, y, label, 18, '#AAAAAA').setOrigin(0, 0.5));
+      modal.add(makeText(this.scene, cx + panelW / 2 - 36, y, val, 18, color ?? '#FFFFFF', { fontStyle: 'bold' }).setOrigin(1, 0.5));
+      y += 40;
+    }
+
+    modal.add(makeBtn(this.scene, cx, top + panelH - 36, 'CLOSE', 200, 46, 0x2a2a2a, () => this.closePetPopup()));
+    this.petModal = modal;
+  }
+
+  private closePetPopup(): void {
+    if (!this.petModal) return;
+    this.petModal.destroy(true);
+    this.petModal = null;
   }
 
   /* ---- Level change ---- */

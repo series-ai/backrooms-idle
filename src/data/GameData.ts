@@ -126,6 +126,33 @@ export function tierSuffix(tier: number): string {
   return ` ${out}`;
 }
 
+/* ------------------------------------------------------------------ */
+/*  Floor bases — permanent per-floor construction                      */
+/* ------------------------------------------------------------------ */
+//
+// Every node break on a floor rolls 1-in-`chance` to construct that floor's
+// NEXT base stage (sequential — you can't build the safe room before securing
+// a small room). Bonuses are cumulative, apply ONLY to that floor (keyed by
+// location, so they carry across tier laps), and are permanent: a Rewind
+// never clears them.
+
+export interface FloorBaseStage {
+  name: string;
+  chance: number;        // 1-in-N roll per node break to construct this stage
+  desc: string;          // bonus line shown in the log on construction
+  yieldBonus?: number;   // +N resources per node break
+  qualityBonus?: number; // + quality chance (fraction)
+  respawnMult?: number;  // × node respawn time
+  mintBonus?: number;    // + mint chance (fraction)
+}
+
+export const FLOOR_BASE_STAGES: FloorBaseStage[] = [
+  { name: 'Secured Room', chance: 100, desc: '+1 resource', yieldBonus: 1 },
+  { name: 'Supply Cache', chance: 250, desc: '+5% quality', qualityBonus: 0.05 },
+  { name: 'Outpost', chance: 500, desc: '30% faster respawn', respawnMult: 0.7 },
+  { name: 'Safe Room of Operations', chance: 750, desc: '+3% Mint', mintBonus: 0.03 },
+];
+
 export interface UpgradeDef {
   id: string;
   name: string;
@@ -536,6 +563,16 @@ export const UPGRADES: UpgradeDef[] = [
     effectPerLevel: 0.5, effectUnit: '% easy access', costResource: 'copper_wire', effect: 'easyAccess',
     unlockFloor: 8,
   },
+  // Quality chance, the floor-9 rung of the ladder (base/growth keep climbing per
+  // the scaling rule). Cost = round(25 × 1.45^level) in Duct Tape: 25,36,53,76,…
+  // Locked until floor 9 (its resource).
+  {
+    id: 'tape_it', name: 'Tape It', icon: '\u{1F9F7}',
+    description: '+1% quality resource chance per level',
+    baseCost: 25, costMultiplier: 1.45, maxLevel: 20,
+    effectPerLevel: 1, effectUnit: '% quality chance', costResource: 'duct_tape', effect: 'quality',
+    unlockFloor: 9,
+  },
 ];
 
 /* ------------------------------------------------------------------ */
@@ -822,12 +859,13 @@ export const RECIPES: RecipeDef[] = [
 // run upgrade (one-time per upgrade) or advancing to a new deepest level. The shop
 // renders with the same card layout as the run-upgrade screen.
 //   - Cost is FLAT-stepped: baseCost + costStep × level.
-//     Search Upgrade: 10,15,20,…  Hype Train: 15,20,25,…
+//     Search Upgrade: 10,15,20,…  Hype Train: 15,25,35,45,…
 
 export interface ShopUpgradeDef {
   id: string;
   name: string;
-  icon: string;       // emoji fallback shown next to the name
+  icon: string;          // emoji fallback shown next to the name
+  iconTexture?: string;  // loaded PNG icon id (preferred over the emoji when set)
   description: string;
   baseCost: number;   // Void Shards for level 0 → 1
   costStep: number;   // added per level
@@ -846,8 +884,153 @@ export const SHOP_UPGRADES: ShopUpgradeDef[] = [
   {
     id: 'hype_train', name: 'Hype Train', icon: '',
     description: 'Explorer roll +3% chance to self-hype every 5s while ready, per level',
-    baseCost: 15, costStep: 5, maxLevel: 10,
+    baseCost: 15, costStep: 10, maxLevel: 10,
     effectPerLevel: 3, effectUnit: '% self-hype',
+  },
+  // PET unlocks (see PETS below) — one-time purchases; the pets themselves then
+  // level through play, not further shard spending.
+  {
+    id: 'lamp_trap', name: 'Lamp Trap', icon: '\u{1FA94}', iconTexture: 'lamp',
+    description: 'Boosts Moth auto-catch and grows from catching Moths. Yours forever.',
+    baseCost: 5, costStep: 0, maxLevel: 1,
+    effectPerLevel: 1, effectUnit: '% auto-catch',
+  },
+  {
+    id: 'pet_lion', name: 'Pet Lion', icon: '\u{1F981}',
+    description: 'Grants Super Crits — crits on top of crits. Grows from landing crits. Yours forever.',
+    baseCost: 25, costStep: 0, maxLevel: 1,
+    effectPerLevel: 1, effectUnit: '% super crit',
+  },
+  {
+    id: 'pet_magpie', name: 'Pet Magpie', icon: '\u{1F426}',
+    description: 'Boosts Mint chance and grows from collecting quality resources. Yours forever.',
+    baseCost: 50, costStep: 0, maxLevel: 1,
+    effectPerLevel: 0.25, effectUnit: '% mint',
+  },
+  {
+    id: 'pet_bear', name: 'Pet Bear', icon: '\u{1F43B}',
+    description: 'Boosts Explorer power while hyped and grows from hyped exploring. Yours forever.',
+    baseCost: 350, costStep: 0, maxLevel: 1,
+    effectPerLevel: 5, effectUnit: '% hyped power',
+  },
+  // Halves every floor-base construction roll (all four stages): 1/100 → 1/50,
+  // 1/250 → 1/125, 1/500 → 1/250, 1/750 → 1/375.
+  {
+    id: 'stealth_camping', name: 'Stealth Camping', icon: '\u{26FA}',
+    description: 'Double your chance of constructing a base — every stage, every floor.',
+    baseCost: 100, costStep: 0, maxLevel: 1,
+    effectPerLevel: 2, effectUnit: '× base chance',
+  },
+  {
+    id: 'boxed_supplies', name: 'Boxed Supplies', icon: '\u{1F4E6}',
+    description: 'Every resource node has 25% less Integrity — on every floor.',
+    baseCost: 250, costStep: 0, maxLevel: 1,
+    effectPerLevel: 25, effectUnit: '% less Integrity',
+  },
+];
+
+/* ------------------------------------------------------------------ */
+/*  Pets                                                                */
+/* ------------------------------------------------------------------ */
+//
+// Pets are permanent companions (never reset — not even by Rewind). Each is
+// unlocked by its same-id Void Shard shop purchase at level 1, then has a
+// 1-in-N roll to gain a level on its growth trigger (the Lamp Trap grows on
+// Moth catches, the Lion on landed crits). Unlocked pets show as small icons
+// in a row at the bottom-left of the explore screen, in PETS order; tapping
+// one opens a popup of what it's doing.
+
+export interface PetDef {
+  id: string;           // matches its unlocking shop upgrade's id
+  name: string;
+  iconKey: string;      // loaded texture to render...
+  icon: string;         // ...with this emoji as the fallback while no art exists
+  maxLevel: number;
+  // Level-up roll per growth trigger: 1-in-round(levelChance × levelChanceGrowth^(level − 1)).
+  // Both pets use ×1.2/level: Lamp 15, 18, 22, 26, …; Lion 250, 300, 360, 432, …
+  levelChance: number;
+  levelChanceGrowth: number;
+  bonusPerLevel: number; // % the bonus stat gains per level (lamp/lion 1, magpie 0.25)
+  bonusLabel: string;    // the stat that bonus feeds (popup row + level-up toast)
+  growsOn: string;       // growth trigger, shown as "1-in-N per <growsOn>"
+  description: string;
+  milestones: { level: number; desc: string }[];
+}
+
+export const PETS: PetDef[] = [
+  {
+    id: 'lamp_trap',
+    name: 'Lamp Trap',
+    iconKey: 'lamp',
+    icon: '\u{1FA94}',
+    maxLevel: 20,
+    levelChance: 15,
+    levelChanceGrowth: 1.2,
+    bonusPerLevel: 1,
+    bonusLabel: 'Moth auto-catch',
+    growsOn: 'Moth caught',
+    description: 'A humming lamp that lures creatures in.',
+    milestones: [
+      { level: 10, desc: '×2 Moths per catch' },
+      { level: 20, desc: '×2 a future creature (TBD)' },
+    ],
+  },
+  // Super Crits: a landed crit (tap or auto) rolls the Lion's level as a % chance
+  // to multiply AGAIN — ×2 base, +1× at Lv 10, +1× more (Ultra) at Lv 20.
+  {
+    id: 'pet_lion',
+    name: 'Pet Lion',
+    iconKey: 'pet_lion',
+    icon: '\u{1F981}',
+    maxLevel: 20,
+    levelChance: 250,
+    levelChanceGrowth: 1.2,
+    bonusPerLevel: 1,
+    bonusLabel: 'Super Crit chance',
+    growsOn: 'crit landed',
+    description: 'A regal beast that sharpens your luckiest finds.',
+    milestones: [
+      { level: 10, desc: '+1× Super Crit multiplier' },
+      { level: 20, desc: '+1× Ultra Crit multiplier' },
+    ],
+  },
+  // Mint hunter: +0.25% Mint chance per level, growing whenever a QUALITY
+  // resource is collected (mint finds are a separate grade and don't count).
+  {
+    id: 'pet_magpie',
+    name: 'Pet Magpie',
+    iconKey: 'pet_magpie',
+    icon: '\u{1F426}',
+    maxLevel: 20,
+    levelChance: 200,
+    levelChanceGrowth: 1.2,
+    bonusPerLevel: 0.25,
+    bonusLabel: 'Mint chance',
+    growsOn: 'quality find',
+    description: 'A glossy thief with an eye for the shiniest finds.',
+    milestones: [
+      { level: 10, desc: '+3% Quality chance' },
+      { level: 20, desc: '+3% Mint chance' },
+    ],
+  },
+  // Hype specialist: +5% Explorer power per level WHILE HYPED, rolling its
+  // level-up on every idle tick that hype is active (~10-15 rolls per burst).
+  {
+    id: 'pet_bear',
+    name: 'Pet Bear',
+    iconKey: 'pet_bear',
+    icon: '\u{1F43B}',
+    maxLevel: 20,
+    levelChance: 200,
+    levelChanceGrowth: 1.2,
+    bonusPerLevel: 5,
+    bonusLabel: 'Explorer power while hyped',
+    growsOn: 'hyped search tick',
+    description: 'A heavy sleeper that wakes up for the rush.',
+    milestones: [
+      { level: 10, desc: '+50% hype duration' },
+      { level: 20, desc: '+15% resource gathering speed' },
+    ],
   },
 ];
 
@@ -860,7 +1043,7 @@ export const SHOP_UPGRADES: ShopUpgradeDef[] = [
 // can claim `reward` shards and advance to the next tier. Renders with the same
 // card layout as the upgrade/shop panels.
 
-export type AchievementStat = 'resourcesCollected';
+export type AchievementStat = 'resourcesCollected' | 'critsLanded' | 'creaturesCaught' | 'hypeTriggered' | 'structuresBuilt' | 'petLevelsGained' | 'superCritsLanded';
 
 export interface AchievementDef {
   id: string;
@@ -877,6 +1060,60 @@ export const ACHIEVEMENTS: AchievementDef[] = [
     name: 'Pack Rat',
     description: 'Total Resources Collected',
     stat: 'resourcesCollected',
+    thresholds: [10, 50, 150, 500, 1500, 5000, 15000, 50000, 150000, 500000],
+    reward: 3,
+  },
+  {
+    id: 'crit_master',
+    name: 'Crit Master',
+    description: 'Critical Hits Landed',
+    stat: 'critsLanded',
+    thresholds: [5, 25, 100, 300, 1000, 3000, 10000, 30000, 100000, 300000],
+    reward: 3,
+  },
+  {
+    id: 'mob_farm',
+    name: 'Mob Farm',
+    description: 'Creatures Caught',
+    stat: 'creaturesCaught',
+    thresholds: [3, 10, 30, 75, 150, 300, 600],
+    reward: 3,
+  },
+  {
+    id: 'hype_man',
+    name: 'Hype Man',
+    description: 'Total Explorer Hype Triggered',
+    stat: 'hypeTriggered',
+    thresholds: [5, 20, 60, 200, 600, 2000, 6000, 20000, 60000, 200000],
+    reward: 3,
+  },
+  // Counts floor-base stages constructed (FLOOR_BASE_STAGES finds), lifetime.
+  // Thresholds are the triangular numbers — each tier needs one more build than
+  // the last tier's gap (+2, +3, +4, …).
+  {
+    id: 'base_builder',
+    name: 'Base Builder',
+    description: 'Total Structures Built',
+    stat: 'structuresBuilt',
+    thresholds: [1, 3, 6, 10, 15, 21, 28, 36, 45, 55],
+    reward: 3,
+  },
+  // Counts pet level-ups (the Lv-1 unlock itself doesn't count). The Lamp Trap
+  // alone can supply 19 — deeper tiers expect future pets.
+  {
+    id: 'pet_trainer',
+    name: 'Pet Trainer',
+    description: 'Total Pet Levels Gained',
+    stat: 'petLevelsGained',
+    thresholds: [2, 4, 7, 11, 16, 23, 33, 48, 70, 100],
+    reward: 3,
+  },
+  // Pet Lion's crit-on-crit hits — same threshold curve as Pack Rat / Crit Master.
+  {
+    id: 'super_crits',
+    name: 'Super Crits',
+    description: 'Super Crit Hits Landed',
+    stat: 'superCritsLanded',
     thresholds: [10, 50, 150, 500, 1500, 5000, 15000, 50000, 150000, 500000],
     reward: 3,
   },

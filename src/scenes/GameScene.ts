@@ -1,7 +1,7 @@
 import Phaser from 'phaser';
 import RundotGameAPI from '@series-inc/rundot-game-sdk/api';
 import { TICK_INTERVAL_MS, SAVE_INTERVAL_MS } from '../config';
-import { GameState } from '../GameState';
+import { GameState, type GameEvent } from '../GameState';
 import { UIManager } from '../ui/UIManager';
 import { ORE_SEQUENCE } from '../data/GameData';
 
@@ -298,10 +298,12 @@ export default class GameScene extends Phaser.Scene {
 
     // Surface any Void Shards earned this tick (e.g. auto-escape reaching a new floor)
     this.drainShardAwards();
+    // ...and any pet level-ups (the Lion grows on the drone's crits too).
+    this.notePetEvents(result.events);
 
     // Show the drone's auto-search damage each tick (gold if it was a crit).
     if (result.autoDamage) {
-      this.ui.showSearchHit(result.autoDamage, !!result.autoCrit);
+      this.ui.showSearchHit(result.autoDamage, !!result.autoCrit, !!result.autoSuperCrit);
     }
 
     // Update resource display and ability cooldowns
@@ -346,9 +348,10 @@ export default class GameScene extends Phaser.Scene {
     // Nothing to hit mid-respawn — no floating number, no haptic.
     if (!hit.struck) return;
     for (const evt of hit.events) this.ui.addLogMessage(evt);
-    this.ui.showSearchHit(hit.damage, hit.crit);
+    this.notePetEvents(hit.events);   // a crit can level the Pet Lion
+    this.ui.showSearchHit(hit.damage, hit.crit, hit.superCrit);
     this.ui.updateResourceBar();
-    RundotGameAPI.triggerHapticAsync((hit.crit ? 'medium' : 'light') as never);
+    RundotGameAPI.triggerHapticAsync((hit.superCrit ? 'heavy' : hit.crit ? 'medium' : 'light') as never);
   }
 
   private handleActivateHype(): void {
@@ -363,12 +366,29 @@ export default class GameScene extends Phaser.Scene {
     RundotGameAPI.analytics.recordCustomEvent('hype_activated');
   }
 
-  private handleCollectMoth(): void {
-    this.state.collectMoth();
+  private handleCollectMoth(): number {
+    const { gain, events } = this.state.collectMoth();
     this.ui.updateResourceBar();
-    this.ui.addLogMessage({ type: 'system', message: '+1 Moth', color: '#C9B6FF' });
-    RundotGameAPI.triggerHapticAsync('light' as never);
+    this.ui.addLogMessage({ type: 'system', message: `+${gain} Moth${gain > 1 ? 's' : ''}`, color: '#C9B6FF' });
+    for (const evt of events) this.ui.addLogMessage(evt);
+    this.notePetEvents(events);   // a catch can level the Lamp Trap
+    if (!events.some((e) => e.type === 'pet')) RundotGameAPI.triggerHapticAsync('light' as never);
     RundotGameAPI.analytics.recordCustomEvent('moth_collected');
+    return gain;
+  }
+
+  /**
+   * React to pet level-up events ('pet' type): refresh the explore-page pet row
+   * and save immediately — level-ups are rare and permanent. (The events have
+   * already been logged by the caller.)
+   */
+  private notePetEvents(events: GameEvent[]): void {
+    const pet = events.find((e) => e.type === 'pet');
+    if (!pet) return;
+    this.ui.refreshPetRow();
+    RundotGameAPI.analytics.recordCustomEvent('pet_level_up', { message: pet.message });
+    RundotGameAPI.triggerHapticAsync('success' as never);
+    this.saveGame();
   }
 
   private handleBuyUpgrade(id: string): void {
@@ -476,6 +496,7 @@ export default class GameScene extends Phaser.Scene {
       for (const evt of events) {
         this.ui.addLogMessage(evt);
       }
+      this.notePetEvents(events);   // Scavenge breaks nodes → quality finds can level the Magpie
       this.ui.updateResourceBar();
       this.ui.refreshAbilities();
       RundotGameAPI.analytics.recordCustomEvent('ability_used', {
@@ -512,6 +533,7 @@ export default class GameScene extends Phaser.Scene {
         color: '#CC88FF',
       });
       this.ui.refreshShopPanel();
+      this.ui.refreshPetRow();   // a pet unlock (e.g. Lamp Trap) appears on the explore page
       RundotGameAPI.analytics.recordCustomEvent('shop_upgrade_purchased', {
         upgrade: id,
         level: this.state.getShopLevel(id),
