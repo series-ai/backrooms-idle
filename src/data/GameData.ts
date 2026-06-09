@@ -39,7 +39,7 @@ export interface EntityDef {
   defeatMessage: string;
 }
 
-export type UpgradeEffect = 'cooldown' | 'power' | 'autoMine' | 'explorerAuto' | 'bonusOre' | 'quality' | 'qualityYield' | 'mint' | 'flatPower' | 'critChance' | 'autoCapture' | 'hypeDuration';
+export type UpgradeEffect = 'cooldown' | 'power' | 'autoMine' | 'explorerAuto' | 'bonusOre' | 'quality' | 'qualityYield' | 'mint' | 'flatPower' | 'critChance' | 'autoCapture' | 'hypeDuration' | 'tapExplorer' | 'critDamage' | 'easyAccess';
 
 /* ------------------------------------------------------------------ */
 /*  Floor ores — each level is ONE ore you mine toward a target.       */
@@ -496,6 +496,46 @@ export const UPGRADES: UpgradeDef[] = [
     effectPerLevel: 1, effectUnit: ' quality resource', costResource: 'fluorescent_tube', effect: 'qualityYield',
     unlockFloor: 4,
   },
+  // Raises the CHANCE a find is quality (effect 'quality' feeds qualityChance).
+  // +0.25% per level. Cost = round(5 × 1.2^level) in Cloth Scraps — same curve as
+  // Auto Explore: 5,6,7,9,10,12,15,18,21,26,… Locked until floor 5 (its resource).
+  {
+    id: 'quality_sense', name: 'Quality Sense', icon: '\u{1F50D}',
+    description: '+0.25% quality resource chance per level',
+    baseCost: 5, costMultiplier: 1.2, maxLevel: 20,
+    effectPerLevel: 0.25, effectUnit: '% quality chance', costResource: 'cloth_scraps', effect: 'quality',
+    unlockFloor: 5,
+  },
+  // +3 to BOTH tap power and per-Explorer auto (effect 'tapExplorer', folded into
+  // clickPower and explorerSharedAuto). Cost = round(8 × 1.3^level) in Scrap Wood:
+  // 8,10,14,18,23,30,39,50,65,85,110,143,186,… Locked until floor 6 (its resource).
+  {
+    id: 'splinters', name: 'Splinters', icon: '\u{1FAB5}',
+    description: '+3 Explorer and tap power per level',
+    baseCost: 8, costMultiplier: 1.3, maxLevel: 15,
+    effectPerLevel: 3, effectUnit: ' power', costResource: 'scrap_wood', effect: 'tapExplorer',
+    unlockFloor: 6,
+  },
+  // Raises the crit DAMAGE multiplier (base ×3 from Lucky Find): +0.2× per level
+  // (effect 'critDamage', folded into critMult). Cost = round(12 × 1.35^level) in
+  // Scrap Metal: 12,16,22,30,40,… Locked until floor 7 (its resource).
+  {
+    id: 'metal_head', name: 'Metal Head', icon: '\u{1F4A5}',
+    description: '+0.2x Crit Damage per level',
+    baseCost: 12, costMultiplier: 1.35, maxLevel: 15,
+    effectPerLevel: 0.2, effectUnit: 'x crit damage', costResource: 'scrap_metal', effect: 'critDamage',
+    unlockFloor: 7,
+  },
+  // Easy Access (brittle): +0.5%/level chance, rolled per node at spawn, that the
+  // node has HALF durability (easier to mine). Independent of quality/mint. Cost =
+  // round(15 × 1.4^level) in Copper Wire: 15,21,29,41,58,81,… Locked until floor 8.
+  {
+    id: 'stocked_shelves', name: 'Stocked Shelves', icon: '\u{1F4E6}',
+    description: '+0.5% Easy Access chance for all resources per level',
+    baseCost: 15, costMultiplier: 1.4, maxLevel: 15,
+    effectPerLevel: 0.5, effectUnit: '% easy access', costResource: 'copper_wire', effect: 'easyAccess',
+    unlockFloor: 8,
+  },
 ];
 
 /* ------------------------------------------------------------------ */
@@ -775,91 +815,69 @@ export const RECIPES: RecipeDef[] = [
 ];
 
 /* ------------------------------------------------------------------ */
-/*  Shop & Monetization (Phase 5)                                      */
+/*  Void Shard Shop                                                     */
 /* ------------------------------------------------------------------ */
+//
+// Permanent upgrades bought with Void Shards. Shards are earned ONLY by maxing a
+// run upgrade (one-time per upgrade) or advancing to a new deepest level. The shop
+// renders with the same card layout as the run-upgrade screen.
+//   - Cost is FLAT-stepped: baseCost + costStep × level.
+//     Search Upgrade: 10,15,20,…  Hype Train: 15,20,25,…
 
-export type ShopCategory = 'starter' | 'convenience' | 'cosmetic';
-
-export interface ShopItemDef {
+export interface ShopUpgradeDef {
   id: string;
   name: string;
-  icon: string;
+  icon: string;       // emoji fallback shown next to the name
   description: string;
-  category: ShopCategory;
-  cost: number; // Void Shards
-  oneTime: boolean; // true = can only buy once
+  baseCost: number;   // Void Shards for level 0 → 1
+  costStep: number;   // added per level
+  maxLevel: number;
+  effectPerLevel: number;
+  effectUnit: string;
 }
 
-export const SHOP_ITEMS: ShopItemDef[] = [
-  // Starter Packs (one-time)
-  { id: 'survivors_kit', name: "Survivor's Kit", icon: '\u{2764}\u{FE0F}',
-    description: '+20 base Max HP permanently, +10 almond water per run',
-    category: 'starter', cost: 5, oneTime: true },
-  { id: 'explorers_kit', name: "Explorer's Kit", icon: '\u{26A1}',
-    description: '+15% base explore speed permanently',
-    category: 'starter', cost: 5, oneTime: true },
-  { id: 'scavengers_kit', name: "Scavenger's Kit", icon: '\u{1F50D}',
-    description: '+15% base find rate permanently',
-    category: 'starter', cost: 5, oneTime: true },
-
-  // Convenience (repeatable)
-  { id: 'resource_bundle', name: 'Resource Bundle', icon: '\u{1F4E6}',
-    description: 'Instantly gain 10 of each resource',
-    category: 'convenience', cost: 2, oneTime: false },
-  { id: 'instant_prestige', name: 'Instant Prestige', icon: '\u{23EA}',
-    description: 'Prestige now with current fragment earnings',
-    category: 'convenience', cost: 8, oneTime: false },
-  { id: 'offline_boost', name: 'Offline Boost', icon: '\u{1F319}',
-    description: 'Next offline session processes 2x ticks',
-    category: 'convenience', cost: 3, oneTime: false },
-  { id: 'auto_scavenge', name: 'Auto-Scavenge', icon: '\u{1F916}',
-    description: 'Auto-uses Scavenge when off cooldown (1 run)',
-    category: 'convenience', cost: 10, oneTime: false },
-
-  // Cosmetics (permanent)
-  { id: 'crimson_wallpaper', name: 'Crimson Wallpaper', icon: '\u{1F534}',
-    description: 'Red-tinted backrooms background',
-    category: 'cosmetic', cost: 5, oneTime: true },
-  { id: 'poolrooms_wallpaper', name: 'Poolrooms Wallpaper', icon: '\u{1F535}',
-    description: 'Blue pool tile background',
-    category: 'cosmetic', cost: 5, oneTime: true },
-  { id: 'static_wallpaper', name: 'Static Wallpaper', icon: '\u{1F4FA}',
-    description: 'TV static overlay effect',
-    category: 'cosmetic', cost: 5, oneTime: true },
-  { id: 'gold_text', name: 'Gold Text Theme', icon: '\u{1F31F}',
-    description: 'All UI text becomes gold-tinted',
-    category: 'cosmetic', cost: 3, oneTime: true },
+export const SHOP_UPGRADES: ShopUpgradeDef[] = [
+  {
+    id: 'search_upgrade', name: 'Search Upgrade', icon: '',
+    description: '+3 Explorer power, Tap power, auto search power',
+    baseCost: 10, costStep: 5, maxLevel: 10,
+    effectPerLevel: 3, effectUnit: ' power',
+  },
+  {
+    id: 'hype_train', name: 'Hype Train', icon: '',
+    description: 'Explorer roll +3% chance to self-hype every 5s while ready, per level',
+    baseCost: 15, costStep: 5, maxLevel: 10,
+    effectPerLevel: 3, effectUnit: '% self-hype',
+  },
 ];
 
-/** Milestone shard rewards — one-time achievements that give Void Shards */
-export interface ShardMilestoneDef {
+/* ------------------------------------------------------------------ */
+/*  Achievements                                                        */
+/* ------------------------------------------------------------------ */
+//
+// Tiered goals that pay out Void Shards on CLAIM (manual button, like a shop buy
+// in reverse). Each tier has a threshold on a tracked lifetime stat; once met you
+// can claim `reward` shards and advance to the next tier. Renders with the same
+// card layout as the upgrade/shop panels.
+
+export type AchievementStat = 'resourcesCollected';
+
+export interface AchievementDef {
   id: string;
+  name: string;
   description: string;
-  check: (state: { prestigeCount: number; totalDepth: number; stats: { deaths: number; levelsEscaped: number }; memoryFragments: number }) => boolean;
-  reward: number;
+  stat: AchievementStat;   // which lifetime value drives progress
+  thresholds: number[];    // per-tier requirement (length = max level)
+  reward: number;          // Void Shard reward STEP — tier N (1-based) pays reward × N
 }
 
-export const SHARD_MILESTONES: ShardMilestoneDef[] = [
-  { id: 'first_prestige', description: 'First Rewind', reward: 2,
-    check: s => s.prestigeCount >= 1 },
-  { id: 'prestige_5', description: '5 Rewinds', reward: 3,
-    check: s => s.prestigeCount >= 5 },
-  { id: 'prestige_10', description: '10 Rewinds', reward: 5,
-    check: s => s.prestigeCount >= 10 },
-  { id: 'prestige_25', description: '25 Rewinds', reward: 8,
-    check: s => s.prestigeCount >= 25 },
-  { id: 'depth_10', description: 'Reach Depth 10', reward: 2,
-    check: s => s.totalDepth >= 10 },
-  { id: 'depth_25', description: 'Reach Depth 25', reward: 3,
-    check: s => s.totalDepth >= 25 },
-  { id: 'depth_50', description: 'Reach Depth 50', reward: 5,
-    check: s => s.totalDepth >= 50 },
-  { id: 'depth_100', description: 'Reach Depth 100', reward: 10,
-    check: s => s.totalDepth >= 100 },
-  { id: 'memories_5', description: 'Collect 5 Memory Fragments', reward: 2,
-    check: s => s.memoryFragments >= 5 },
-  { id: 'memories_15', description: 'Collect all 15 Memory Fragments', reward: 5,
-    check: s => s.memoryFragments >= 15 },
-  { id: 'survivor_50', description: 'Die 50 times', reward: 3,
-    check: s => s.stats.deaths >= 50 },
+export const ACHIEVEMENTS: AchievementDef[] = [
+  {
+    id: 'pack_rat',
+    name: 'Pack Rat',
+    description: 'Total Resources Collected',
+    stat: 'resourcesCollected',
+    thresholds: [10, 50, 150, 500, 1500, 5000, 15000, 50000, 150000, 500000],
+    reward: 3,
+  },
 ];

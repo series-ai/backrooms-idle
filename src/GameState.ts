@@ -10,8 +10,9 @@ import {
   GEAR_TIER_COLORS,
   EQUIP_SLOTS,
   RECIPES,
-  SHOP_ITEMS,
-  SHARD_MILESTONES,
+  SHOP_UPGRADES,
+  ACHIEVEMENTS,
+  type AchievementStat,
   getLevel,
   getFloorOre,
   tierSuffix,
@@ -21,7 +22,7 @@ import {
   type GearTier,
 } from './data/GameData';
 import { MAX_OFFLINE_TICKS, TICK_INTERVAL_MS } from './config';
-import { type Big, D } from './num';
+import { type Big, D, roundD } from './num';
 
 /* ------------------------------------------------------------------ */
 /*  Types                                                              */
@@ -61,17 +62,14 @@ export interface SaveData {
   defeatedBosses: Record<number, boolean>;
   torchTicks: number;
   firesaltBombActive: boolean;
-  // Shop (Phase 5)
+  // Void Shard shop
   voidShards: number;
-  purchasedItems: Record<string, boolean>;
-  activeCosmetic: string | null;
-  offlineBoostActive: boolean;
-  autoScavengeActive: boolean;
-  claimedShardMilestones: string[];
-  // Starter pack permanent bonuses
-  survivorsKitOwned: boolean;
-  explorersKitOwned: boolean;
-  scavengersKitOwned: boolean;
+  shopUpgrades: Record<string, number>;
+  shardMaxedUpgrades: string[];   // run-upgrade ids that have already paid out a shard for maxing
+  highestLevelReached: number;    // deepest level index that has paid out a shard for advancing
+  // Achievements (lifetime — never reset on rewind)
+  lifetimeResourcesCollected: number;
+  achievementClaims: Record<string, number>;   // achievement id → tiers claimed
   // Preferences
   autoEscape: boolean;
   hideMaxedUpgrades?: boolean;
@@ -83,6 +81,7 @@ export interface GameStats {
   resourcesFound: number;
   qualityFinds: number;
   mintFinds: number;
+  easyAccessFinds: number;
   deaths: number;
   levelsEscaped: number;
 }
@@ -133,6 +132,7 @@ export class GameState {
   nodeDamage: Big = D(0);          // Integrity (HP) dealt to the current node — transient, not saved
   nodeIsQuality = false;           // current node pre-rolled as a quality find (+1) — shown before it breaks
   nodeIsMint = false;              // current node pre-rolled as MINT (+9, ×1.5 HP) — shown before it breaks
+  nodeIsEasyAccess = false;        // current node pre-rolled as EASY ACCESS (×0.5 HP) — independent of grade
   respawnMsLeft = 0;               // >0 while the broken node is regrowing — transient, not saved
   resources: Record<string, Big> = {};
   upgrades: Record<string, number> = {};
@@ -142,6 +142,7 @@ export class GameState {
     resourcesFound: 0,
     qualityFinds: 0,
     mintFinds: 0,
+    easyAccessFinds: 0,
     deaths: 0,
     levelsEscaped: 0,
   };
@@ -171,16 +172,17 @@ export class GameState {
   torchTicks = 0;
   firesaltBombActive = false;
 
-  // Shop (Phase 5) — permanent across all rewinds
+  // Void Shard shop — permanent across all rewinds
   voidShards = 0;
-  purchasedItems: Record<string, boolean> = {};
-  activeCosmetic: string | null = null;
-  offlineBoostActive = false;
-  autoScavengeActive = false;
-  claimedShardMilestones: string[] = [];
-  survivorsKitOwned = false;
-  explorersKitOwned = false;
-  scavengersKitOwned = false;
+  shopUpgrades: Record<string, number> = {};
+  shardMaxedUpgrades: string[] = [];   // run-upgrades that have already granted their max-out shard
+  highestLevelReached = 0;             // deepest level that has granted its advance shard
+  /** Shard-award toasts queued by escape()/buyUpgrade(), drained by the scene. */
+  pendingShardEvents: GameEvent[] = [];
+
+  // Achievements — lifetime progress + claimed tiers (persist across rewinds)
+  lifetimeResourcesCollected = 0;
+  achievementClaims: Record<string, number> = {};
 
   // Preferences
   autoEscape = true;
@@ -196,6 +198,9 @@ export class GameState {
     }
     for (const v of VOID_UPGRADES) {
       this.voidUpgrades[v.id] = 0;
+    }
+    for (const s of SHOP_UPGRADES) {
+      this.shopUpgrades[s.id] = 0;
     }
     for (const a of ABILITIES) {
       this.abilityCooldowns[a.id] = 0;
@@ -234,22 +239,31 @@ export class GameState {
 
   /** A MINT node is tougher — more HP — but pays out far more on break. */
   private static readonly MINT_HP_MULT = 1.5;
-  /** HP multiplier for the CURRENT node from its grade (mint = ×1.5, else ×1). */
-  get nodeHpMultiplier(): number { return this.nodeIsMint ? GameState.MINT_HP_MULT : 1; }
+  /** An EASY ACCESS (brittle) node has half durability — easier to mine. */
+  private static readonly EASY_ACCESS_HP_MULT = 0.5;
+  /**
+   * HP multiplier for the CURRENT node: mint (×1.5) and easy-access (×0.5) stack
+   * independently (a node can be both). The floor in nodeIntegrityMax keeps the
+   * result a clean integer — no decimals shown.
+   */
+  get nodeHpMultiplier(): number {
+    return (this.nodeIsMint ? GameState.MINT_HP_MULT : 1)
+      * (this.nodeIsEasyAccess ? GameState.EASY_ACCESS_HP_MULT : 1);
+  }
 
-  /** Total Integrity (HP) of one node on this floor (mint nodes are ×1.5). */
+  /** Total Integrity (HP) of one node on this floor — floored to a whole number, min 1. */
   get nodeIntegrityMax(): Big {
     return D(this.nodeDurabilityMax).mul(this.nodeScale).mul(this.nodeHpMultiplier).floor().max(D(1));
   }
 
-  /** Damage one manual tap deals to a node's Integrity (before a crit roll). */
+  /** Damage one manual tap deals to a node's Integrity (before a crit roll). Always an int. */
   get searchPower(): Big {
-    return this.clickPower.mul(this.nodeScale);
+    return roundD(this.clickPower.mul(this.nodeScale));
   }
 
-  /** Idle Integrity damage per tick. */
+  /** Idle Integrity damage per tick (before crit/hype). Always an int. */
   get autoSearchPower(): Big {
-    return this.autoMineRate.mul(this.nodeScale);
+    return roundD(this.autoMineRate.mul(this.nodeScale));
   }
 
   /**
@@ -260,8 +274,8 @@ export class GameState {
     return Math.min(0.6, this.sumEffect('critChance') / 100);
   }
 
-  /** Damage multiplier on a lucky find. */
-  get critMult(): number { return 3; }
+  /** Damage multiplier on a lucky find: base ×3, +0.2× per Metal Head level. */
+  get critMult(): number { return 3 + this.sumEffect('critDamage'); }
 
   /** Average damage multiplier from crits (used to fold crits into offline auto). */
   get critMultiplierAvg(): number { return 1 + this.critChance * (this.critMult - 1); }
@@ -304,6 +318,9 @@ export class GameState {
     // Grades are mutually exclusive; roll the rarer/better MINT first, then quality.
     this.nodeIsMint = Math.random() < this.mintChance;
     this.nodeIsQuality = !this.nodeIsMint && Math.random() < this.qualityChance;
+    // Easy Access (brittle, half HP) is INDEPENDENT — rolled separately so it can
+    // coexist with any grade.
+    this.nodeIsEasyAccess = Math.random() < this.easyAccessChance;
   }
 
   /* ---- Hype (timed auto-search boost) ---- *
@@ -311,9 +328,11 @@ export class GameState {
    * multiplier on auto-search. All three numbers are upgradable later. */
   private static readonly HYPE_COOLDOWN_MS = 120_000;   // 2 min
   private static readonly HYPE_DURATION_MS = 15_000;    // 15 s
+  private static readonly SELF_HYPE_ROLL_MS = 5_000;    // Hype Train rolls every 5s while ready
   hypeCooldownMsLeft = GameState.HYPE_COOLDOWN_MS;      // counts down; at 0 hype is available
   hypeAvailable = false;                                // prompt showing, awaiting activation
   hypeActiveMsLeft = 0;                                 // >0 while the buff is running
+  selfHypeRollMsLeft = GameState.SELF_HYPE_ROLL_MS;     // Hype Train: time until the next self-hype roll
 
   get hypeActive(): boolean { return this.hypeActiveMsLeft > 0; }
   get hypeMultiplier(): number { return 3; }                          // upgradable later
@@ -325,9 +344,10 @@ export class GameState {
    * Advance hype timers (per frame). Returns the transitions the UI reacts to:
    * becameAvailable → show the HYPE! prompt; ended → drop the buff visuals.
    */
-  advanceHype(deltaMs: number): { becameAvailable: boolean; ended: boolean } {
+  advanceHype(deltaMs: number): { becameAvailable: boolean; ended: boolean; selfActivated: boolean } {
     let becameAvailable = false;
     let ended = false;
+    let selfActivated = false;
     if (this.hypeActiveMsLeft > 0) {
       this.hypeActiveMsLeft -= deltaMs;
       if (this.hypeActiveMsLeft <= 0) {
@@ -341,9 +361,25 @@ export class GameState {
         this.hypeCooldownMsLeft = 0;
         this.hypeAvailable = true;
         becameAvailable = true;
+        this.selfHypeRollMsLeft = GameState.SELF_HYPE_ROLL_MS;   // fresh roll window
       }
     }
-    return { becameAvailable, ended };
+
+    // Hype Train (shop): while hype is READY (available, not yet active), the
+    // Explorer rolls every 5s for a chance to auto-activate it. +3%/level.
+    if (this.hypeAvailable && !this.hypeActive) {
+      const lvl = this.getShopLevel('hype_train');
+      if (lvl > 0) {
+        this.selfHypeRollMsLeft -= deltaMs;
+        if (this.selfHypeRollMsLeft <= 0) {
+          this.selfHypeRollMsLeft += GameState.SELF_HYPE_ROLL_MS;
+          const def = SHOP_UPGRADES.find((s) => s.id === 'hype_train');
+          const chance = (def?.effectPerLevel ?? 0) / 100 * lvl;
+          if (Math.random() < chance && this.activateHype()) selfActivated = true;
+        }
+      }
+    }
+    return { becameAvailable, ended, selfActivated };
   }
 
   /** Activate the hype buff if it's available. */
@@ -406,7 +442,29 @@ export class GameState {
     const res = this.getUpgradeCostResource(id);
     this.resources[res] = (this.resources[res] ?? D(0)).sub(this.getUpgradeCost(id));
     this.upgrades[id] = this.getUpgradeLevel(id) + 1;
+    // Maxing an upgrade pays a one-time Void Shard (permanent — only the first time
+    // this upgrade is ever maxed, so re-maxing after a rewind doesn't repeat it).
+    if (this.upgrades[id] >= def.maxLevel && !this.shardMaxedUpgrades.includes(id)) {
+      this.shardMaxedUpgrades.push(id);
+      this.awardShard(`Maxed ${def.name}!`);
+    }
     return true;
+  }
+
+  /** Grant one Void Shard and queue a toast for the scene to surface. */
+  private awardShard(reason: string): void {
+    this.voidShards += 1;
+    this.pendingShardEvents.push({
+      type: 'event', message: `${reason} +1 Void Shard`, color: '#CC88FF', iconKey: 'void_shard',
+    });
+  }
+
+  /** Drain queued shard-award toasts (called by the scene after buys/escapes/ticks). */
+  collectShardAwards(): GameEvent[] {
+    if (this.pendingShardEvents.length === 0) return [];
+    const out = this.pendingShardEvents;
+    this.pendingShardEvents = [];
+    return out;
   }
 
   /* ---- Effective stats from upgrades + void bonuses + gear ---- */
@@ -441,8 +499,23 @@ export class GameState {
   /** Tap-only power (Sharp Eye +1/lvl). */
   get tapPower(): number { return this.sumEffect('power'); }
 
+  /** Current level of a Void Shard shop upgrade. */
+  getShopLevel(id: string): number { return this.shopUpgrades[id] ?? 0; }
+
+  /**
+   * Search Upgrade (shop): +effectPerLevel per level, added to tap power, drone
+   * auto, AND per-Explorer auto — so it boosts Tap, auto search, and Explorer power.
+   */
+  get searchUpgradeBonus(): number {
+    const def = SHOP_UPGRADES.find((s) => s.id === 'search_upgrade');
+    return this.getShopLevel('search_upgrade') * (def?.effectPerLevel ?? 0);
+  }
+
+  /** Tap + per-Explorer power (Splinters +3/lvl, effect 'tapExplorer'). */
+  get tapExplorerPower(): number { return this.sumEffect('tapExplorer'); }
+
   /** Search power per tap (before the floor magnitude scale). Base 1 + flat + tap-only. */
-  get clickPower(): Big { return D(1 + this.flatPower + this.tapPower); }
+  get clickPower(): Big { return D(1 + this.flatPower + this.tapPower + this.searchUpgradeBonus + this.tapExplorerPower); }
 
   /**
    * Explorers the player commands. Each runs auto-searches. Only 1 today; later
@@ -450,11 +523,11 @@ export class GameState {
    */
   get explorerCount(): number { return 1; }
 
-  /** Drone auto-search (Auto Explore). Feeds the total only — NOT any Explorer. */
-  get droneAuto(): number { return this.sumEffect('autoMine'); }
+  /** Drone auto-search (Auto Explore) + Search Upgrade. Feeds the total only — NOT any Explorer. */
+  get droneAuto(): number { return this.sumEffect('autoMine') + this.searchUpgradeBonus; }
 
-  /** Per-Explorer auto power that EVERY Explorer gets (Heavy Sweep +2/lvl each). */
-  get explorerSharedAuto(): number { return this.sumEffect('explorerAuto'); }
+  /** Per-Explorer auto power that EVERY Explorer gets (Heavy Sweep +2/lvl each, + Search Upgrade + Splinters). */
+  get explorerSharedAuto(): number { return this.sumEffect('explorerAuto') + this.searchUpgradeBonus + this.tapExplorerPower; }
 
   /**
    * Auto power belonging to a single Explorer: the shared per-Explorer power plus
@@ -466,14 +539,31 @@ export class GameState {
   }
 
   /**
-   * Auto-searches per SECOND (the grand total): drone + every Explorer's auto power.
-   * Heavy Sweep therefore multiplies by Explorer count; Master Scav (Explorer-1 only)
-   * is counted once.
+   * Total claimed achievement tiers across ALL achievements (drives the menu's
+   * global auto-search bonus). Pack Rat L2 + another L3 = 5.
+   */
+  get totalAchievementLevels(): number {
+    let s = 0;
+    for (const v of Object.values(this.achievementClaims)) s += v;
+    return s;
+  }
+
+  /** Global auto-search MULTIPLIER from achievements: +0.5% per total claimed tier. */
+  get achievementAutoBonus(): number {
+    return 1 + this.totalAchievementLevels * 0.005;
+  }
+
+  /**
+   * Auto-searches per SECOND (the grand total): (drone + every Explorer's auto power)
+   * scaled by the achievements auto-search bonus. Heavy Sweep multiplies by Explorer
+   * count; Master Scav (Explorer-1 only) is counted once.
    */
   get autoPerSecond(): number {
     let total = this.droneAuto;
     for (let i = 0; i < this.explorerCount; i++) total += this.explorerAuto(i);
-    return total;
+    // The achievement bonus (and other multipliers) make this fractional — auto
+    // search is always a whole number, so round to the nearest int.
+    return Math.round(total * this.achievementAutoBonus);
   }
   /**
    * Idle searches per TICK (before the floor magnitude scale). Converted from the
@@ -542,6 +632,15 @@ export class GameState {
     }
     return Math.min(0.9, c);
   }
+
+  /**
+   * Chance a node spawns with EASY ACCESS (brittle) — half durability, easier to
+   * mine. Starts at 0%; raised by Stocked Shelves (effect 'easyAccess'). Capped 90%.
+   * Independent of quality/mint (a node can be easy-access AND mint).
+   */
+  get easyAccessChance(): number {
+    return Math.min(0.9, this.sumEffect('easyAccess') / 100);
+  }
   get healthRegen(): number {
     return this.getUpgradeLevel('regeneration') * 0.5;
   }
@@ -549,10 +648,9 @@ export class GameState {
     return this.getUpgradeLevel('meditation') * 0.5;
   }
 
-  /** Base max HP including void bonuses + starter pack (before per-run upgrades) */
+  /** Base max HP including void bonuses (before per-run upgrades) */
   get baseMaxHealth(): number {
-    return 100 + this.getVoidLevel('hardened_soul') * 10
-      + (this.survivorsKitOwned ? 20 : 0);
+    return 100 + this.getVoidLevel('hardened_soul') * 10;
   }
   /** Base max Sanity including void bonuses */
   get baseMaxSanity(): number {
@@ -585,7 +683,8 @@ export class GameState {
     // No node to hit while one is respawning.
     if (this.isRespawning) return { events, damage: D(0), crit: false, struck: false };
     const crit = Math.random() < this.critChance;
-    const damage = this.searchPower.mul(crit ? this.critMult : 1);
+    // critMult can be fractional (Metal Head +0.2x); round so damage is always an int.
+    const damage = roundD(this.searchPower.mul(crit ? this.critMult : 1));
     this.nodeDamage = this.nodeDamage.add(damage);
     this.resolveNode(events);
     return { events, damage, crit, struck: true };
@@ -595,6 +694,7 @@ export class GameState {
   collectMoth(): void {
     this.resources['moth'] = (this.resources['moth'] ?? D(0)).add(1);
     this.stats.resourcesFound += 1;
+    this.lifetimeResourcesCollected += 1;
   }
 
   /**
@@ -616,8 +716,10 @@ export class GameState {
     let gain = 1;
     if (mint) { gain += 9; this.stats.mintFinds += 1; }
     else if (quality) { gain += this.qualityBonus; this.stats.qualityFinds += 1; }
+    if (this.nodeIsEasyAccess) this.stats.easyAccessFinds += 1;   // brittle node mined (independent of grade)
     this.resources[ore.resource] = (this.resources[ore.resource] ?? D(0)).add(gain);   // inventory (uncapped)
     this.stats.resourcesFound += gain;
+    this.lifetimeResourcesCollected += gain;
     this.exploration = Math.min(ore.required, this.exploration + gain);                 // descend progress (capped)
     events.push({ type: 'resource', message: `+ ${RESOURCES[ore.resource].name}${tierSuffix(ore.tier)}`, color: '#7CFF7C', iconKey: ore.resource, value: gain, quality, mint });
 
@@ -651,6 +753,11 @@ export class GameState {
     this.spawnFreshNode();
     this.stats.levelsEscaped++;
     this.totalDepth++;
+    // Advancing to genuinely new territory pays a Void Shard (once per depth).
+    if (this.currentLevel > this.highestLevelReached) {
+      this.highestLevelReached = this.currentLevel;
+      this.awardShard(`Reached ${this.level.name}!`);
+    }
     return true;
   }
 
@@ -725,7 +832,8 @@ export class GameState {
     if (!this.isRespawning) {
       autoCrit = Math.random() < this.critChance;
       const hypeMult = this.hypeActive ? this.hypeMultiplier : 1;
-      const dmg = this.autoSearchPower.mul(autoCrit ? this.critMult : 1).mul(hypeMult);
+      // crit (Metal Head can make it fractional) + hype multipliers → round to an int.
+      const dmg = roundD(this.autoSearchPower.mul(autoCrit ? this.critMult : 1).mul(hypeMult));
       if (dmg.gt(0)) autoDamage = dmg;   // only surface a number when the drone is active
       this.nodeDamage = this.nodeDamage.add(dmg);
       this.resolveNode(events);
@@ -853,110 +961,86 @@ export class GameState {
     return events;
   }
 
-  /* ---- Shop purchases ---- */
+  /* ---- Void Shard shop ---- */
 
-  canBuyShopItem(itemId: string): boolean {
-    const item = SHOP_ITEMS.find(i => i.id === itemId);
-    if (!item) return false;
-    if (this.voidShards < item.cost) return false;
-    if (item.oneTime && this.purchasedItems[itemId]) return false;
+  /** Cost of the NEXT level of a shop upgrade: baseCost + costStep × level. */
+  getShopUpgradeCost(id: string): number {
+    const def = SHOP_UPGRADES.find((s) => s.id === id);
+    if (!def) return Infinity;
+    return def.baseCost + def.costStep * this.getShopLevel(id);
+  }
+
+  canAffordShopUpgrade(id: string): boolean {
+    const def = SHOP_UPGRADES.find((s) => s.id === id);
+    if (!def) return false;
+    if (this.getShopLevel(id) >= def.maxLevel) return false;
+    return this.voidShards >= this.getShopUpgradeCost(id);
+  }
+
+  /** True if any (non-maxed) shop upgrade is currently affordable — drives the tab alert dot. */
+  hasAffordableShopUpgrade(): boolean {
+    return SHOP_UPGRADES.some((s) => this.canAffordShopUpgrade(s.id));
+  }
+
+  buyShopUpgrade(id: string): boolean {
+    const def = SHOP_UPGRADES.find((s) => s.id === id);
+    if (!def || !this.canAffordShopUpgrade(id)) return false;
+    this.voidShards -= this.getShopUpgradeCost(id);
+    this.shopUpgrades[id] = this.getShopLevel(id) + 1;
     return true;
   }
 
-  buyShopItem(itemId: string): GameEvent[] {
-    const item = SHOP_ITEMS.find(i => i.id === itemId);
-    if (!item || !this.canBuyShopItem(itemId)) return [];
+  /* ---- Achievements ---- */
 
-    const events: GameEvent[] = [];
-    this.voidShards -= item.cost;
-
-    if (item.oneTime) {
-      this.purchasedItems[itemId] = true;
-    }
-
-    switch (itemId) {
-      // Starter packs
-      case 'survivors_kit':
-        this.survivorsKitOwned = true;
-        this.maxHealth = this.baseMaxHealth + this.getUpgradeLevel('tough_body') * 10;
-        this.health = Math.min(this.health + 20, this.maxHealth);
-        events.push({ type: 'event', message: `${item.name} activated! +20 base Max HP, +10 almond water per run.`, color: '#FFD700' });
-        break;
-      case 'explorers_kit':
-        this.explorersKitOwned = true;
-        events.push({ type: 'event', message: `${item.name} activated! +15% base explore speed.`, color: '#FFD700' });
-        break;
-      case 'scavengers_kit':
-        this.scavengersKitOwned = true;
-        events.push({ type: 'event', message: `${item.name} activated! +15% base find rate.`, color: '#FFD700' });
-        break;
-
-      // Convenience
-      case 'resource_bundle': {
-        const resKeys = Object.keys(RESOURCES).filter(k => k !== 'level_keys');
-        for (const k of resKeys) {
-          this.resources[k] = (this.resources[k] ?? D(0)).add(10);
-        }
-        events.push({ type: 'event', message: '+10 of each resource!', color: '#88FF88' });
-        break;
-      }
-      case 'instant_prestige':
-        // Handled externally — GameScene calls rewind() after this
-        events.push({ type: 'event', message: 'Instant Prestige activated!', color: '#CC88FF' });
-        break;
-      case 'offline_boost':
-        this.offlineBoostActive = true;
-        events.push({ type: 'event', message: 'Next offline session will process 2x ticks!', color: '#88CCFF' });
-        break;
-      case 'auto_scavenge':
-        this.autoScavengeActive = true;
-        events.push({ type: 'event', message: 'Auto-Scavenge active for this run!', color: '#88FFAA' });
-        break;
-
-      // Cosmetics
-      case 'crimson_wallpaper':
-      case 'poolrooms_wallpaper':
-      case 'static_wallpaper':
-        this.activeCosmetic = itemId;
-        events.push({ type: 'event', message: `${item.name} equipped!`, color: '#FFD700' });
-        break;
-      case 'gold_text':
-        this.purchasedItems['gold_text'] = true;
-        events.push({ type: 'event', message: 'Gold Text Theme unlocked!', color: '#FFD700' });
-        break;
-    }
-
-    return events;
+  /** Tiers already claimed for an achievement (0..thresholds.length). */
+  getAchievementLevel(id: string): number {
+    return this.achievementClaims[id] ?? 0;
   }
 
-  /** Check and claim any newly earned shard milestones */
-  checkShardMilestones(): GameEvent[] {
-    const events: GameEvent[] = [];
-    for (const milestone of SHARD_MILESTONES) {
-      if (this.claimedShardMilestones.includes(milestone.id)) continue;
-      if (milestone.check(this)) {
-        this.claimedShardMilestones.push(milestone.id);
-        this.voidShards += milestone.reward;
-        events.push({
-          type: 'event',
-          message: `ACHIEVEMENT: ${milestone.description}! +${milestone.reward} Void Shards`,
-          color: '#CC88FF',
-        });
-      }
+  /** Current lifetime value an achievement tracks. */
+  getAchievementProgress(stat: AchievementStat): number {
+    switch (stat) {
+      case 'resourcesCollected': return this.lifetimeResourcesCollected;
+      default: return 0;
     }
-    return events;
+  }
+
+  /** Void Shards paid for claiming a tier (0-based level): reward step × (level + 1). */
+  getAchievementReward(id: string, level = this.getAchievementLevel(id)): number {
+    const def = ACHIEVEMENTS.find((a) => a.id === id);
+    if (!def) return 0;
+    return def.reward * (level + 1);
+  }
+
+  /** True when the NEXT tier's threshold has been met and there's a tier left to claim. */
+  canClaimAchievement(id: string): boolean {
+    const def = ACHIEVEMENTS.find((a) => a.id === id);
+    if (!def) return false;
+    const lvl = this.getAchievementLevel(id);
+    if (lvl >= def.thresholds.length) return false;
+    return this.getAchievementProgress(def.stat) >= def.thresholds[lvl];
+  }
+
+  /** Claim the next tier: award the (scaled) reward in Void Shards and advance the tier. */
+  claimAchievement(id: string): boolean {
+    const def = ACHIEVEMENTS.find((a) => a.id === id);
+    if (!def || !this.canClaimAchievement(id)) return false;
+    const lvl = this.getAchievementLevel(id);
+    this.achievementClaims[id] = lvl + 1;
+    this.voidShards += this.getAchievementReward(id, lvl);
+    return true;
+  }
+
+  /** True if any achievement tier is claimable right now — drives the tab alert dot. */
+  hasClaimableAchievement(): boolean {
+    return ACHIEVEMENTS.some((a) => this.canClaimAchievement(a.id));
   }
 
   /* ---- Offline progress ---- */
 
   processOfflineTime(elapsedMs: number): { events: GameEvent[]; summary: OfflineSummary } {
     const events: GameEvent[] = [];
-    const boostMult = this.offlineBoostActive ? 2 : 1;
-    const ticks = Math.min(Math.floor(elapsedMs / 1500) * boostMult, this.offlineTickCap * boostMult);
-    if (this.offlineBoostActive) {
-      this.offlineBoostActive = false; // consumed
-      events.push({ type: 'event', message: 'Offline Boost active! 2x offline progress.', color: '#88CCFF' });
-    }
+    const ticks = Math.min(Math.floor(elapsedMs / 1500), this.offlineTickCap);
     const summary: OfflineSummary = { minutes: Math.floor(elapsedMs / 60000), resourcesFound: 0, explorationGained: 0 };
     if (ticks <= 0) return { events, summary };
 
@@ -979,6 +1063,7 @@ export class GameState {
       const count = Math.round(cycles * (1 + this.qualityChance * this.qualityBonus + 9 * this.mintChance));
       this.resources[ore.resource] = (this.resources[ore.resource] ?? D(0)).add(count);
       this.stats.resourcesFound += count;
+      this.lifetimeResourcesCollected += count;
       this.exploration = Math.min(ore.required, this.exploration + count);
       summary.resourcesFound = count;
     }
@@ -1010,9 +1095,6 @@ export class GameState {
     this.voidFragments += fragments;
     this.prestigeCount++;
 
-    // Award 1 Void Shard per prestige
-    this.voidShards += 1;
-
     // Update max level unlocked based on prestige tiers
     for (const tier of PRESTIGE_TIERS) {
       if (this.prestigeCount >= tier.prestigeRequired && tier.unlocksLevelId !== null) {
@@ -1031,7 +1113,7 @@ export class GameState {
       this.resources[key] = D(0);
     }
     const packRatLvl = this.getVoidLevel('pack_rat');
-    this.resources['almond_water'] = D(5 + packRatLvl * 3 + (this.survivorsKitOwned ? 10 : 0));
+    this.resources['almond_water'] = D(5 + packRatLvl * 3);
     this.resources['canned_food'] = D(packRatLvl * 2);
 
     // Reset upgrades
@@ -1066,9 +1148,6 @@ export class GameState {
     this.torchTicks = 0;
     this.firesaltBombActive = false;
 
-    // Reset per-run shop effects
-    this.autoScavengeActive = false;
-
     // Reset run stats (but NOT totalDepth or prestige stats)
     this.stats = {
       totalExploration: 0,
@@ -1076,6 +1155,7 @@ export class GameState {
       resourcesFound: 0,
       qualityFinds: 0,
       mintFinds: 0,
+      easyAccessFinds: 0,
       deaths: 0,
       levelsEscaped: 0,
     };
@@ -1154,16 +1234,14 @@ export class GameState {
       defeatedBosses: { ...this.defeatedBosses },
       torchTicks: this.torchTicks,
       firesaltBombActive: this.firesaltBombActive,
-      // Shop (Phase 5)
+      // Void Shard shop
       voidShards: this.voidShards,
-      purchasedItems: { ...this.purchasedItems },
-      activeCosmetic: this.activeCosmetic,
-      offlineBoostActive: this.offlineBoostActive,
-      autoScavengeActive: this.autoScavengeActive,
-      claimedShardMilestones: [...this.claimedShardMilestones],
-      survivorsKitOwned: this.survivorsKitOwned,
-      explorersKitOwned: this.explorersKitOwned,
-      scavengersKitOwned: this.scavengersKitOwned,
+      shopUpgrades: { ...this.shopUpgrades },
+      shardMaxedUpgrades: [...this.shardMaxedUpgrades],
+      highestLevelReached: this.highestLevelReached,
+      // Achievements (lifetime)
+      lifetimeResourcesCollected: this.lifetimeResourcesCollected,
+      achievementClaims: { ...this.achievementClaims },
       // Preferences
       autoEscape: this.autoEscape,
       hideMaxedUpgrades: this.hideMaxedUpgrades,
@@ -1186,7 +1264,7 @@ export class GameState {
     const savedRes = (data.resources ?? {}) as Record<string, string | number>;
     for (const key of Object.keys(savedRes)) this.resources[key] = D(savedRes[key]);
     this.upgrades = data.upgrades;
-    this.stats = { ...data.stats, qualityFinds: data.stats.qualityFinds ?? 0, mintFinds: data.stats.mintFinds ?? 0 };   // default new fields for old saves
+    this.stats = { ...data.stats, qualityFinds: data.stats.qualityFinds ?? 0, mintFinds: data.stats.mintFinds ?? 0, easyAccessFinds: data.stats.easyAccessFinds ?? 0 };   // default new fields for old saves
     this.ghostWalkTicks = data.ghostWalkTicks ?? 0;
     this.adrenalineTicks = data.adrenalineTicks ?? 0;
     this.lastSaveTime = data.lastSaveTime;
@@ -1227,16 +1305,21 @@ export class GameState {
     this.torchTicks = data.torchTicks ?? 0;
     this.firesaltBombActive = data.firesaltBombActive ?? false;
 
-    // Shop (Phase 5)
+    // Void Shard shop
     this.voidShards = data.voidShards ?? 0;
-    this.purchasedItems = data.purchasedItems ?? {};
-    this.activeCosmetic = data.activeCosmetic ?? null;
-    this.offlineBoostActive = data.offlineBoostActive ?? false;
-    this.autoScavengeActive = data.autoScavengeActive ?? false;
-    this.claimedShardMilestones = data.claimedShardMilestones ?? [];
-    this.survivorsKitOwned = data.survivorsKitOwned ?? false;
-    this.explorersKitOwned = data.explorersKitOwned ?? false;
-    this.scavengersKitOwned = data.scavengersKitOwned ?? false;
+    this.shopUpgrades = data.shopUpgrades ?? {};
+    for (const s of SHOP_UPGRADES) {
+      if (this.shopUpgrades[s.id] === undefined) this.shopUpgrades[s.id] = 0;
+    }
+    this.shardMaxedUpgrades = data.shardMaxedUpgrades ?? [];
+    // Default deepest-reached to the deepest currently-unlocked level so existing
+    // saves don't suddenly re-pay shards for floors already cleared.
+    this.highestLevelReached = data.highestLevelReached
+      ?? (this.unlockedLevels.length ? Math.max(...this.unlockedLevels) : 0);
+
+    // Achievements (lifetime — never reset)
+    this.lifetimeResourcesCollected = data.lifetimeResourcesCollected ?? 0;
+    this.achievementClaims = data.achievementClaims ?? {};
 
     // Preferences
     this.autoEscape = data.autoEscape ?? true;

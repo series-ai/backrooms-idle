@@ -170,8 +170,8 @@ export default class GameScene extends Phaser.Scene {
       onToggleAutoEscape: () => this.handleToggleAutoEscape(),
       onToggleHideMaxed: () => this.handleToggleHideMaxed(),
       onCraft: (id) => this.handleCraft(id),
-      onBuyShopItem: (id) => this.handleBuyShopItem(id),
-      onOpenStore: () => this.handleOpenStore(),
+      onBuyShopUpgrade: (id) => this.handleBuyShopUpgrade(id),
+      onClaimAchievement: (id) => this.handleClaimAchievement(id),
       onResetProgress: () => this.handleResetProgress(),
     });
     this.ui.createAll();
@@ -207,6 +207,15 @@ export default class GameScene extends Phaser.Scene {
     // Hype timers (cooldown → available → active). React to the transitions.
     const hype = this.state.advanceHype(delta);
     if (hype.becameAvailable) this.ui.showHypePrompt();
+    if (hype.selfActivated) {
+      this.ui.startHype();
+      this.ui.addLogMessage({
+        type: 'system',
+        message: `Explorer self-hyped! ×${this.state.hypeMultiplier} auto search for ${this.state.hypeDuration / 1000}s`,
+        color: '#FFD24A',
+      });
+      RundotGameAPI.triggerHapticAsync('medium' as never);
+    }
     if (hype.ended) this.ui.endHype();
 
     // Smooth status bar animation every frame
@@ -287,14 +296,8 @@ export default class GameScene extends Phaser.Scene {
       }
     }
 
-    // Check shard milestones
-    const milestoneEvts = this.state.checkShardMilestones();
-    for (const evt of milestoneEvts) {
-      this.ui.addLogMessage(evt);
-      RundotGameAPI.analytics.recordCustomEvent('shard_milestone_claimed', {
-        message: evt.message,
-      });
-    }
+    // Surface any Void Shards earned this tick (e.g. auto-escape reaching a new floor)
+    this.drainShardAwards();
 
     // Show the drone's auto-search damage each tick (gold if it was a crit).
     if (result.autoDamage) {
@@ -377,6 +380,7 @@ export default class GameScene extends Phaser.Scene {
       });
       this.ui.refreshUpgradePanel();
       this.ui.updateResourceBar();
+      this.drainShardAwards();   // maxing an upgrade pays a Void Shard
       RundotGameAPI.analytics.recordCustomEvent('upgrade_purchased', {
         upgrade: id,
         level: this.state.getUpgradeLevel(id),
@@ -397,6 +401,7 @@ export default class GameScene extends Phaser.Scene {
         total_escapes: this.state.stats.levelsEscaped,
       });
       RundotGameAPI.triggerHapticAsync('success' as never);
+      this.drainShardAwards();   // reaching a new floor pays a Void Shard
       this.ui.refreshForNewLevel();
       this.ui.showTab('explore');
       this.saveGame();
@@ -499,40 +504,17 @@ export default class GameScene extends Phaser.Scene {
     }
   }
 
-  private handleBuyShopItem(itemId: string): void {
-    // Special case: instant prestige — buy then rewind
-    if (itemId === 'instant_prestige') {
-      if (!this.state.canBuyShopItem(itemId)) return;
-      if (!this.state.canRewind()) {
-        this.ui.addLogMessage({
-          type: 'system',
-          message: 'You need to reach Level 4 before you can Rewind.',
-          color: '#FF8888',
-        });
-        return;
-      }
-      const buyEvents = this.state.buyShopItem(itemId);
-      for (const evt of buyEvents) this.ui.addLogMessage(evt);
-      RundotGameAPI.analytics.recordCustomEvent('shop_purchase', { item: itemId, cost: 8 });
-      // Trigger rewind
-      this.handleRewind();
-      return;
-    }
-
-    const events = this.state.buyShopItem(itemId);
-    if (events.length > 0) {
-      for (const evt of events) this.ui.addLogMessage(evt);
-      this.ui.updateResourceBar();
+  private handleBuyShopUpgrade(id: string): void {
+    if (this.state.buyShopUpgrade(id)) {
+      this.ui.addLogMessage({
+        type: 'system',
+        message: `Shop upgrade: ${id.replace(/_/g, ' ')}!`,
+        color: '#CC88FF',
+      });
       this.ui.refreshShopPanel();
-
-      // Check shard milestones after purchase
-      const milestoneEvents = this.state.checkShardMilestones();
-      for (const evt of milestoneEvents) this.ui.addLogMessage(evt);
-      if (milestoneEvents.length > 0) this.ui.refreshShopPanel();
-
-      const item = this.state.purchasedItems[itemId] !== undefined ? itemId : 'unknown';
-      RundotGameAPI.analytics.recordCustomEvent('shop_purchase', {
-        item,
+      RundotGameAPI.analytics.recordCustomEvent('shop_upgrade_purchased', {
+        upgrade: id,
+        level: this.state.getShopLevel(id),
         shards_remaining: this.state.voidShards,
       });
       RundotGameAPI.triggerHapticAsync('success' as never);
@@ -540,39 +522,35 @@ export default class GameScene extends Phaser.Scene {
     }
   }
 
-  private async handleOpenStore(): Promise<void> {
-    RundotGameAPI.analytics.recordCustomEvent('shop_store_opened');
-    try {
-      await RundotGameAPI.iap.openStore();
-      // After returning from store, refresh the balance
-      const balance = await RundotGameAPI.iap.getHardCurrencyBalance();
-      if (balance > 0) {
-        // Convert hard currency to Void Shards (1:1 ratio)
-        const result = await RundotGameAPI.iap.spendCurrency('void_shards', balance);
-        if (result && result.success !== false) {
-          this.state.voidShards += balance;
-          this.ui.addLogMessage({
-            type: 'event',
-            message: `+${balance} Void Shards purchased!`,
-            color: '#CC88FF',
-          });
-          this.ui.refreshShopPanel();
-          RundotGameAPI.analytics.recordCustomEvent('shards_purchased', {
-            amount: balance,
-            total: this.state.voidShards,
-          });
-          RundotGameAPI.triggerHapticAsync('success' as never);
-          this.saveGame();
-        }
-      }
-    } catch {
-      // Store might not be available in sandbox — silently handle
+  private handleClaimAchievement(id: string): void {
+    const before = this.state.voidShards;
+    if (this.state.claimAchievement(id)) {
+      const earned = this.state.voidShards - before;
       this.ui.addLogMessage({
-        type: 'system',
-        message: 'Store is not available right now.',
-        color: '#888888',
+        type: 'event',
+        message: `Achievement claimed: ${id.replace(/_/g, ' ')}! +${earned} Void Shard${earned === 1 ? '' : 's'}`,
+        color: '#CC88FF',
+        iconKey: 'void_shard',
       });
+      this.ui.refreshAchievementsPanel();
+      RundotGameAPI.analytics.recordCustomEvent('achievement_claimed', {
+        achievement: id,
+        tier: this.state.getAchievementLevel(id),
+        shards_remaining: this.state.voidShards,
+      });
+      RundotGameAPI.triggerHapticAsync('success' as never);
+      this.saveGame();
     }
+  }
+
+  /** Surface any queued Void Shard awards (from maxing upgrades / reaching new floors). */
+  private drainShardAwards(): void {
+    const awards = this.state.collectShardAwards();
+    for (const evt of awards) {
+      this.ui.addLogMessage(evt);
+      RundotGameAPI.triggerHapticAsync('success' as never);
+    }
+    if (awards.length > 0) this.ui.refreshShopPanel();
   }
 
   private handleBuyVoidUpgrade(id: string): void {

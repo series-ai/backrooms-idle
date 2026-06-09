@@ -1,7 +1,7 @@
 import Phaser from 'phaser';
 import RundotGameAPI from '@series-inc/rundot-game-sdk/api';
 import { LAYOUT } from '../config';
-import { UPGRADES, RESOURCES, RESOURCE_ORDER, VOID_UPGRADES, PRESTIGE_TIERS, ABILITIES, EQUIP_SLOTS, EQUIP_SLOT_ICONS, GEAR_POOL, GEAR_TIER_COLORS, RECIPES, SHOP_ITEMS, SHARD_MILESTONES, getTierColor, tierSuffix, getFloorOre, type UpgradeDef } from '../data/GameData';
+import { UPGRADES, RESOURCES, RESOURCE_ORDER, VOID_UPGRADES, PRESTIGE_TIERS, ABILITIES, EQUIP_SLOTS, EQUIP_SLOT_ICONS, GEAR_POOL, GEAR_TIER_COLORS, RECIPES, SHOP_UPGRADES, ACHIEVEMENTS, getTierColor, tierSuffix, getFloorOre, type UpgradeDef, type ShopUpgradeDef, type AchievementDef } from '../data/GameData';
 import { fmt, D, type Big } from '../num';
 import type { GameEvent, OfflineSummary } from '../GameState';
 import { GameState } from '../GameState';
@@ -79,8 +79,8 @@ export interface UICallbacks {
   onToggleAutoEscape: () => void;
   onToggleHideMaxed: () => void;
   onCraft: (recipeId: string) => void;
-  onBuyShopItem: (itemId: string) => void;
-  onOpenStore: () => void;
+  onBuyShopUpgrade: (id: string) => void;
+  onClaimAchievement: (id: string) => void;
   onResetProgress: () => void;
 }
 
@@ -181,10 +181,35 @@ export class UIManager {
   private craftBtns: Map<string, Phaser.GameObjects.Container> = new Map();
   private craftCostTexts: Map<string, Phaser.GameObjects.Text> = new Map();
 
-  // Shop panel refs
+  // Shop panel refs (mirrors the upgrade panel: scrollable cards + cost buttons)
   private shopShardLabel!: Phaser.GameObjects.Text;
-  private shopBuyBtns: Map<string, Phaser.GameObjects.Container> = new Map();
-  private shopStatusTexts: Map<string, Phaser.GameObjects.Text> = new Map();
+  private shopRows: Map<string, Phaser.GameObjects.Container> = new Map();
+  private shopLvlLabels: Map<string, Phaser.GameObjects.Text> = new Map();
+  private shopCostLabels: Map<string, Phaser.GameObjects.Text> = new Map();
+  private shopCostIcons: Map<string, Phaser.GameObjects.Image> = new Map();
+  private shopBuyBg: Map<string, Phaser.GameObjects.Rectangle> = new Map();
+  private shopScroll?: Phaser.GameObjects.Container;
+  private shopMinScroll = 0;
+  private shopDragActive = false;
+  private shopDragMoved = false;
+  private shopDragStartPointer = 0;
+  private shopDragStartScroll = 0;
+
+  // Achievements panel refs (mirrors the shop panel: scrollable cards + claim buttons)
+  private achBonusLabel?: Phaser.GameObjects.Text;
+  private achLevelsLabel?: Phaser.GameObjects.Text;
+  private achLvlLabels: Map<string, Phaser.GameObjects.Text> = new Map();
+  private achProgLabels: Map<string, Phaser.GameObjects.Text> = new Map();
+  private achProgFill: Map<string, Phaser.GameObjects.Rectangle> = new Map();
+  private achBtnBg: Map<string, Phaser.GameObjects.Rectangle> = new Map();
+  private achBtnLabels: Map<string, Phaser.GameObjects.Text> = new Map();
+  private achBtnIcons: Map<string, Phaser.GameObjects.Image> = new Map();
+  private achScroll?: Phaser.GameObjects.Container;
+  private achMinScroll = 0;
+  private achDragActive = false;
+  private achDragMoved = false;
+  private achDragStartPointer = 0;
+  private achDragStartScroll = 0;
 
   // Auto-escape toggle
   private autoEscBg!: Phaser.GameObjects.Rectangle;
@@ -371,6 +396,7 @@ export class UIManager {
     this.createVoidPanel();
     this.createGearPanel();
     this.createShopPanel();
+    this.createAchievementsPanel();
     this.showTab('explore');
     this.scheduleMoth();
   }
@@ -649,13 +675,18 @@ export class UIManager {
       { id: 'explore', label: 'EXPLORE' }, { id: 'items', label: 'ITEMS' }, { id: 'upgrades', label: 'UPGRADES' },
     ];
     const row2: { id: string; label: string }[] = showVoid
-      ? [{ id: 'void', label: 'VOID (wip)' }, { id: 'gear', label: 'GEAR (wip)' }, { id: 'shop', label: 'SHOP (wip)' }]
-      : [{ id: 'gear', label: 'GEAR (wip)' }, { id: 'shop', label: 'SHOP (wip)' }];
+      ? [{ id: 'void', label: 'VOID (wip)' }, { id: 'gear', label: 'GEAR (wip)' }, { id: 'shop', label: 'SHOP' }]
+      : [{ id: 'gear', label: 'GEAR (wip)' }, { id: 'shop', label: 'SHOP' }];
+    // 3rd row — Achievements lives here on its own for now.
+    const row3: { id: string; label: string }[] = [
+      { id: 'achievements', label: 'ACHIEVEMENTS' },
+    ];
 
     const rowH = 42;
     const rowGap = 8;
     const row1Y = LAYOUT.TAB_Y - rowGap / 2 - rowH / 2;
     const row2Y = LAYOUT.TAB_Y + rowGap / 2 + rowH / 2;
+    const row3Y = row2Y + rowH + rowGap;
     const totalPad = 20;
 
     const buildRow = (tabs: { id: string; label: string }[], centerY: number) => {
@@ -673,6 +704,20 @@ export class UIManager {
           fontStyle: 'bold',
         }).setOrigin(0.5).setDepth(11);
 
+        // Shop tab gets the Void Shard icon to the left of its label (icon + text
+        // centered together within the button).
+        if (tabs[i].id === 'shop') {
+          const iconSize = 36;
+          const iconGap = 6;
+          const icon = this.createIcon(0, centerY, 'void_shard', iconSize);
+          if (icon) {
+            icon.setDepth(11);
+            const total = iconSize + iconGap + txt.width;
+            icon.x = x - total / 2 + iconSize / 2;
+            txt.setX(icon.x + iconSize / 2 + iconGap + txt.width / 2);
+          }
+        }
+
         bg.setInteractive({ useHandCursor: true });
         const tabId = tabs[i].id;
         bg.on('pointerdown', () => {
@@ -685,7 +730,7 @@ export class UIManager {
 
         // Alert dot (red circle + "!") in the tab's top-right corner — shown when
         // that tab has something waiting and you're on a DIFFERENT tab.
-        if (tabId === 'upgrades' || tabId === 'explore') {
+        if (tabId === 'upgrades' || tabId === 'explore' || tabId === 'achievements') {
           const dot = this.scene.add.container(x + tabW / 2 - 6, centerY - rowH / 2 + 4).setDepth(12);
           const circle = this.scene.add.circle(0, 0, 11, 0xff3030).setStrokeStyle(2, 0x000000);
           const bang = makeText(this.scene, 0, 0, '!', 15, '#FFFFFF', { fontStyle: 'bold' }).setOrigin(0.5);
@@ -698,6 +743,7 @@ export class UIManager {
 
     buildRow(row1, row1Y);
     buildRow(row2, row2Y);
+    buildRow(row3, row3Y);
   }
 
   /** Show/hide the per-tab alert dots (only when you're on a different tab). */
@@ -706,6 +752,8 @@ export class UIManager {
     if (up) up.setVisible(this.activeTab !== 'upgrades' && this.state.hasAffordableUpgrade());
     const ex = this.tabNotifDots.get('explore');
     if (ex) ex.setVisible(this.activeTab !== 'explore' && this.state.canDescendToNew());
+    const ach = this.tabNotifDots.get('achievements');
+    if (ach) ach.setVisible(this.activeTab !== 'achievements' && this.state.hasClaimableAchievement());
   }
 
   /* ---- Explore panel (log + action buttons) ---- */
@@ -1568,223 +1616,273 @@ export class UIManager {
 
   private createShopPanel(): void {
     const panel = this.scene.add.container(0, 0).setDepth(15);
-    const scrollContainer = this.scene.add.container(0, 0);
+    const contentH = LAYOUT.CONTENT_BOTTOM_WIDE - LAYOUT.CONTENT_TOP_WIDE - 10;
     const cx = LAYOUT.CENTER_X;
-    let curY = LAYOUT.CONTENT_TOP_WIDE + 10;
 
-    // Title with void shard icon
-    const vsIcon = this.createIcon(cx - 148, curY + 14, 'void_shard', 80);
-    if (vsIcon) {
-      scrollContainer.add(vsIcon);
-      const title = makeText(this.scene, cx + 10, curY, 'VOID SHARD SHOP', 24, '#CC88FF', {
-        fontStyle: 'bold',
-      }).setOrigin(0.5, 0);
-      scrollContainer.add(title);
-    } else {
-      const title = makeText(this.scene, cx, curY, '\u{1F48E} VOID SHARD SHOP', 24, '#CC88FF', {
-        fontStyle: 'bold',
-      }).setOrigin(0.5, 0);
-      scrollContainer.add(title);
-    }
-    curY += 34;
+    const scrollContainer = this.scene.add.container(0, 0);
+    this.shopScroll = scrollContainer;
 
-    // Shard balance with icon
-    const vsBalIcon = this.createIcon(cx - 116, curY + 12, 'void_shard', 70);
-    if (vsBalIcon) {
-      scrollContainer.add(vsBalIcon);
-      this.shopShardLabel = makeText(this.scene, cx - 90, curY, `Void Shards: ${this.state.voidShards}`, 20, '#CC88FF', {
-        fontStyle: 'bold',
-      }).setOrigin(0, 0);
-    } else {
-      this.shopShardLabel = makeText(this.scene, cx, curY, `Void Shards: ${this.state.voidShards}`, 20, '#CC88FF', {
-        fontStyle: 'bold',
-      }).setOrigin(0.5, 0);
-    }
+    const LX = UIManager.UPG_LEFT;
+    const BW = UIManager.UPG_BTN_W;
+    const BH = UIManager.UPG_BTN_H;
+    const BCY = UIManager.UPG_BTN_CY;
+    const rowH = UIManager.UPG_ROW_H;
+
+    // Header (scrolls with the list): shard balance + how to earn.
+    const headerY = LAYOUT.CONTENT_TOP_WIDE + 10;
+    const vsIcon = this.createIcon(cx - 150, headerY + 16, 'void_shard', 60);
+    if (vsIcon) scrollContainer.add(vsIcon);
+    this.shopShardLabel = makeText(this.scene, vsIcon ? cx - 120 : cx, headerY,
+      `Void Shards: ${this.state.voidShards}`, 22, '#CC88FF', { fontStyle: 'bold' })
+      .setOrigin(vsIcon ? 0 : 0.5, 0);
     scrollContainer.add(this.shopShardLabel);
-    curY += 30;
-
-    // How to earn shards info
-    const earnInfo = makeText(this.scene, cx, curY,
-      'Earn: 1/Rewind, Memory Fragments, Achievements',
+    const earnInfo = makeText(this.scene, cx, headerY + 36,
+      'Earn a Void Shard by maxing an upgrade or reaching a new floor.',
       13, '#8888AA').setOrigin(0.5, 0);
     scrollContainer.add(earnInfo);
-    curY += 24;
 
-    // Buy Shards button (opens platform store)
-    const buyShardsBtn = makeBtn(this.scene, cx, curY + 18, '\u{1F4B0} GET MORE SHARDS', 320, 40, 0x443366, () => {
-      this.cb.onOpenStore();
-    });
-    scrollContainer.add(buyShardsBtn);
-    curY += 50;
+    const firstCardY = headerY + 70;
 
-    // Divider
-    scrollContainer.add(this.scene.add.rectangle(cx, curY, 620, 2, 0x444444).setDepth(15));
-    curY += 16;
+    for (let i = 0; i < SHOP_UPGRADES.length; i++) {
+      const sup = SHOP_UPGRADES[i];
+      // Card row — mirrors the upgrade panel (name / desc / level stacked, cost button below).
+      const row = this.scene.add.container(0, firstCardY + i * rowH);
 
-    // Render shop items by category
-    const categories: Array<{ label: string; key: string }> = [
-      { label: 'STARTER PACKS (One-Time)', key: 'starter' },
-      { label: 'CONVENIENCE', key: 'convenience' },
-      { label: 'COSMETICS (Permanent)', key: 'cosmetic' },
-    ];
+      const nameTxt = makeText(this.scene, LX, 0, sup.icon ? `${sup.icon}  ${sup.name}` : sup.name, 22, '#EEEEEE', { fontStyle: 'bold' });
+      const descTxt = makeText(this.scene, LX, 32, sup.description, 14, '#AAAAAA', { wordWrap: { width: 620 } });
+      const lvl = this.state.getShopLevel(sup.id);
+      const lvlTxt = makeText(this.scene, LX, 58, `Lv ${lvl}/${sup.maxLevel}`, 16, '#c8a8ff');
+      this.shopLvlLabels.set(sup.id, lvlTxt);
 
-    for (const cat of categories) {
-      const catTitle = makeText(this.scene, cx, curY, cat.label, 18, '#AAAAAA', {
-        fontStyle: 'bold',
-      }).setOrigin(0.5, 0);
-      scrollContainer.add(catTitle);
-      curY += 28;
+      const btnBg = this.scene.add.rectangle(LX + BW / 2, BCY, BW, BH, 0x333333, 1)
+        .setStrokeStyle(2, 0x555555)
+        .setInteractive({ useHandCursor: true });
+      btnBg.on('pointerup', () => { if (!this.shopDragMoved) this.cb.onBuyShopUpgrade(sup.id); });
+      const costIcon = this.createIcon(LX + 34, BCY, 'void_shard', 44);
+      if (costIcon) this.shopCostIcons.set(sup.id, costIcon);
+      const costLabel = makeText(this.scene, LX + BW / 2, BCY, '', 18, '#FFFFFF', { fontStyle: 'bold' })
+        .setOrigin(0.5, 0.5);
 
-      const items = SHOP_ITEMS.filter(i => i.category === cat.key);
-      for (const item of items) {
-        const row = this.scene.add.container(0, 0);
+      const card = this.scene.add.rectangle(LAYOUT.CENTER_X, 70, 676, 152, 0x1e1e1e, 0.9)
+        .setStrokeStyle(1, 0x3a3a3a);
 
-        // Name
-        const nameTxt = makeText(this.scene, 40, curY, `${item.icon}  ${item.name}`, 17, '#EEEEEE', {
-          fontStyle: 'bold',
-        });
-        row.add(nameTxt);
+      row.add(card);
+      row.add([nameTxt, descTxt, lvlTxt, btnBg]);
+      if (costIcon) row.add(costIcon);
+      row.add(costLabel);
 
-        // Description
-        const descTxt = makeText(this.scene, 40, curY + 22, item.description, 13, '#AAAAAA', {
-          wordWrap: { width: 480 },
-        });
-        row.add(descTxt);
-
-        // Status text (cost or "OWNED")
-        const owned = item.oneTime && this.state.purchasedItems[item.id];
-        const statusStr = owned ? 'OWNED' : `${item.cost} \u{1F48E}`;
-        const statusColor = owned ? '#88FF88' : '#CC88FF';
-        const statusTxt = makeText(this.scene, 680, curY, statusStr, 16, statusColor, {
-          fontStyle: 'bold',
-        }).setOrigin(1, 0);
-        row.add(statusTxt);
-        this.shopStatusTexts.set(item.id, statusTxt);
-
-        // Buy button
-        const canBuy = this.state.canBuyShopItem(item.id);
-        const btnLabel = owned ? '\u2713' : canBuy ? 'BUY' : '---';
-        const btnColor = owned ? 0x224422 : canBuy ? 0x443366 : 0x222233;
-        const buyBtn = makeBtn(this.scene, 600, curY + 32, btnLabel, 100, 28, btnColor, () => {
-          this.cb.onBuyShopItem(item.id);
-        });
-        row.add(buyBtn);
-        this.shopBuyBtns.set(item.id, buyBtn);
-
-        scrollContainer.add(row);
-
-        // Divider
-        scrollContainer.add(this.scene.add.rectangle(cx, curY + 56, 620, 1, 0x333333).setDepth(15));
-        curY += 64;
-      }
-
-      curY += 8; // gap between categories
+      scrollContainer.add(row);
+      this.shopRows.set(sup.id, row);
+      this.shopBuyBg.set(sup.id, btnBg);
+      this.shopCostLabels.set(sup.id, costLabel);
+      this.renderShopRow(sup);
     }
-
-    // Achievements section
-    scrollContainer.add(this.scene.add.rectangle(cx, curY, 620, 2, 0x444444).setDepth(15));
-    curY += 16;
-    const achTitle = makeText(this.scene, cx, curY, 'SHARD ACHIEVEMENTS', 18, '#AAAAAA', {
-      fontStyle: 'bold',
-    }).setOrigin(0.5, 0);
-    scrollContainer.add(achTitle);
-    curY += 28;
-
-    for (const milestone of SHARD_MILESTONES) {
-      const claimed = this.state.claimedShardMilestones.includes(milestone.id);
-      const icon = claimed ? '\u2713' : '\u25CB';
-      const color = claimed ? '#88FF88' : '#666688';
-      const mileTxt = makeText(this.scene, 40, curY,
-        `${icon} ${milestone.description} — +${milestone.reward} \u{1F48E}`,
-        14, color);
-      scrollContainer.add(mileTxt);
-      this.shopStatusTexts.set(`ach_${milestone.id}`, mileTxt);
-      curY += 24;
-    }
-
-    curY += 20; // bottom padding
 
     panel.add(scrollContainer);
 
-    // Mask and scroll
-    const contentH = LAYOUT.CONTENT_BOTTOM_WIDE - LAYOUT.CONTENT_TOP_WIDE - 10;
+    // Clip to the content area.
     const maskGfx = this.scene.add.graphics();
     maskGfx.setVisible(false);
     maskGfx.fillRect(0, LAYOUT.CONTENT_TOP_WIDE, LAYOUT.GAME_WIDTH, contentH);
     panel.setMask(maskGfx.createGeometryMask());
 
-    const totalH = curY - LAYOUT.CONTENT_TOP_WIDE;
-    if (totalH > contentH) {
-      const dragZone = this.scene.add.rectangle(
-        cx, LAYOUT.CONTENT_TOP_WIDE + contentH / 2,
-        LAYOUT.GAME_WIDTH, contentH, 0x000000, 0,
-      ).setDepth(16).setInteractive();
+    const totalH = (firstCardY + SHOP_UPGRADES.length * rowH) - (LAYOUT.CONTENT_TOP_WIDE + 10);
+    this.shopMinScroll = Math.min(0, contentH - totalH);
 
-      let dragging = false;
-      let lastPointerY = 0;
-      const minScroll = -(totalH - contentH);
-
-      dragZone.on('pointerdown', (_p: Phaser.Input.Pointer) => {
-        dragging = true;
-        lastPointerY = _p.y;
-      });
-      this.scene.input.on('pointermove', (_p: Phaser.Input.Pointer) => {
-        if (!dragging || !this.panels.get('shop')?.visible) return;
-        const dy = _p.y - lastPointerY;
-        lastPointerY = _p.y;
-        scrollContainer.y = Phaser.Math.Clamp(scrollContainer.y + dy, minScroll, 0);
-      });
-      this.scene.input.on('pointerup', () => { dragging = false; });
-
-      panel.add(dragZone);
-    }
+    // Drag-to-scroll (same gesture model as the upgrade panel, gated to this tab).
+    this.scene.input.on('pointerdown', (p: Phaser.Input.Pointer) => {
+      if (this.activeTab !== 'shop') return;
+      if (p.y < LAYOUT.CONTENT_TOP_WIDE || p.y > LAYOUT.CONTENT_BOTTOM_WIDE) return;
+      this.shopDragActive = true;
+      this.shopDragMoved = false;
+      this.shopDragStartPointer = p.y;
+      this.shopDragStartScroll = scrollContainer.y;
+    });
+    this.scene.input.on('pointermove', (p: Phaser.Input.Pointer) => {
+      if (!this.shopDragActive) return;
+      const dy = p.y - this.shopDragStartPointer;
+      if (Math.abs(dy) > 6) this.shopDragMoved = true;
+      scrollContainer.y = Phaser.Math.Clamp(this.shopDragStartScroll + dy, this.shopMinScroll, 0);
+    });
+    this.scene.input.on('pointerup', () => { this.shopDragActive = false; });
+    this.scene.input.on('wheel', (_p: Phaser.Input.Pointer, _o: unknown, _dx: number, dy: number) => {
+      if (this.activeTab !== 'shop' || !this.shopScroll) return;
+      this.shopScroll.y = Phaser.Math.Clamp(this.shopScroll.y - dy, this.shopMinScroll, 0);
+    });
 
     this.panels.set('shop', panel);
   }
 
+  /** Refresh one shop-upgrade card's level + cost button (MAXED state hides the icon). */
+  private renderShopRow(sup: ShopUpgradeDef): void {
+    const lvl = this.state.getShopLevel(sup.id);
+    const maxed = lvl >= sup.maxLevel;
+    const canBuy = this.state.canAffordShopUpgrade(sup.id);
+    const cost = this.state.getShopUpgradeCost(sup.id);
+
+    this.shopLvlLabels.get(sup.id)?.setText(`Lv ${lvl}/${sup.maxLevel}`);
+
+    const bg = this.shopBuyBg.get(sup.id);
+    if (bg) bg.setFillStyle(maxed ? 0x2a2a2a : canBuy ? 0x443366 : 0x333333);
+    this.shopCostIcons.get(sup.id)?.setVisible(!maxed);
+    const label = this.shopCostLabels.get(sup.id);
+    if (label) {
+      if (maxed) label.setText('MAXED').setColor('#c8a8ff');
+      else label.setText(`${cost} Void Shards`).setColor(canBuy ? '#FFFFFF' : '#AAAAAA');
+    }
+  }
+
   refreshShopPanel(): void {
-    // Update shard balance
     this.shopShardLabel.setText(`Void Shards: ${this.state.voidShards}`);
+    for (const sup of SHOP_UPGRADES) this.renderShopRow(sup);
+  }
 
-    // Update shop items
-    for (const item of SHOP_ITEMS) {
-      const btn = this.shopBuyBtns.get(item.id);
-      const statusTxt = this.shopStatusTexts.get(item.id);
+  /* ---- Achievements panel (cards + claim buttons; mirrors the shop panel) ---- */
 
-      const owned = item.oneTime && this.state.purchasedItems[item.id];
-      const canBuy = this.state.canBuyShopItem(item.id);
+  private createAchievementsPanel(): void {
+    const panel = this.scene.add.container(0, 0).setDepth(15);
+    const contentH = LAYOUT.CONTENT_BOTTOM_WIDE - LAYOUT.CONTENT_TOP_WIDE - 10;
 
-      if (statusTxt) {
-        statusTxt.setText(owned ? 'OWNED' : `${item.cost} \u{1F48E}`);
-        statusTxt.setColor(owned ? '#88FF88' : '#CC88FF');
-      }
+    const scrollContainer = this.scene.add.container(0, 0);
+    this.achScroll = scrollContainer;
 
-      if (btn) {
-        const bg = btn.getAt(0) as Phaser.GameObjects.Rectangle;
-        const txt = btn.getAt(1) as Phaser.GameObjects.Text;
-        if (owned) {
-          bg.setFillStyle(0x224422);
-          txt.setText('\u2713');
-        } else if (canBuy) {
-          bg.setFillStyle(0x443366);
-          txt.setText('BUY');
-        } else {
-          bg.setFillStyle(0x222233);
-          txt.setText('---');
-        }
-      }
+    // Achievement cards are TALLER than upgrade/shop cards to fit a progress bar
+    // between the level line and the claim button. (Local geometry, not the UPG_* set.)
+    const LX = UIManager.UPG_LEFT;
+    const BW = UIManager.UPG_BTN_W;        // 640 — shared horizontal span
+    const BH = 50;                         // claim button height
+    const CARD_H = 188;
+    const CARD_CY = 88;                    // card local center (spans -6..182)
+    const BAR_Y = 88;                      // progress bar center
+    const BAR_H = 22;
+    const BCY = 138;                       // claim button center
+    const rowH = CARD_H + 14;              // card + gap
+    const startY = LAYOUT.CONTENT_TOP_WIDE + 10;
+
+    // Header (scrolls with the cards): the global auto-search bonus every claimed
+    // tier grants (+0.5% each, summed across ALL achievements). Total on the left,
+    // the "N levels x 0.5%" breakdown on the right.
+    this.achBonusLabel = makeText(this.scene, LX, startY, '', 18, '#9fd0a0', { fontStyle: 'bold' })
+      .setOrigin(0, 0);
+    this.achLevelsLabel = makeText(this.scene, LX + BW, startY, '', 16, '#8aa88a')
+      .setOrigin(1, 0);
+    scrollContainer.add([this.achBonusLabel, this.achLevelsLabel]);
+    const firstCardY = startY + 44;
+
+    for (let i = 0; i < ACHIEVEMENTS.length; i++) {
+      const ach = ACHIEVEMENTS[i];
+      const row = this.scene.add.container(0, firstCardY + i * rowH);
+
+      const nameTxt = makeText(this.scene, LX, 0, ach.name, 22, '#EEEEEE', { fontStyle: 'bold' });
+      const descTxt = makeText(this.scene, LX, 30, ach.description, 14, '#AAAAAA', { wordWrap: { width: 620 } });
+      const lvlTxt = makeText(this.scene, LX, 56, `Lv ${this.state.getAchievementLevel(ach.id)}/${ach.thresholds.length}`, 16, '#c8a8ff');
+      this.achLvlLabels.set(ach.id, lvlTxt);
+
+      // Progress bar toward the NEXT tier: track + green fill (scaled by ratio) + a
+      // centered "current / threshold" label. Always visible so the requirement is clear.
+      const barBg = this.scene.add.rectangle(LX + BW / 2, BAR_Y, BW, BAR_H, 0x111111, 1)
+        .setStrokeStyle(1, 0x444444);
+      const barFill = this.scene.add.rectangle(LX, BAR_Y, BW, BAR_H, 0x3a9a3a, 1).setOrigin(0, 0.5);
+      this.achProgFill.set(ach.id, barFill);
+      const progTxt = makeText(this.scene, LX + BW / 2, BAR_Y, '', 14, '#FFFFFF', { fontStyle: 'bold' })
+        .setOrigin(0.5);
+      this.achProgLabels.set(ach.id, progTxt);
+
+      // Claim button.
+      const btnBg = this.scene.add.rectangle(LX + BW / 2, BCY, BW, BH, 0x333333, 1)
+        .setStrokeStyle(2, 0x555555)
+        .setInteractive({ useHandCursor: true });
+      btnBg.on('pointerup', () => { if (!this.achDragMoved) this.cb.onClaimAchievement(ach.id); });
+      const rewardIcon = this.createIcon(LX + BW - 40, BCY, 'void_shard', 38);
+      if (rewardIcon) this.achBtnIcons.set(ach.id, rewardIcon);
+      const btnLabel = makeText(this.scene, LX + BW / 2, BCY, '', 18, '#FFFFFF', { fontStyle: 'bold' })
+        .setOrigin(0.5, 0.5);
+
+      const card = this.scene.add.rectangle(LAYOUT.CENTER_X, CARD_CY, 676, CARD_H, 0x1e1e1e, 0.9)
+        .setStrokeStyle(1, 0x3a3a3a);
+
+      row.add(card);
+      row.add([nameTxt, descTxt, lvlTxt, barBg, barFill, progTxt, btnBg]);
+      if (rewardIcon) row.add(rewardIcon);
+      row.add(btnLabel);
+
+      scrollContainer.add(row);
+      this.achBtnBg.set(ach.id, btnBg);
+      this.achBtnLabels.set(ach.id, btnLabel);
+      this.renderAchievementRow(ach);
     }
 
-    // Update achievements
-    for (const milestone of SHARD_MILESTONES) {
-      const txt = this.shopStatusTexts.get(`ach_${milestone.id}`);
-      if (txt) {
-        const claimed = this.state.claimedShardMilestones.includes(milestone.id);
-        const icon = claimed ? '\u2713' : '\u25CB';
-        txt.setText(`${icon} ${milestone.description} — +${milestone.reward} \u{1F48E}`);
-        txt.setColor(claimed ? '#88FF88' : '#666688');
-      }
+    panel.add(scrollContainer);
+
+    const maskGfx = this.scene.add.graphics();
+    maskGfx.setVisible(false);
+    maskGfx.fillRect(0, LAYOUT.CONTENT_TOP_WIDE, LAYOUT.GAME_WIDTH, contentH);
+    panel.setMask(maskGfx.createGeometryMask());
+
+    this.achMinScroll = Math.min(0, contentH - (44 + ACHIEVEMENTS.length * rowH));
+
+    this.scene.input.on('pointerdown', (p: Phaser.Input.Pointer) => {
+      if (this.activeTab !== 'achievements') return;
+      if (p.y < LAYOUT.CONTENT_TOP_WIDE || p.y > LAYOUT.CONTENT_BOTTOM_WIDE) return;
+      this.achDragActive = true;
+      this.achDragMoved = false;
+      this.achDragStartPointer = p.y;
+      this.achDragStartScroll = scrollContainer.y;
+    });
+    this.scene.input.on('pointermove', (p: Phaser.Input.Pointer) => {
+      if (!this.achDragActive) return;
+      const dy = p.y - this.achDragStartPointer;
+      if (Math.abs(dy) > 6) this.achDragMoved = true;
+      scrollContainer.y = Phaser.Math.Clamp(this.achDragStartScroll + dy, this.achMinScroll, 0);
+    });
+    this.scene.input.on('pointerup', () => { this.achDragActive = false; });
+    this.scene.input.on('wheel', (_p: Phaser.Input.Pointer, _o: unknown, _dx: number, dy: number) => {
+      if (this.activeTab !== 'achievements' || !this.achScroll) return;
+      this.achScroll.y = Phaser.Math.Clamp(this.achScroll.y - dy, this.achMinScroll, 0);
+    });
+
+    this.panels.set('achievements', panel);
+  }
+
+  /** Refresh one achievement card: level, progress bar/label, and claim button. */
+  private renderAchievementRow(ach: AchievementDef): void {
+    const lvl = this.state.getAchievementLevel(ach.id);
+    const maxed = lvl >= ach.thresholds.length;
+    const claimable = this.state.canClaimAchievement(ach.id);
+    const progress = this.state.getAchievementProgress(ach.stat);
+
+    this.achLvlLabels.get(ach.id)?.setText(`Lv ${lvl}/${ach.thresholds.length}`);
+
+    // Progress bar + label toward the next tier (full + "MAXED" when all tiers done).
+    const fill = this.achProgFill.get(ach.id);
+    const progLabel = this.achProgLabels.get(ach.id);
+    if (maxed) {
+      if (fill) { fill.scaleX = 1; fill.setFillStyle(0x6a5a9a); }
+      progLabel?.setText('MAXED');
+    } else {
+      const threshold = ach.thresholds[lvl];
+      const ratio = Math.max(0, Math.min(1, progress / threshold));
+      if (fill) { fill.scaleX = ratio; fill.setFillStyle(claimable ? 0x4cc24c : 0x3a9a3a); }
+      progLabel?.setText(`${fmt(D(progress))} / ${fmt(D(threshold))}`);
     }
+
+    // Claim button.
+    const bg = this.achBtnBg.get(ach.id);
+    if (bg) bg.setFillStyle(maxed ? 0x2a2a2a : claimable ? 0x336633 : 0x333333);
+    const icon = this.achBtnIcons.get(ach.id);
+    if (icon) icon.setVisible(!maxed);
+    const label = this.achBtnLabels.get(ach.id);
+    if (label) {
+      if (maxed) label.setText('ALL CLAIMED').setColor('#c8a8ff');
+      else label.setText(`CLAIM  +${this.state.getAchievementReward(ach.id)}`).setColor(claimable ? '#9fffa0' : '#777777');
+    }
+  }
+
+  refreshAchievementsPanel(): void {
+    const levels = this.state.totalAchievementLevels;
+    this.achBonusLabel?.setText(`Auto Search Bonus: +${(levels * 0.5).toFixed(1)}%`);
+    this.achLevelsLabel?.setText(`${levels} levels x 0.5%`);
+    for (const ach of ACHIEVEMENTS) this.renderAchievementRow(ach);
   }
 
   /* ================================================================ */
@@ -1810,6 +1908,7 @@ export class UIManager {
     if (tab === 'void') this.refreshVoidPanel();
     if (tab === 'gear') this.refreshGearPanel();
     if (tab === 'shop') this.refreshShopPanel();
+    if (tab === 'achievements') this.refreshAchievementsPanel();
     this.refreshTabNotifs();   // hide the current tab's dot, re-show others' as needed
 
     // Toggle showcase icon visibility with explore tab
@@ -1856,6 +1955,7 @@ export class UIManager {
       case 'void': return 'THE VOID';
       case 'gear': return 'GEAR';
       case 'shop': return 'SHOP';
+      case 'achievements': return 'ACHIEVEMENTS';
       default: return this.state.level.name;
     }
   }
@@ -2160,7 +2260,9 @@ export class UIManager {
     this.refreshTabNotifs();
     switch (this.activeTab) {
       case 'upgrades': this.refreshUpgradePanel(); break;
-      // gear / shop / void affordability hook in here as they're built out.
+      case 'shop': this.refreshShopPanel(); break;
+      case 'achievements': this.refreshAchievementsPanel(); break;
+      // gear / void affordability hook in here as they're built out.
     }
   }
 
@@ -2471,9 +2573,11 @@ export class UIManager {
       ['Auto-Capture (Moth)', `${Math.round(s.autoCaptureChance * 100)}%`],
       ['Quality chance', `${Math.round(s.qualityChance * 100)}%  (+${s.qualityBonus})`],
       ['Mint chance', `${Math.round(s.mintChance * 100)}%  (+9)`],
+      ['Easy Access chance', `${(s.easyAccessChance * 100).toFixed(1)}%  (½ HP)`],
       ['Resources found', `${s.stats.resourcesFound.toLocaleString()}`],
       ['Quality finds', `${s.stats.qualityFinds.toLocaleString()}`],
       ['Mint finds', `${s.stats.mintFinds.toLocaleString()}`],
+      ['Easy Access finds', `${s.stats.easyAccessFinds.toLocaleString()}`],
       ['Moths caught', fmt(s.resources['moth'] ?? D(0))],
     ];
     let y = top + 96;

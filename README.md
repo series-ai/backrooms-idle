@@ -62,18 +62,33 @@ HP is the **displayed value directly** (no hidden magnitude multiplier), and one
 
 ### Upgrades
 
-The upgrade roster is being rebuilt from scratch. Each upgrade is a small data entry in `UPGRADES` (`src/data/GameData.ts`); costs follow `round(base × mult^level)`, and an upgrade can declare extras like `unlockFloor` (progressive reveal) or `costResourceCycle` (a different resource each level).
+Each upgrade is a small data entry in `UPGRADES` (`src/data/GameData.ts`); costs follow `round(base × mult^level)`, and an upgrade can declare extras like `unlockFloor` (progressive `??????` reveal) or `costResourceCycle` (a different resource each level).
 
-| Upgrade | Effect | Cost resource |
-|---|---|---|
-| **Auto Explore** | +1 auto-search/sec per level (the drone) | Almond Water |
-| **Sharp Eye** | +1 tap power per level | Wallpaper Strip *(unlocks floor 1)* |
-| **Trapper** | +1% moth auto-capture per level | Wallpaper Strip *(unlocks floor 1)* |
-| **Rally Cry** | +0.5s hype duration per level | Carpet Swatch *(unlocks floor 2)* |
-| **Moth Powers** | +2 tap **&** auto power per level | Moths |
-| **Master Scav** | +5 tap **&** auto power per level | **cycles all 31 floor resources** |
+**The per-floor ladder.** Beyond the three starter upgrades, the roster follows a deliberate shape: **one upgrade unlocks per floor, priced in that floor's resource**, and both the **base cost** and the **growth multiplier climb with depth** — deeper upgrades cost more up front *and* scale steeper. New floors also **rotate the lever** (tap/auto/Explorer power, crit %, crit damage, quality, easy-access) instead of repeating one.
 
-Power comes in channels that stack: **tap-only** (`power`), **tap + auto** (`flatPower`), plus standalone systems — **crit** (`critChance`/×mult), **auto-capture**, and **hype** (multiplier / duration / cooldown). All are summed generically, so new upgrades just add their `effect`. The **Stats** menu (top-left) surfaces the live totals.
+| Floor | Upgrade | Effect | Resource | Base | Growth | Max |
+|---|---|---|---|---|---|---|
+| — | **Auto Explore** | +1 auto-search/sec (the drone) | Almond Water | 5 | 1.2× | 15 |
+| — | **Moth Powers** | +2 tap **&** auto power | Moths | 5 | 1.4× | 15 |
+| — | **Master Scav** | +5 tap **&** auto power | *cycles all floor resources* | 100 | 1.3× | 31 |
+| 1 | **Sharp Eye** | +1 tap power | Wallpaper Strip | 5 | 1.2× | 15 |
+| 1 | **Trapper** | +1% moth auto-capture | Wallpaper Strip | 30 | 1.2× | 50 |
+| 2 | **Rally Cry** | +0.5s hype duration | Carpet Swatch | 50 | 1.3× | 30 |
+| 3 | **Lucky Find** | +1% crit chance (×3 dmg) | Ceiling Tile | 5 | 1.2× | 15 |
+| 4 | **Heavy Sweep** | +2 auto/sec per Explorer | Fluorescent Tube | 5 | 1.2× | 15 |
+| 4 | **Quality Find** | +1 yield on a quality find | Fluorescent Tube | 1000 | 1.5× | 2 |
+| 5 | **Quality Sense** | +0.25% quality chance | Cloth Scraps | 5 | 1.2× | 20 |
+| 6 | **Splinters** | +3 tap **&** Explorer power | Scrap Wood | 8 | 1.3× | 15 |
+| 7 | **Metal Head** | +0.2× crit damage | Scrap Metal | 12 | 1.35× | 15 |
+| 8 | **Stocked Shelves** | +0.5% Easy Access (½-HP nodes) | Copper Wire | 15 | 1.4× | 15 |
+
+> **The scaling rule** (floors 5→8): growth multiplier `1.2 → 1.3 → 1.35 → 1.4` (deltas taper: +0.10, +0.05, +0.05) and base cost `5 → 8 → 12 → 15` (~+3–4/floor). `maxLevel: 15` is the default. So floor 9 (Duct Tape) would land near **base ~18–20, growth ~1.45×** — new tiers can be *derived* from this curve rather than hand-tuned.
+
+Power comes in channels that stack and are summed generically (so a new upgrade just declares its `effect`): **tap-only** (`power`), **tap + auto** (`flatPower`), **tap + per-Explorer** (`tapExplorer`), **per-Explorer auto** (`explorerAuto`), plus standalone systems — **crit** (`critChance` + `critDamage` ×mult), **quality** (`quality` chance / `qualityYield`), **Easy Access** (`easyAccess`, ½-HP brittle nodes), **auto-capture**, and **hype** (duration). All damage resolves to **whole integers**. The **Stats** menu (top-left) surfaces the live totals.
+
+**Two meta-currency menus** sit alongside the resource upgrades, both spending/earning **Void Shards** (earned by maxing an upgrade or reaching a new floor):
+- **Shop** — permanent Void-Shard upgrades (flat `base + step×level` cost): *Search Upgrade*, *Hype Train*.
+- **Achievements** — tiered goals that pay scaling Void Shards on claim (e.g. *Pack Rat*: total resources), and grant a global **+0.5% auto-search per claimed tier** across all achievements.
 
 There are **31 hand-authored floors** that cycle forever — every full lap bumps the *tier* (a new color-grade + tougher danger), so the world re-skins itself endlessly with the same beloved locations.
 
@@ -174,7 +189,9 @@ Saves live in the SDK's `appStorage` under the key **`backrooms_save`** (offline
 **Done so far** (the active redesign)
 - ✅ Search/Integrity core loop with a **node respawn** lifecycle and clean hand-tuned HP + ×1.5 tail.
 - ✅ Rebuilt **upgrade system** (data-driven, progressive `unlockFloor` reveal, cycling cost resources, hide-maxed toggle).
-- ✅ **Crit** system (tap + auto, upgrade-gated), **Hype** burst, the **moth** collectible + auto-capture, **Stats** menu, per-tab alert dots, the running **Explorer** sprite.
+- ✅ **Crit** system (tap + auto, upgrade-gated, with upgradable crit *damage*), **Hype** burst, the **moth** collectible + auto-capture, **Stats** menu, per-tab alert dots, the running **Explorer** sprite.
+- ✅ **Quality / Mint / Easy-Access** node grades (yield + brittle-HP rolls), all-integer damage rounding.
+- ✅ **Void Shard** economy: a **Shop** of permanent upgrades and an **Achievements** menu (tiered, scaling rewards + a global auto-search bonus), earned by maxing upgrades / reaching new floors.
 
 **Near-term**
 - [ ] **The "other half" of balance** — *multiplicative* power upgrades (e.g. +%/level or ×per-tier) and/or prestige multipliers so power keeps pace with the ×1.5 HP curve (constant time-per-floor = no wall). The flat `+N` upgrades are early boosters only.

@@ -56,6 +56,11 @@ export function D(v: BigSource): Big {
   return RundotGameAPI.numbers.normalize(v) as Big;
 }
 
+/** Round a Big to the nearest integer (Big has floor() but no round()). */
+export function roundD(v: BigSource): Big {
+  return D(v).add(0.5).floor();
+}
+
 /**
  * Short idle-game display: "0".."999", then "1.23K".."9.99Dc" (decillion),
  * then scientific "1.23e+45". Never overflows or shows "Infinity".
