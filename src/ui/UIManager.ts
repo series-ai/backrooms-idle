@@ -179,6 +179,7 @@ export class UIManager {
   private activeTab = 'explore';
   private panels: Map<string, Phaser.GameObjects.Container> = new Map();
   private tabBGs: Map<string, Phaser.GameObjects.Rectangle> = new Map();
+  private tabActiveImgs: Map<string, Phaser.GameObjects.Image> = new Map();   // gradient pane on the active tab
 
   // Upgrade panel refs for live updates
   private upgCostLabels: Map<string, Phaser.GameObjects.Text> = new Map();
@@ -991,34 +992,34 @@ export class UIManager {
 
   private createTabBar(): void {
     const showVoid = this.state.prestigeCount > 0 || this.state.canRewind();
+    this.ensureUpgradeBtnTexture();   // the active tab wears the same gradient as buy buttons
 
-    // Two-row layout with full labels
+    // Two UNIFORM rows: every button the same size no matter how full its row
+    // is (short rows just center) — no more one-tab-spans-the-screen banners.
     const row1: { id: string; label: string }[] = [
-      { id: 'explore', label: 'EXPLORE' }, { id: 'items', label: 'ITEMS' }, { id: 'upgrades', label: 'UPGRADES' },
+      { id: 'explore', label: 'EXPLORE' }, { id: 'items', label: 'ITEMS' },
+      { id: 'upgrades', label: 'UPGRADES' }, { id: 'gear', label: 'GEAR' },
     ];
     const row2: { id: string; label: string }[] = showVoid
-      ? [{ id: 'void', label: 'VOID' }, { id: 'gear', label: 'GEAR' }, { id: 'shop', label: 'SHOP' }]
-      : [{ id: 'gear', label: 'GEAR' }, { id: 'shop', label: 'SHOP' }];
-    // 3rd row — Achievements lives here on its own for now.
-    const row3: { id: string; label: string }[] = [
-      { id: 'achievements', label: 'ACHIEVEMENTS' },
-    ];
+      ? [{ id: 'shop', label: 'SHOP' }, { id: 'void', label: 'VOID' }, { id: 'achievements', label: 'ACHIEVEMENTS' }]
+      : [{ id: 'shop', label: 'SHOP' }, { id: 'achievements', label: 'ACHIEVEMENTS' }];
 
-    const rowH = 42;
+    const rowH = 56;
     const rowGap = 8;
     const row1Y = LAYOUT.TAB_Y - rowGap / 2 - rowH / 2;
     const row2Y = LAYOUT.TAB_Y + rowGap / 2 + rowH / 2;
-    const row3Y = row2Y + rowH + rowGap;
     const totalPad = 20;
+    const gapX = 6;
+    const maxCols = Math.max(row1.length, row2.length);
+    const tabW = Math.floor((LAYOUT.GAME_WIDTH - totalPad - (maxCols - 1) * gapX) / maxCols);
 
     const buildRow = (tabs: { id: string; label: string }[], centerY: number) => {
       const count = tabs.length;
-      const tabW = Math.floor((LAYOUT.GAME_WIDTH - totalPad) / count) - 6;
-      const gap = tabW + 6;
-      const startX = Math.floor(totalPad / 2);
+      const rowW = count * tabW + (count - 1) * gapX;
+      const startX = (LAYOUT.GAME_WIDTH - rowW) / 2;
 
       for (let i = 0; i < count; i++) {
-        const x = startX + i * gap + tabW / 2;
+        const x = startX + i * (tabW + gapX) + tabW / 2;
         // Depth 30: ABOVE the content panels (15). Panel scroll lists are masked
         // to the content area, but masks don't clip INPUT — overflow rows sit
         // invisibly over the tab bar and would otherwise swallow tab clicks
@@ -1026,9 +1027,16 @@ export class UIManager {
         const bg = this.scene.add.rectangle(x, centerY, tabW, rowH, 0x222222)
           .setDepth(30)
           .setStrokeStyle(1, 0x444444);
-        const txt = makeText(this.scene, x, centerY, tabs[i].label, 17, '#888888', {
+        // Active-state gradient pane — hidden until showTab lights this tab up.
+        // Not interactive, so it never steals the rectangle's clicks.
+        const glow = this.scene.add.image(x, centerY, 'upg_btn_grad')
+          .setDisplaySize(tabW, rowH).setDepth(31).setVisible(false);
+        this.tabActiveImgs.set(tabs[i].id, glow);
+        const txt = makeText(this.scene, x, centerY, tabs[i].label, 16, '#888888', {
           fontStyle: 'bold',
-        }).setOrigin(0.5).setDepth(31);
+        }).setOrigin(0.5).setDepth(32);
+        // Long labels (ACHIEVEMENTS) shrink until they fit their button.
+        for (let size = 16; txt.width > tabW - 14 && size > 11; size--) txt.setFontSize(size);
 
         // Shop tab gets the Void Shard icon to the left of its label (icon + text
         // centered together within the button).
@@ -1037,7 +1045,7 @@ export class UIManager {
           const iconGap = 6;
           const icon = this.createIcon(0, centerY, 'void_shard', iconSize);
           if (icon) {
-            icon.setDepth(31);
+            icon.setDepth(32);
             const total = iconSize + iconGap + txt.width;
             icon.x = x - total / 2 + iconSize / 2;
             txt.setX(icon.x + iconSize / 2 + iconGap + txt.width / 2);
@@ -1057,7 +1065,7 @@ export class UIManager {
         // Alert dot (red circle + "!") in the tab's top-right corner — shown when
         // that tab has something waiting and you're on a DIFFERENT tab.
         if (tabId === 'upgrades' || tabId === 'explore' || tabId === 'achievements' || tabId === 'gear' || tabId === 'void') {
-          const dot = this.scene.add.container(x + tabW / 2 - 6, centerY - rowH / 2 + 4).setDepth(32);
+          const dot = this.scene.add.container(x + tabW / 2 - 6, centerY - rowH / 2 + 4).setDepth(33);
           const circle = this.scene.add.circle(0, 0, 11, 0xff3030).setStrokeStyle(2, 0x000000);
           const bang = makeText(this.scene, 0, 0, '!', 15, '#FFFFFF', { fontStyle: 'bold' }).setOrigin(0.5);
           dot.add([circle, bang]);
@@ -1069,7 +1077,6 @@ export class UIManager {
 
     buildRow(row1, row1Y);
     buildRow(row2, row2Y);
-    buildRow(row3, row3Y);
   }
 
   /** Show/hide the per-tab alert dots (only when you're on a different tab). */
@@ -2696,11 +2703,12 @@ export class UIManager {
     for (const [id, panel] of this.panels) {
       panel.setVisible(id === tab);
     }
-    // Update tab button visuals
+    // Update tab button visuals — the active tab wears the purple gradient
+    // (same language as every buy button); the rest stay dark.
     for (const [id, bg] of this.tabBGs) {
       const isActive = id === tab;
-      bg.setFillStyle(isActive ? 0x444444 : 0x222222);
-      bg.setStrokeStyle(1, isActive ? 0x888888 : 0x444444);
+      this.tabActiveImgs.get(id)?.setVisible(isActive);
+      bg.setStrokeStyle(1, isActive ? 0xa89bff : 0x444444);
       const txt = (bg as unknown as Record<string, Phaser.GameObjects.Text>).__tabTxt;
       if (txt) txt.setColor(isActive ? '#FFFFFF' : '#888888');
     }
