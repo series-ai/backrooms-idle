@@ -1,7 +1,7 @@
 import Phaser from 'phaser';
 import RundotGameAPI from '@series-inc/rundot-game-sdk/api';
 import { LAYOUT } from '../config';
-import { UPGRADES, RESOURCES, RESOURCE_ORDER, VOID_UPGRADES, REWIND_MIN_FLOOR, ABILITIES, GEAR, GEAR_SLOTS, GEAR_SLOT_ICONS, GEAR_SLOT_LABELS, gearEffectSummary, ENTITIES, SHOP_UPGRADES, ACHIEVEMENTS, FLOOR_BASE_STAGES, PETS, getTierColor, tierSuffix, getFloorOre, type UpgradeDef, type ShopUpgradeDef, type AchievementDef, type VoidUpgradeDef, type GearDef } from '../data/GameData';
+import { UPGRADES, RESOURCES, RESOURCE_ORDER, ORE_SEQUENCE, VOID_UPGRADES, REWIND_MIN_FLOOR, ABILITIES, GEAR, GEAR_SLOTS, GEAR_SLOT_ICONS, GEAR_SLOT_LABELS, gearEffectSummary, ENTITIES, SHOP_UPGRADES, ACHIEVEMENTS, FLOOR_BASE_STAGES, PETS, getTierColor, tierSuffix, getFloorOre, type UpgradeDef, type ShopUpgradeDef, type AchievementDef, type VoidUpgradeDef, type GearDef, type GearEffect } from '../data/GameData';
 import { fmt, D, type Big } from '../num';
 import type { GameEvent, OfflineSummary, LightingState } from '../GameState';
 import { GameState } from '../GameState';
@@ -84,6 +84,8 @@ export interface UICallbacks {
   onToggleHideMaxed: () => void;
   onCraftGear: (id: string) => void;
   onEquipGear: (id: string) => void;
+  onDismantleGear: (id: string) => void;   // scrap a benched piece for Scrap
+  onLevelGear: (id: string) => void;       // spend Scrap on +10% base effects
   onBuyShopUpgrade: (id: string) => void;
   onClaimAchievement: (id: string) => void;
   onResetProgress: () => void;
@@ -113,8 +115,10 @@ export class UIManager {
   private showcaseTier = 1;
   /** The player avatar running across the explore screen (run01..run04 cycle). */
   private buddyRunner: Phaser.GameObjects.Sprite | null = null;
-  /** Which buddy "suit" is active (1..6); future upgrades swap this. */
+  /** Which buddy "suit" is active (1..6) — follows the Gear Rating (state.buddySuit). */
   private buddySuit = 1;
+  /** Weapon in the runner's hands ('pistol'|'shotgun'|'AR'|'gun', null = unarmed). */
+  private buddyWeapon: string | null = null;
   /** What the avatar is currently doing — drives click interactions. */
   private buddyState: 'run' | 'stand' | 'chat' = 'run';
   /** Bouncing "HYPE!" prompt above the runner (shown when hype is available). */
@@ -159,6 +163,10 @@ export class UIManager {
 
   // Resource bar
   private resTexts: Map<string, Phaser.GameObjects.Text> = new Map();
+  // Items tab: per-resource rows, repacked by layoutItemRows() as floors unlock.
+  private itemRows: Map<string, Phaser.GameObjects.Container> = new Map();
+  private itemsScroll?: Phaser.GameObjects.Container;
+  private itemsMinScroll = 0;
   private floorCleared = false;                        // tracks the "Cleared!" flash on the counter
   private headerCard?: Phaser.GameObjects.Rectangle;   // top header panel (resizes per tab)
   private contentCard?: Phaser.GameObjects.Rectangle;  // main content panel (resizes per tab)
@@ -210,7 +218,14 @@ export class UIManager {
   private voidDragStartScroll = 0;
   private rewindBtn!: Phaser.GameObjects.Container;
   private rewindBtnBg!: Phaser.GameObjects.Rectangle;
-  private rewindPreviewText!: Phaser.GameObjects.Text;
+  // Rewind payout banner — the in-your-face "what THIS rewind pays" block.
+  private rewindBanner!: Phaser.GameObjects.Rectangle;
+  private rewindPayoutBig!: Phaser.GameObjects.Text;     // the huge "+N"
+  private rewindPayoutLabel!: Phaser.GameObjects.Text;   // "VOID FRAGMENTS" / lock reason
+  private rewindBonusLine!: Phaser.GameObjects.Text;     // shards + scrap extras
+  private rewindKeepLine!: Phaser.GameObjects.Text;      // what survives the reset
+  private rewindPulseTween?: Phaser.Tweens.Tween;
+  private rewindPulseOn = false;
 
   // Gear panel refs (slot summary + card grid; mirrors the shop panel)
   private gearSlotIcons: Map<string, Phaser.GameObjects.Image> = new Map();
@@ -226,6 +241,13 @@ export class UIManager {
   private gearBtnLabels: Map<string, Phaser.GameObjects.Text> = new Map();
   private gearCostIcons: Map<string, Phaser.GameObjects.Image> = new Map();
   private gearCards: Map<string, Phaser.GameObjects.Rectangle> = new Map();
+  // Scrap economy: the balance line + per-card SCRAP button (with tap-again confirm).
+  private gearScrapText!: Phaser.GameObjects.Text;
+  private gearScrapBtns: Map<string, Phaser.GameObjects.Image> = new Map();
+  private gearScrapLabels: Map<string, Phaser.GameObjects.Text> = new Map();
+  private gearScrapArmedAt: Map<string, number> = new Map();   // gear id → time of the first (arming) tap
+  private gearRows: Map<string, Phaser.GameObjects.Container> = new Map();
+  private gearFirstCardY = 0;   // grid top — relayoutGearRows packs visible cards from here
   private gearScroll?: Phaser.GameObjects.Container;
   private gearMinScroll = 0;
   private gearDragActive = false;
@@ -373,17 +395,27 @@ export class UIManager {
     this.showcaseKey = null;
   }
 
+  /** The run-cycle key for the current suit + weapon-in-hand. */
+  private buddyRunAnim(): string {
+    return `buddy${this.buddySuit}_run${this.buddyWeapon ? `_${this.buddyWeapon}` : ''}`;
+  }
+
   /**
-   * Swap the player avatar to a different buddy "suit" (1..6). Hook for a future
-   * cosmetic/upgrade path — each suit is its own sprite sheet, identically laid out.
+   * Re-read the avatar's look from the state: Gear Rating picks the buddy sheet
+   * (1..6, looping), the equipped weapon picks the armed run cycle. Called after
+   * any gear change; no-ops when nothing about the look changed.
    */
-  setBuddySuit(suit: number): void {
-    const n = Phaser.Math.Clamp(Math.floor(suit), 1, 6);
-    if (n === this.buddySuit || !this.buddyRunner) return;
-    this.buddySuit = n;
-    this.buddyRunner.setTexture(`buddy${n}`);
-    if (this.buddyState === 'run') this.buddyRunner.play(`buddy${n}_run`);
-    else if (this.buddyState === 'chat') this.buddyRunner.play(`buddy${n}_chat`);
+  syncBuddyAppearance(): void {
+    const suit = Phaser.Math.Clamp(this.state.buddySuit, 1, 6);
+    const weapon = this.state.buddyWeaponStyle;
+    if (suit === this.buddySuit && weapon === this.buddyWeapon) return;
+    const suitChanged = suit !== this.buddySuit;
+    this.buddySuit = suit;
+    this.buddyWeapon = weapon;
+    if (!this.buddyRunner) return;
+    if (suitChanged) this.buddyRunner.setTexture(`buddy${suit}`);
+    if (this.buddyState === 'run') this.buddyRunner.play(this.buddyRunAnim());
+    else if (this.buddyState === 'chat') this.buddyRunner.play(`buddy${suit}_chat`);
     else this.buddyRunner.setFrame(UIManager.BUDDY_STAND_FRAME);
   }
 
@@ -397,7 +429,7 @@ export class UIManager {
     this.hypePrompt?.setVisible(false);
     if (this.buddyRunner) {
       this.buddyState = 'run';
-      this.buddyRunner.play(`buddy${this.buddySuit}_run`);
+      this.buddyRunner.play(this.buddyRunAnim());
       this.buddyRunner.anims.timeScale = 2;
     }
   }
@@ -443,7 +475,7 @@ export class UIManager {
     this.buddyRunner.setFlipX(pointer.x < LAYOUT.CENTER_X);
     if (this.buddyState !== 'run') {
       this.buddyState = 'run';
-      this.buddyRunner.play(`buddy${this.buddySuit}_run`);
+      this.buddyRunner.play(this.buddyRunAnim());
     }
   }
 
@@ -667,6 +699,20 @@ export class UIManager {
       if (!obj) continue;
       this.scene.tweens.killTweensOf(obj);
       if (instant) (obj as Phaser.GameObjects.Image).setAlpha(alpha);
+      // The fluorescents don't fade up — they FLICKER on: stutter bursts with
+      // dead gaps between them, then hold. Fading out stays a smooth gutter.
+      else if (obj === this.lightOverlay && alpha > 0) {
+        this.scene.tweens.chain({
+          targets: obj,
+          tweens: [
+            { alpha, duration: 30, hold: 60 },
+            { alpha: 0.04, duration: 20, hold: 120 },
+            { alpha: alpha * 0.85, duration: 25, hold: 45 },
+            { alpha: 0.08, duration: 20, hold: 170 },
+            { alpha, duration: 35 },
+          ],
+        });
+      }
       else this.scene.tweens.add({ targets: obj, alpha, duration: 1600, ease: 'Sine.easeInOut' });
     }
     // Dust hangs in the light: emit only while bright (a stop lets the motes
@@ -873,15 +919,11 @@ export class UIManager {
   }
 
   /**
-   * "DEPTH: current / deepest" (e.g. DEPTH: 1 / 20) when on an earlier floor,
-   * or just "DEPTH: 20" when you're at your deepest. '' before the first descent.
+   * The floor number under the level name. Just where you ARE — the lifetime
+   * descent odometer (totalDepth) lives in the Stats modal, not the header.
    */
   private depthLabel(): string {
-    const s = this.state;
-    if (s.totalDepth <= 0 && s.prestigeCount <= 0) return '';
-    return s.currentLevel >= s.totalDepth
-      ? `DEPTH: ${s.totalDepth}`
-      : `DEPTH: ${s.currentLevel} / ${s.totalDepth}`;
+    return `FLOOR ${this.state.currentLevel}`;
   }
 
   /* ---- Status bars ---- */
@@ -1159,13 +1201,17 @@ export class UIManager {
     // and loops the run cycle so the screen always feels like forward motion.
     // The sprite sheet already bakes in its own shadow.
     const runnerY = iconCy - 330;
+    // The look follows the saved loadout from the first frame (Gear Rating suit
+    // + equipped weapon), so a scene rebuild never flashes the default skin.
+    this.buddySuit = Phaser.Math.Clamp(this.state.buddySuit, 1, 6);
+    this.buddyWeapon = this.state.buddyWeaponStyle;
     this.buddyRunner = this.scene.add.sprite(cx, runnerY, `buddy${this.buddySuit}`)
       .setScale(1.7).setDepth(16);
     // Play the one-shot spawn ("appearing") animation, then settle into the run
     // loop. If the player taps him during the intro, the click handler takes over.
     this.buddyRunner.play(`buddy${this.buddySuit}_spawn`);
     this.buddyRunner.once(Phaser.Animations.Events.ANIMATION_COMPLETE, () => {
-      if (this.buddyState === 'run' && this.buddyRunner) this.buddyRunner.play(`buddy${this.buddySuit}_run`);
+      if (this.buddyState === 'run' && this.buddyRunner) this.buddyRunner.play(this.buddyRunAnim());
     });
     panel.add(this.buddyRunner);
 
@@ -1273,6 +1319,28 @@ export class UIManager {
     if (!force && now - this.lastPulseTime < PULSE_THROTTLE_MS) return;
     this.lastPulseTime = now;
 
+    // During an encounter the entity covers the node and taps hit IT — so IT
+    // reacts (recoil + red hit-flash), not the ore icon hidden underneath.
+    const foe = this.entityShownId
+      ? (this.entityImg?.visible ? this.entityImg
+        : this.entityEmoji?.visible ? this.entityEmoji : undefined)
+      : undefined;
+    if (foe) {
+      const base = foe === this.entityImg ? 300 / ICON_NATIVE : 1;
+      this.scene.tweens.killTweensOf(foe);
+      foe.setAlpha(1);
+      foe.setScale(base * 0.9);
+      foe.setTint(0xff7777);
+      foe.angle = 0;
+      this.scene.tweens.add({ targets: foe, scale: base, duration: 240, ease: 'Back.easeOut' });
+      this.scene.tweens.add({
+        targets: foe, angle: [6, -4, 2, 0], duration: 300, ease: 'Sine.easeInOut',
+        onComplete: () => { foe.angle = 0; },
+      });
+      this.scene.time.delayedCall(90, () => foe.clearTint());
+      return;
+    }
+
     const s = 320 / ICON_NATIVE;
     this.scene.tweens.killTweensOf(this.showcaseBig);
     this.showcaseBig.setScale(s * 0.93);
@@ -1322,42 +1390,40 @@ export class UIManager {
 
   private createItemsPanel(): void {
     const panel = this.scene.add.container(0, 0).setDepth(15);
-    const startY = LAYOUT.CONTENT_TOP_WIDE + 10;
-    const rowH = 75;
 
-    // Scrollable container — the resource list is far taller than the screen now.
+    // Scrollable container — rows are positioned by layoutItemRows(), which
+    // also hides resources from floors you haven't reached this run (so the
+    // list only ever shows what you've actually seen).
     const scrollContainer = this.scene.add.container(0, 0);
+    this.itemsScroll = scrollContainer;
     const contentH = LAYOUT.CONTENT_BOTTOM_WIDE - LAYOUT.CONTENT_TOP_WIDE - 10;
 
-    for (let i = 0; i < RESOURCE_ORDER.length; i++) {
-      const resId = RESOURCE_ORDER[i];
+    for (const resId of RESOURCE_ORDER) {
       const res = RESOURCES[resId];
-      const y = startY + i * rowH;
-      const row = this.scene.add.container(0, 0);
+      // Row children use LOCAL offsets; the row container itself is slotted
+      // into place (row.y) by layoutItemRows.
+      const row = this.scene.add.container(0, 0).setVisible(false);
 
       // Resource icon + name (left) + count (right) — same line
-      const icon = this.createIcon(60, y + 14, resId, 100);
+      const icon = this.createIcon(60, 14, resId, 100);
       if (icon) {
         row.add(icon);
-        const nameTxt = makeText(this.scene, 120, y, res.name, 22, '#EEEEEE');
-        row.add(nameTxt);
+        row.add(makeText(this.scene, 120, 0, res.name, 22, '#EEEEEE'));
       } else {
-        const nameTxt = makeText(this.scene, 40, y, `${res.icon}  ${res.name}`, 22, '#EEEEEE');
-        row.add(nameTxt);
+        row.add(makeText(this.scene, 40, 0, `${res.icon}  ${res.name}`, 22, '#EEEEEE'));
       }
-      const countTxt = makeText(this.scene, 680, y + 2, `x${fmt(this.state.resources[resId] ?? D(0))}`, 22, '#FFD700', {
+      const countTxt = makeText(this.scene, 680, 2, `x${fmt(this.state.resources[resId] ?? D(0))}`, 22, '#FFD700', {
         fontStyle: 'bold',
       }).setOrigin(1, 0);
       row.add(countTxt);
       this.resTexts.set(`item_${resId}`, countTxt);
 
       // Description (left) + use button (right) — same line
-      const descTxt = makeText(this.scene, icon ? 120 : 60, y + 30, res.description, 16, '#AAAAAA');
-      row.add(descTxt);
+      row.add(makeText(this.scene, icon ? 120 : 60, 30, res.description, 16, '#AAAAAA'));
 
       if (res.usable && res.useLabel) {
         const label = res.useLabel;
-        const btn = makeBtn(this.scene, 640, y + 40, label, 100, 32, 0x334433, () => {
+        const btn = makeBtn(this.scene, 640, 40, label, 100, 32, 0x334433, () => {
           if (resId === 'almond_water') this.cb.onHeal();
           else if (resId === 'canned_food') this.cb.onEat();
         });
@@ -1365,6 +1431,7 @@ export class UIManager {
       }
 
       scrollContainer.add(row);
+      this.itemRows.set(resId, row);
     }
 
     panel.add(scrollContainer);
@@ -1375,40 +1442,65 @@ export class UIManager {
     maskGfx.fillRect(0, LAYOUT.CONTENT_TOP_WIDE, LAYOUT.GAME_WIDTH, contentH);
     panel.setMask(maskGfx.createGeometryMask());
 
-    // Drag to scroll when the list overflows.
-    const totalH = RESOURCE_ORDER.length * rowH;
-    if (totalH > contentH) {
-      const dragZone = this.scene.add.rectangle(
-        LAYOUT.CENTER_X, LAYOUT.CONTENT_TOP_WIDE + contentH / 2,
-        LAYOUT.GAME_WIDTH, contentH, 0x000000, 0,
-      ).setDepth(16).setInteractive();
+    // Drag to scroll. The scroll floor (itemsMinScroll) is recomputed by
+    // layoutItemRows as the visible list grows past the viewport.
+    const dragZone = this.scene.add.rectangle(
+      LAYOUT.CENTER_X, LAYOUT.CONTENT_TOP_WIDE + contentH / 2,
+      LAYOUT.GAME_WIDTH, contentH, 0x000000, 0,
+    ).setDepth(16).setInteractive();
 
-      let dragging = false;
-      let lastY = 0;
-      const minScroll = -(totalH - contentH);
+    let dragging = false;
+    let lastY = 0;
 
-      dragZone.on('pointerdown', (_p: Phaser.Input.Pointer) => {
-        dragging = true;
-        lastY = _p.y;
-      });
-      this.scene.input.on('pointermove', (_p: Phaser.Input.Pointer) => {
-        if (!dragging || !this.panels.get('items')?.visible) return;
-        const dy = _p.y - lastY;
-        lastY = _p.y;
-        scrollContainer.y = Phaser.Math.Clamp(scrollContainer.y + dy, minScroll, 0);
-      });
-      this.scene.input.on('pointerup', () => { dragging = false; });
+    dragZone.on('pointerdown', (_p: Phaser.Input.Pointer) => {
+      dragging = true;
+      lastY = _p.y;
+    });
+    this.scene.input.on('pointermove', (_p: Phaser.Input.Pointer) => {
+      if (!dragging || !this.panels.get('items')?.visible) return;
+      const dy = _p.y - lastY;
+      lastY = _p.y;
+      scrollContainer.y = Phaser.Math.Clamp(scrollContainer.y + dy, this.itemsMinScroll, 0);
+    });
+    this.scene.input.on('pointerup', () => { dragging = false; });
 
-      // Mouse-wheel scroll for PC players.
-      this.scene.input.on('wheel', (_p: Phaser.Input.Pointer, _o: unknown, _dx: number, dy: number) => {
-        if (!this.panels.get('items')?.visible) return;
-        scrollContainer.y = Phaser.Math.Clamp(scrollContainer.y - dy, minScroll, 0);
-      });
+    // Mouse-wheel scroll for PC players.
+    this.scene.input.on('wheel', (_p: Phaser.Input.Pointer, _o: unknown, _dx: number, dy: number) => {
+      if (!this.panels.get('items')?.visible) return;
+      scrollContainer.y = Phaser.Math.Clamp(scrollContainer.y - dy, this.itemsMinScroll, 0);
+    });
 
-      panel.add(dragZone);
-    }
+    panel.add(dragZone);
 
     this.panels.set('items', panel);
+    this.layoutItemRows();
+  }
+
+  /**
+   * Show only the resources you've SEEN this run — a floor's ore appears once
+   * that floor is unlocked (or you're holding some, e.g. Moths), everything
+   * deeper stays hidden. Visible rows pack together; scroll bounds follow.
+   */
+  private layoutItemRows(): void {
+    const startY = LAYOUT.CONTENT_TOP_WIDE + 10;
+    const rowH = 75;
+    const contentH = LAYOUT.CONTENT_BOTTOM_WIDE - LAYOUT.CONTENT_TOP_WIDE - 10;
+    const maxUnlocked = Math.max(0, ...this.state.unlockedLevels);
+    let visIdx = 0;
+    RESOURCE_ORDER.forEach((resId, i) => {
+      const row = this.itemRows.get(resId);
+      if (!row) return;
+      const owned = (this.state.resources[resId] ?? D(0)).gt(0);
+      // Ore rows unlock with their floor (tier laps re-use the same row);
+      // floor-independent extras (Moth) show once you hold any.
+      const seen = (i < ORE_SEQUENCE.length && i <= maxUnlocked) || owned;
+      row.setVisible(seen);
+      if (seen) row.y = startY + (visIdx++) * rowH;   // slot into the packed list
+    });
+    this.itemsMinScroll = Math.min(0, -(visIdx * rowH - contentH));
+    if (this.itemsScroll) {
+      this.itemsScroll.y = Phaser.Math.Clamp(this.itemsScroll.y, this.itemsMinScroll, 0);
+    }
   }
 
   /* ---- Upgrade panel ---- */
@@ -1637,9 +1729,43 @@ export class UIManager {
       13, '#8888AA').setOrigin(0.5, 0);
     scrollContainer.add(earnInfo);
 
-    // Rewind block: the big button, its payout preview, and lifetime stats.
+    // ---- Rewind payout banner — the headline of the tab. A big card that
+    // shouts what THIS rewind pays right now: huge fragment count (pulsing
+    // when there's something to take), shard/scrap extras, and a "you keep"
+    // line so the reset never feels like losing everything. ----
     const canRewind = this.state.canRewind();
-    const rewindBtnY = headerY + 96;
+    const bannerTop = headerY + 64;
+    const bannerH = 150;
+    this.rewindBanner = this.scene.add.rectangle(cx, bannerTop + bannerH / 2, 660, bannerH, 0x2a2040, 1)
+      .setStrokeStyle(2, 0x8855CC);
+    scrollContainer.add(this.rewindBanner);
+    // Oversized fragment icon anchors the banner's left side.
+    const bigFrag = this.createIcon(120, bannerTop + 58, 'void_fragment', 100);
+    if (bigFrag) scrollContainer.add(bigFrag);
+    this.rewindPayoutBig = makeText(this.scene, bigFrag ? 185 : 60, bannerTop + 40, '+0', 44, '#FFD700', {
+      fontStyle: 'bold', stroke: '#000000', strokeThickness: 5,
+    }).setOrigin(0, 0.5);
+    scrollContainer.add(this.rewindPayoutBig);
+    this.rewindPayoutLabel = makeText(this.scene, bigFrag ? 185 : 60, bannerTop + 70, 'VOID FRAGMENTS', 15, '#CC88FF', {
+      fontStyle: 'bold',
+    }).setOrigin(0, 0);
+    scrollContainer.add(this.rewindPayoutLabel);
+    this.rewindBonusLine = makeText(this.scene, cx, bannerTop + 102, '', 14, '#C0C8D0', {
+      align: 'center',
+    }).setOrigin(0.5, 0);
+    scrollContainer.add(this.rewindBonusLine);
+    this.rewindKeepLine = makeText(this.scene, cx, bannerTop + 126, '', 12, '#7777AA', {
+      align: 'center',
+    }).setOrigin(0.5, 0);
+    scrollContainer.add(this.rewindKeepLine);
+    // The +N heartbeat — resumed/paused by refreshVoidPanel with the payout.
+    this.rewindPulseTween = this.scene.tweens.add({
+      targets: this.rewindPayoutBig, scale: 1.08, duration: 640,
+      yoyo: true, repeat: -1, ease: 'Sine.easeInOut', paused: true,
+    });
+
+    // The REWIND button itself, right under the banner.
+    const rewindBtnY = bannerTop + bannerH + 40;
     const rewindBtnBg = this.scene.add.rectangle(0, 0, 420, 56, canRewind ? 0x553388 : 0x222233)
       .setOrigin(0.5).setStrokeStyle(2, canRewind ? 0x8855CC : 0x333344);
     const rwIcon = this.createIcon(-120, 0, 'rewind_button', 80);
@@ -1662,18 +1788,15 @@ export class UIManager {
     this.rewindBtnBg = rewindBtnBg;
     scrollContainer.add(this.rewindBtn);
 
-    this.rewindPreviewText = makeText(this.scene, cx, rewindBtnY + 38, '', 15, '#9999BB')
-      .setOrigin(0.5, 0);
-    scrollContainer.add(this.rewindPreviewText);
-    this.voidStatsLine = makeText(this.scene, cx, rewindBtnY + 62, '', 13, '#666688')
+    this.voidStatsLine = makeText(this.scene, cx, rewindBtnY + 36, '', 13, '#666688')
       .setOrigin(0.5, 0);
     scrollContainer.add(this.voidStatsLine);
 
-    const divider = this.scene.add.rectangle(cx, rewindBtnY + 92, 660, 2, 0x553388);
+    const divider = this.scene.add.rectangle(cx, rewindBtnY + 64, 660, 2, 0x553388);
     scrollContainer.add(divider);
 
     // Card grid of permanent void upgrades — same geometry as the shop cards.
-    const firstCardY = rewindBtnY + 106;
+    const firstCardY = rewindBtnY + 78;
     for (let i = 0; i < VOID_UPGRADES.length; i++) {
       const vup = VOID_UPGRADES[i];
       const row = this.scene.add.container(
@@ -1787,17 +1910,41 @@ export class UIManager {
 
     for (const vup of VOID_UPGRADES) this.renderVoidRow(vup);
 
-    // Rewind block: payout preview + lifetime stats + button state.
+    // Rewind payout banner: what THIS rewind pays, in headline type.
     const canRewind = this.state.canRewind();
-    if (canRewind) {
-      const frags = this.state.calculateRewindFragments();
-      const shards = frags > 0 ? this.state.rewindShardBonus : 0;   // Conduit pays only on a productive rewind
-      this.rewindPreviewText.setText(frags > 0
-        ? `Reset the run for +${frags} Fragments${shards > 0 ? ` and +${shards} Shard${shards === 1 ? '' : 's'}` : ''}.`
-        : `Descend past Floor ${this.state.rewindHeadStart} (your head start) to earn Fragments.`);
+    const frags = canRewind ? this.state.calculateRewindFragments() : 0;
+    const hot = canRewind && frags > 0;
+    if (!canRewind) {
+      this.rewindPayoutBig.setText('\u{1F512}').setColor('#666688');
+      this.rewindPayoutLabel.setText(`REACH FLOOR ${REWIND_MIN_FLOOR} TO UNLOCK`).setColor('#666688');
+      this.rewindBonusLine.setText('The Rewind resets the run and pays permanent Void Fragments.');
+    } else if (frags <= 0) {
+      this.rewindPayoutBig.setText('+0').setColor('#8888AA');
+      this.rewindPayoutLabel.setText('VOID FRAGMENTS').setColor('#8888AA');
+      this.rewindBonusLine.setText(`Descend past Floor ${this.state.rewindHeadStart} (your head start) to earn Fragments.`);
     } else {
-      this.rewindPreviewText.setText(`Reach Floor ${REWIND_MIN_FLOOR} to unlock the Rewind.`);
+      const shards = this.state.rewindShardBonus;   // Conduit pays only on a productive rewind
+      const scrapPreview = this.state.pendingRewindScrap;
+      this.rewindPayoutBig.setText(`+${frags}`).setColor('#FFD700');
+      this.rewindPayoutLabel.setText('VOID FRAGMENTS · READY NOW').setColor('#CC88FF');
+      const bonusBits: string[] = [];
+      if (shards > 0) bonusBits.push(`+${shards} Void Shard${shards === 1 ? '' : 's'}`);
+      if (scrapPreview > 0) bonusBits.push(`+${scrapPreview} Scrap (benched gear)`);
+      this.rewindBonusLine.setText(bonusBits.length > 0 ? `Plus: ${bonusBits.join('   ·   ')}` : '');
     }
+    this.rewindKeepLine.setText('You keep: equipped gear · Scrap · pets · bases · shards · Void upgrades');
+    this.rewindBanner.setFillStyle(hot ? 0x2a2040 : 0x1e1c2a);
+    this.rewindBanner.setStrokeStyle(2, hot ? 0x8855CC : 0x3a3a55);
+    // Heartbeat only while there's a payout to grab.
+    if (hot !== this.rewindPulseOn) {
+      this.rewindPulseOn = hot;
+      if (hot) this.rewindPulseTween?.play();   // play() also wakes a created-paused tween
+      else {
+        this.rewindPulseTween?.pause();
+        this.rewindPayoutBig.setScale(1);
+      }
+    }
+
     this.voidStatsLine?.setText(
       `Rewinds: ${this.state.prestigeCount}  ·  Lifetime depth: ${this.state.totalDepth}  ·  Deepest this run: ${this.state.deepestFloorThisRun}`,
     );
@@ -1811,7 +1958,10 @@ export class UIManager {
 
   // Gear card internals: standard card frame plus an effects line (green) and a
   // flavor line, with the item's SLOT as a badge where upgrade cards show Lv.
-  private static readonly GEAR_SLOT_BOX = 132;   // slot summary box size
+  private static readonly GEAR_SLOT_BOX = 118;    // slot summary box size (5 across)
+  private static readonly GEAR_HALF_BTN_W = 150;  // EQUIP/SCRAP side-by-side button width
+  private static readonly GEAR_SLOT_X0 = 72;      // first slot box center x
+  private static readonly GEAR_SLOT_PITCH = 144;  // slot box spacing (720 / 5)
 
   private createGearPanel(): void {
     const panel = this.scene.add.container(0, 0).setDepth(15);
@@ -1833,8 +1983,8 @@ export class UIManager {
     const boxCY = headerY + 26 + box / 2;
     for (let i = 0; i < GEAR_SLOTS.length; i++) {
       const slot = GEAR_SLOTS[i];
-      const sx = 90 + i * 180;
-      scrollContainer.add(makeText(this.scene, sx, headerY, `${GEAR_SLOT_ICONS[slot]} ${GEAR_SLOT_LABELS[slot]}`, 14, '#AAAAAA', { fontStyle: 'bold' }).setOrigin(0.5, 0));
+      const sx = UIManager.GEAR_SLOT_X0 + i * UIManager.GEAR_SLOT_PITCH;
+      scrollContainer.add(makeText(this.scene, sx, headerY, `${GEAR_SLOT_ICONS[slot]} ${GEAR_SLOT_LABELS[slot]}`, 13, '#AAAAAA', { fontStyle: 'bold' }).setOrigin(0.5, 0));
       const slotBox = this.scene.add.rectangle(sx, boxCY, box, box, 0x1e1e1e, 1)
         .setStrokeStyle(1, 0x3a3a3a);
       scrollContainer.add(slotBox);
@@ -1843,7 +1993,7 @@ export class UIManager {
       scrollContainer.add(emptyTxt);
       this.gearSlotEmpty.set(slot, emptyTxt);
       const nameTxt = makeText(this.scene, sx, boxCY + box / 2 + 6, '', 12, '#CCCCCC', {
-        align: 'center', wordWrap: { width: 170 }, maxLines: 2,
+        align: 'center', wordWrap: { width: UIManager.GEAR_SLOT_PITCH - 8 }, maxLines: 2,
       }).setOrigin(0.5, 0);
       scrollContainer.add(nameTxt);
       this.gearSlotNames.set(slot, nameTxt);
@@ -1855,18 +2005,27 @@ export class UIManager {
     }).setOrigin(0.5, 0);
     scrollContainer.add(this.gearBonusText);
 
-    const dividerY = boxCY + box / 2 + 106;
+    // Scrap balance — earned by dismantling gear, spent on gear levels.
+    this.gearScrapText = makeText(this.scene, cx, boxCY + box / 2 + 96, '', 16, '#C0C8D0', {
+      fontStyle: 'bold',
+    }).setOrigin(0.5, 0);
+    scrollContainer.add(this.gearScrapText);
+
+    const dividerY = boxCY + box / 2 + 128;
     const divider = this.scene.add.rectangle(cx, dividerY, 660, 2, 0x444444);
     scrollContainer.add(divider);
 
     // Card grid of every gear item (craft → equip), same geometry as upgrades.
+    // Scrapped items hide until Rewind; relayoutGearRows() packs the survivors.
     const firstCardY = dividerY + 14;
+    this.gearFirstCardY = firstCardY;
     for (let i = 0; i < GEAR.length; i++) {
       const gear = GEAR[i];
       const row = this.scene.add.container(
         UIManager.UPG_GRID_X + (i % 2) * UIManager.UPG_COL_W,
         firstCardY + Math.floor(i / 2) * rowH,
       );
+      this.gearRows.set(gear.id, row);
 
       const nameIcon = gear.iconTexture ? this.createIcon(LX + 16, 14, gear.iconTexture, 40) : null;
       if (nameIcon) this.gearNameIcons.set(gear.id, nameIcon);
@@ -1886,6 +2045,8 @@ export class UIManager {
         .setOrigin(1, 0);
       this.gearSlotBadges.set(gear.id, slotTxt);
 
+      // Main button: CRAFT (not owned) / EQUIP (benched) / LEVEL UP (equipped).
+      // renderGearRow resizes it to half-width when the SCRAP button joins it.
       const btnBg = this.scene.add.image(LX + BW / 2, BCY, 'upg_btn_grad')
         .setInteractive({ useHandCursor: true });
       btnBg.on('pointerdown', () => btnBg.setScale(0.96));
@@ -1893,9 +2054,34 @@ export class UIManager {
       btnBg.on('pointerup', (p: Phaser.Input.Pointer) => {
         btnBg.setScale(1);
         if (this.gearDragMoved || !this.inWideContent(p)) return;
-        if (this.state.gearIsOwned(gear.id)) this.cb.onEquipGear(gear.id);
+        if (this.state.gearIsEquipped(gear.id)) this.cb.onLevelGear(gear.id);
+        else if (this.state.gearIsOwned(gear.id)) this.cb.onEquipGear(gear.id);
         else this.cb.onCraftGear(gear.id);
       });
+      // SCRAP button (benched gear only): tap once to arm ("SURE?"), again to
+      // dismantle — a crafted piece is gone for the run, so no one-tap accidents.
+      const scrapBtn = this.scene.add.image(LX + BW - 75, BCY, 'upg_btn_grad')
+        .setDisplaySize(UIManager.GEAR_HALF_BTN_W, 50)
+        .setTint(0x777788)
+        .setInteractive({ useHandCursor: true });
+      scrapBtn.on('pointerup', (p: Phaser.Input.Pointer) => {
+        if (this.gearDragMoved || !this.inWideContent(p)) return;
+        const armedAt = this.gearScrapArmedAt.get(gear.id) ?? 0;
+        if (this.scene.time.now - armedAt < 2500) {
+          this.gearScrapArmedAt.delete(gear.id);
+          this.cb.onDismantleGear(gear.id);
+        } else {
+          this.gearScrapArmedAt.set(gear.id, this.scene.time.now);
+          this.gearScrapLabels.get(gear.id)?.setText('SCRAP?\nTAP AGAIN').setColor('#FF9966');
+          this.scene.time.delayedCall(2500, () => this.renderGearRow(gear));
+        }
+      });
+      const scrapLabel = makeText(this.scene, LX + BW - 75, BCY, '', 12, '#FFFFFF', {
+        fontStyle: 'bold', align: 'center',
+      }).setOrigin(0.5, 0.5);
+      this.gearScrapBtns.set(gear.id, scrapBtn);
+      this.gearScrapLabels.set(gear.id, scrapLabel);
+
       // Cost icon (first cost resource) — swapped/hidden by state in renderGearRow.
       const costIcon = this.createIcon(LX + 38, BCY, gear.cost[0].resourceId, 76);
       if (costIcon) this.gearCostIcons.set(gear.id, costIcon);
@@ -1909,7 +2095,7 @@ export class UIManager {
 
       row.add(card);
       if (nameIcon) row.add(nameIcon);
-      row.add([nameTxt, descTxt, flavorTxt, slotTxt, btnBg]);
+      row.add([nameTxt, descTxt, flavorTxt, slotTxt, btnBg, scrapBtn, scrapLabel]);
       if (costIcon) row.add(costIcon);
       row.add(costLabel);
 
@@ -1958,7 +2144,8 @@ export class UIManager {
   /**
    * Refresh one gear card through its states:
    *   locked (?????? until its floor) → CRAFT (cost per resource, owned/cost)
-   *   → EQUIP (owned, other item in slot) → EQUIPPED (gold-framed).
+   *   → EQUIP + SCRAP side-by-side (owned, benched) → LEVEL UP (equipped;
+   *   Scrap buys +10% of base effects per level) → SCRAPPED (gone this run).
    */
   private renderGearRow(gear: GearDef): void {
     const name = this.gearNameLabels.get(gear.id);
@@ -1970,6 +2157,21 @@ export class UIManager {
     const icon = this.gearCostIcons.get(gear.id);
     const label = this.gearBtnLabels.get(gear.id);
     const nameIcon = this.gearNameIcons.get(gear.id);
+    const scrapBtn = this.gearScrapBtns.get(gear.id);
+    const scrapLabel = this.gearScrapLabels.get(gear.id);
+
+    const LX = UIManager.UPG_LEFT;
+    const BW = UIManager.UPG_BTN_W;
+    // Default geometry: full-width main button, SCRAP hidden (states override).
+    bg?.setPosition(LX + BW / 2, UIManager.UPG_BTN_CY).setDisplaySize(BW, 50);
+    label?.setX(LX + BW / 2);
+    scrapBtn?.setVisible(false);
+    if (scrapBtn?.input) scrapBtn.input.enabled = false;
+    scrapLabel?.setVisible(false);
+    // The SCRAP confirm survives re-renders (this runs every tick while the tab
+    // is open) — only an EXPIRED arming is dropped.
+    const armed = this.scene.time.now - (this.gearScrapArmedAt.get(gear.id) ?? -Infinity) < 2500;
+    if (!armed) this.gearScrapArmedAt.delete(gear.id);
 
     if (!this.state.isGearUnlocked(gear.id)) {
       name?.setText('??????').setColor('#888888');
@@ -1986,34 +2188,55 @@ export class UIManager {
       return;
     }
 
+    const lvl = this.state.getGearLevel(gear.id);
     name?.setText(gear.name).setColor('#EEEEEE');
-    desc?.setText(gearEffectSummary(gear)).setColor('#9fd0a0');
+    desc?.setText(gearEffectSummary(gear) + (lvl > 0 ? `  (+${lvl * 10}%)` : '')).setColor('#9fd0a0');
     flavor?.setText(gear.description).setColor('#888888');
     badge?.setVisible(true);
     nameIcon?.setVisible(true);
 
     const owned = this.state.gearIsOwned(gear.id);
     const equipped = this.state.gearIsEquipped(gear.id);
+    badge?.setText(`${GEAR_SLOT_LABELS[gear.slot]}${owned ? ` · Lv ${lvl}` : ''}`);
 
     if (equipped) {
-      // In the slot right now: gold-framed card, no button needed.
+      // In the slot right now: gold-framed card; the button spends Scrap on levels.
       card?.setAlpha(1).setStrokeStyle(2, 0xFFD24A);
-      bg?.setVisible(false);
-      if (bg?.input) bg.input.enabled = false;
       icon?.setVisible(false);
-      label?.setText('EQUIPPED ✓').setColor('#FFD24A').setAlpha(1);
+      const cost = this.state.gearLevelUpCost(gear.id);
+      if (cost === null) {
+        bg?.setVisible(false);
+        if (bg?.input) bg.input.enabled = false;
+        label?.setText('EQUIPPED ✓ · Lv MAX').setColor('#FFD24A').setAlpha(1);
+      } else {
+        const canLevel = this.state.canLevelGear(gear.id);
+        bg?.setVisible(true).clearTint().setAlpha(canLevel ? 1 : 0.35);
+        if (bg?.input) bg.input.enabled = true;
+        label?.setText(`LEVEL UP → Lv ${lvl + 1}\n${fmt(this.state.scrap)}/${cost} Scrap`)
+          .setColor('#FFFFFF').setAlpha(canLevel ? 1 : 0.7);
+      }
       return;
     }
 
     card?.setAlpha(1).setStrokeStyle(1, 0x3a3a3a);
     if (owned) {
-      // Crafted but benched — one tap swaps it into its slot.
-      bg?.setVisible(true).clearTint().setAlpha(1);
+      // Benched: EQUIP on the left, SCRAP (tap-again confirm) on the right.
+      bg?.setVisible(true).clearTint().setAlpha(1)
+        .setPosition(LX + 75, UIManager.UPG_BTN_CY)
+        .setDisplaySize(UIManager.GEAR_HALF_BTN_W, 50);
       if (bg?.input) bg.input.enabled = true;
       icon?.setVisible(false);
-      label?.setText('EQUIP').setColor('#FFFFFF').setAlpha(1);
+      label?.setText('EQUIP').setColor('#FFFFFF').setAlpha(1).setX(LX + 75);
+      scrapBtn?.setVisible(true).setAlpha(1);
+      if (scrapBtn?.input) scrapBtn.input.enabled = true;
+      scrapLabel?.setVisible(true).setAlpha(1);
+      if (armed) scrapLabel?.setText('SCRAP?\nTAP AGAIN').setColor('#FF9966');
+      else scrapLabel?.setText(`SCRAP\n+${this.state.gearDismantleValue(gear.id)} Scrap`).setColor('#FFFFFF');
       return;
     }
+
+    // Dismantled gear doesn't render a state — its whole card is hidden by
+    // relayoutGearRows until a Rewind restocks the roster.
 
     // Craftable: per-resource "owned/cost Name" lines, faded until affordable.
     const canCraft = this.state.canAffordGear(gear.id);
@@ -2033,7 +2256,7 @@ export class UIManager {
     const scrollCont = gearPanel?.getAt(0) as Phaser.GameObjects.Container | undefined;
     for (let i = 0; i < GEAR_SLOTS.length; i++) {
       const slot = GEAR_SLOTS[i];
-      const sx = 90 + i * 180;
+      const sx = UIManager.GEAR_SLOT_X0 + i * UIManager.GEAR_SLOT_PITCH;
       const boxCY = LAYOUT.CONTENT_TOP_WIDE + 36 + UIManager.GEAR_SLOT_BOX / 2;
 
       const oldIcon = this.gearSlotIcons.get(slot);
@@ -2042,7 +2265,7 @@ export class UIManager {
       const id = this.state.gearEquipped[slot];
       const def = id ? GEAR.find((g) => g.id === id) : null;
       if (def) {
-        const gIcon = def.iconTexture ? this.createIcon(sx, boxCY, def.iconTexture, 96) : null;
+        const gIcon = def.iconTexture ? this.createIcon(sx, boxCY, def.iconTexture, 88) : null;
         if (gIcon && scrollCont) {
           scrollCont.add(gIcon);
           this.gearSlotIcons.set(slot, gIcon);
@@ -2051,30 +2274,63 @@ export class UIManager {
           // No texture: show the emoji in the box instead of the icon.
           this.gearSlotEmpty.get(slot)?.setVisible(true).setText(def.icon).setColor('#EEEEEE');
         }
-        this.gearSlotNames.get(slot)?.setText(def.name);
+        const lvl = this.state.getGearLevel(def.id);
+        this.gearSlotNames.get(slot)?.setText(`${def.name}${lvl > 0 ? ` Lv${lvl}` : ''}`);
       } else {
         this.gearSlotEmpty.get(slot)?.setVisible(true).setText('--').setColor('#555555');
         this.gearSlotNames.get(slot)?.setText('');
       }
     }
 
-    // Total loadout bonus line.
+    // Total loadout bonus line. Scrap levels make values fractional — strip noise.
     const parts: string[] = [];
+    const eff = (key: GearEffect) => +this.state.gearEffect(key).toFixed(1);
     const push = (val: number, text: string) => { if (val > 0) parts.push(text); };
-    push(this.state.gearEffect('tapMult'), `+${this.state.gearEffect('tapMult')}% tap`);
-    push(this.state.gearEffect('autoMult'), `+${this.state.gearEffect('autoMult')}% auto`);
-    push(this.state.gearEffect('critChance'), `+${this.state.gearEffect('critChance')}% crit`);
-    push(this.state.gearEffect('critDamage'), `+${this.state.gearEffect('critDamage')}x crit dmg`);
-    push(this.state.gearEffect('quality'), `+${this.state.gearEffect('quality')}% quality`);
-    push(this.state.gearEffect('mint'), `+${this.state.gearEffect('mint')}% mint`);
-    push(this.state.gearEffect('yield'), `+${this.state.gearEffect('yield')} yield`);
-    push(this.state.gearEffect('hypeDur'), `+${this.state.gearEffect('hypeDur')}% hype`);
-    push(this.state.gearEffect('respawn'), `${this.state.gearEffect('respawn')}% faster respawn`);
-    push(this.state.gearEffect('mothCatch'), `+${this.state.gearEffect('mothCatch')}% moth catch`);
-    push(this.state.gearEffect('easyAccess'), `+${this.state.gearEffect('easyAccess')}% easy access`);
+    push(eff('tapMult'), `+${eff('tapMult')}% tap`);
+    push(eff('autoMult'), `+${eff('autoMult')}% auto`);
+    push(eff('critChance'), `+${eff('critChance')}% crit`);
+    push(eff('critDamage'), `+${eff('critDamage')}x crit dmg`);
+    push(eff('quality'), `+${eff('quality')}% quality`);
+    push(eff('mint'), `+${eff('mint')}% mint`);
+    push(eff('yield'), `+${eff('yield')} yield`);
+    push(eff('hypeDur'), `+${eff('hypeDur')}% hype`);
+    push(eff('respawn'), `${eff('respawn')}% faster respawn`);
+    push(eff('mothCatch'), `+${eff('mothCatch')}% moth catch`);
+    push(eff('easyAccess'), `+${eff('easyAccess')}% easy access`);
+    push(eff('quiet'), `-${eff('quiet')}% noise`);
+    push(eff('repel'), `+${eff('repel')}% vs entities`);
     this.gearBonusText.setText(parts.length > 0 ? `Loadout: ${parts.join(' · ')}` : 'Nothing equipped — craft gear from your resources below.');
 
+    // Scrap balance + how the economy works, in one line.
+    this.gearScrapText.setText(`\u{1F529} Scrap: ${fmt(this.state.scrap)}  ·  Gear Rating: ${this.state.gearRating}`);
+
     for (const gear of GEAR) this.renderGearRow(gear);
+    this.relayoutGearRows();
+  }
+
+  /**
+   * Hide gear scrapped this run and pack the remaining cards into a flush
+   * two-column grid (same idea as the upgrades tab's hide-maxed restack).
+   * Scroll bounds follow the shorter list; everything returns after a Rewind.
+   */
+  private relayoutGearRows(): void {
+    let vis = 0;
+    for (const gear of GEAR) {
+      const row = this.gearRows.get(gear.id);
+      if (!row) continue;
+      const hidden = !this.state.gearIsOwned(gear.id) && this.state.gearIsDismantled(gear.id);
+      row.setVisible(!hidden);
+      if (hidden) continue;
+      row.x = UIManager.UPG_GRID_X + (vis % 2) * UIManager.UPG_COL_W;
+      row.y = this.gearFirstCardY + Math.floor(vis / 2) * UIManager.UPG_ROW_H;
+      vis++;
+    }
+    const contentH = LAYOUT.CONTENT_BOTTOM_WIDE - LAYOUT.CONTENT_TOP_WIDE - 10;
+    const totalH = (this.gearFirstCardY + Math.ceil(vis / 2) * UIManager.UPG_ROW_H) - (LAYOUT.CONTENT_TOP_WIDE + 10);
+    this.gearMinScroll = Math.min(0, contentH - totalH);
+    if (this.gearScroll) {
+      this.gearScroll.y = Phaser.Math.Clamp(this.gearScroll.y, this.gearMinScroll, 0);
+    }
   }
 
   /**
@@ -2821,6 +3077,8 @@ export class UIManager {
       const txt = this.resTexts.get(`item_${resId}`);
       if (txt) txt.setText(`x${fmt(this.state.resources[resId] ?? D(0))}`);
     }
+    // A new floor (or a first Moth) may have just revealed a row — repack.
+    this.layoutItemRows();
   }
 
   /**
@@ -2990,7 +3248,7 @@ export class UIManager {
 
   /* ---- VHS Rewind effect ---- */
 
-  playRewindEffect(fragments: number, shards: number, onComplete: () => void): void {
+  playRewindEffect(fragments: number, shards: number, scrapSalvaged: number, onComplete: () => void): void {
     const { GAME_WIDTH, GAME_HEIGHT } = LAYOUT;
 
     // VHS static overlay
@@ -3013,7 +3271,8 @@ export class UIManager {
     ).setOrigin(0.5).setDepth(402).setAlpha(0);
 
     const fragTxt = makeText(this.scene, GAME_WIDTH / 2, GAME_HEIGHT / 2 + 30,
-      `+${fragments} Void Fragments${shards > 0 ? `\n+${shards} Void Shard${shards === 1 ? '' : 's'}` : ''}`,
+      `+${fragments} Void Fragments${shards > 0 ? `\n+${shards} Void Shard${shards === 1 ? '' : 's'}` : ''}`
+      + (scrapSalvaged > 0 ? `\n+${scrapSalvaged} Scrap salvaged from benched gear` : ''),
       28, '#FFD700', { fontStyle: 'bold', align: 'center' },
     ).setOrigin(0.5).setDepth(402).setAlpha(0);
 
@@ -3202,12 +3461,14 @@ export class UIManager {
     const s = this.state;
     const rows: [string, string][] = [
       ['Rewinds', `${s.prestigeCount}`],
+      // Lifetime descent odometer — every floor ever descended, across all rewinds.
+      ['Lifetime floors descended', `${s.totalDepth.toLocaleString()}`],
       ['Tap power', fmt(s.clickPower)],
       ['Auto search', `${s.autoPerSecond}/s`],
       // Explorer 1's own auto power (shared per-Explorer power + its personal bonus;
       // excludes the drone). More Explorers will each get their own line here later.
       ['Explorer 1', `${s.explorerAuto(0)}/s auto`],
-      ['Lucky Find (Crit %)', `${Math.round(s.critChance * 100)}%  ×${s.critMult}`],
+      ['Lucky Find (Crit %)', `${Math.round(s.critChance * 100)}%  ×${+s.critMult.toFixed(2)}`],
       // (Super Crit row spliced in below when the Pet Lion is owned.)
       ['Node respawn', `${s.nodeRespawnTime} ms`],
       ['Hype boost', `×${s.hypeMultiplier} auto for ${s.hypeDuration / 1000}s`],

@@ -9,6 +9,12 @@ import {
   ABILITIES,
   GEAR,
   GEAR_SLOTS,
+  GEAR_LEVEL_MAX,
+  GEAR_LEVEL_BONUS,
+  GEAR_LEVEL_REFUND,
+  gearScrapValue,
+  gearLevelCost,
+  gearLevelInvested,
   ENTITIES,
   SHOP_UPGRADES,
   ACHIEVEMENTS,
@@ -21,6 +27,7 @@ import {
   type LevelDef,
   type GearSlot,
   type GearEffect,
+  type WeaponStyle,
   type EntityDef,
 } from './data/GameData';
 import { MAX_OFFLINE_TICKS, TICK_INTERVAL_MS } from './config';
@@ -59,9 +66,12 @@ export interface SaveData {
   // Milestones & discoveries
   claimedMilestones: Record<number, number[]>;
   memoryFragments: number;
-  // Gear (crafted loadout — resets on rewind like run upgrades)
+  // Gear (crafted loadout — EQUIPPED pieces survive a rewind; the rest scraps)
   gearOwned: string[];
   gearEquipped: Record<string, string | null>;
+  gearLevels?: Record<string, number>;   // gear id → Scrap level (lives on the item)
+  dismantledGear?: string[];             // scrapped this run — can't re-craft until Rewind
+  scrap?: number;                        // salvage currency (permanent, survives Rewind)
   // Void Shard shop
   voidShards: number;
   shopUpgrades: Record<string, number>;
@@ -186,10 +196,17 @@ export class GameState {
   claimedMilestones: Record<number, number[]> = {};
   memoryFragments = 0;
 
-  // Gear — the crafted scavenger loadout. Run-scoped (reset by Rewind, like
-  // run upgrades): re-gearing each run is part of the loop the Void accelerates.
+  // Gear — the crafted scavenger loadout. You escape a Rewind with what's ON
+  // you: equipped pieces (and their Scrap levels) survive; benched pieces are
+  // auto-dismantled into Scrap. Dismantled gear can't be re-crafted until the
+  // next Rewind (it's parts now) — that keeps craft→scrap loops from farming.
   gearOwned: string[] = [];
-  gearEquipped: Record<GearSlot, string | null> = { tool: null, light: null, pack: null, charm: null };
+  gearEquipped: Record<GearSlot, string | null> = { weapon: null, tool: null, light: null, pack: null, charm: null };
+  gearLevels: Record<string, number> = {};   // gear id → level (each = +10% base effects)
+  dismantledGear: string[] = [];             // scrapped this run
+  // Scrap — the salvage currency. PERMANENT (survives Rewind, like Void Shards).
+  scrap = 0;
+  lastRewindScrap = 0;   // benched gear auto-scrapped by the last rewind (transient, for the summary)
 
   // Void Shard shop — permanent across all rewinds
   voidShards = 0;
@@ -445,8 +462,12 @@ export class GameState {
   }
 
   canCraftGear(id: string): boolean {
-    return this.isGearUnlocked(id) && !this.gearIsOwned(id) && this.canAffordGear(id);
+    return this.isGearUnlocked(id) && !this.gearIsOwned(id)
+      && !this.gearIsDismantled(id) && this.canAffordGear(id);
   }
+
+  /** True once this item has been scrapped this run (parts now — craftable again after Rewind). */
+  gearIsDismantled(id: string): boolean { return this.dismantledGear.includes(id); }
 
   /** True if any gear is craftable right now — drives the Gear tab alert dot. */
   hasCraftableGear(): boolean {
@@ -474,16 +495,97 @@ export class GameState {
     return true;
   }
 
-  /** Sum one gear effect across the equipped loadout. */
+  /** Sum one gear effect across the equipped loadout (Scrap levels amplify each piece). */
   gearEffect(key: GearEffect): number {
     let total = 0;
     for (const slot of GEAR_SLOTS) {
       const id = this.gearEquipped[slot];
       if (!id) continue;
       const def = GEAR.find((g) => g.id === id);
-      total += def?.effects[key] ?? 0;
+      total += (def?.effects[key] ?? 0) * this.gearLevelMult(id);
+    }
+    // yield feeds resource counts directly — keep it an integer.
+    return key === 'yield' ? Math.round(total) : total;
+  }
+
+  /* ---- Scrap & gear levels (permanent — Scrap survives Rewind; levels live on the item) ---- */
+
+  getGearLevel(id: string): number { return this.gearLevels[id] ?? 0; }
+
+  /** Effect multiplier from an item's Scrap level: +10% of base per level. */
+  gearLevelMult(id: string): number { return 1 + GEAR_LEVEL_BONUS * this.getGearLevel(id); }
+
+  /** Scrap cost of an item's NEXT level, or null at the Lv cap. */
+  gearLevelUpCost(id: string): number | null {
+    const def = GEAR.find((g) => g.id === id);
+    const lvl = this.getGearLevel(id);
+    if (!def || lvl >= GEAR_LEVEL_MAX) return null;
+    return gearLevelCost(def, lvl);
+  }
+
+  canLevelGear(id: string): boolean {
+    const cost = this.gearLevelUpCost(id);
+    return this.gearIsOwned(id) && cost !== null && this.scrap >= cost;
+  }
+
+  /** Spend Scrap to raise an owned item one level (+10% of its base effects). */
+  levelGear(id: string): boolean {
+    if (!this.canLevelGear(id)) return false;
+    this.scrap -= this.gearLevelUpCost(id)!;
+    this.gearLevels[id] = this.getGearLevel(id) + 1;
+    return true;
+  }
+
+  /** Scrap paid if this item were dismantled: base value + 70% of level investment. */
+  gearDismantleValue(id: string): number {
+    const def = GEAR.find((g) => g.id === id);
+    if (!def) return 0;
+    return gearScrapValue(def) + Math.floor(GEAR_LEVEL_REFUND * gearLevelInvested(def, this.getGearLevel(id)));
+  }
+
+  /**
+   * Dismantle a BENCHED gear item (equipped gear must be swapped out first):
+   * bank its Scrap and lose the piece until the next Rewind.
+   */
+  dismantleGear(id: string): number {
+    if (!this.gearIsOwned(id) || this.gearIsEquipped(id)) return 0;
+    const value = this.gearDismantleValue(id);
+    this.gearOwned = this.gearOwned.filter((g) => g !== id);
+    delete this.gearLevels[id];
+    this.dismantledGear.push(id);
+    this.scrap += value;
+    return value;
+  }
+
+  /** Scrap the NEXT Rewind would salvage from benched gear (Void menu preview). */
+  get pendingRewindScrap(): number {
+    let total = 0;
+    for (const id of this.gearOwned) {
+      if (!this.gearIsEquipped(id)) total += this.gearDismantleValue(id);
     }
     return total;
+  }
+
+  /* ---- Gear Rating → the runner's look (buddy sheet + weapon-in-hand) ---- */
+
+  /** Gear Rating: 1 point per equipped piece + 1 per Scrap level on it. */
+  get gearRating(): number {
+    let rating = 0;
+    for (const slot of GEAR_SLOTS) {
+      const id = this.gearEquipped[slot];
+      if (id) rating += 1 + this.getGearLevel(id);
+    }
+    return rating;
+  }
+
+  /** Avatar sheet (1..6) from Gear Rating — every 5 rating = the next style, looping forever. */
+  get buddySuit(): number { return 1 + (Math.floor(this.gearRating / 5) % 6); }
+
+  /** Which weapon the runner carries in the run animation (null = unarmed). */
+  get buddyWeaponStyle(): WeaponStyle | null {
+    const id = this.gearEquipped['weapon'];
+    if (!id) return null;
+    return GEAR.find((g) => g.id === id)?.weaponStyle ?? null;
   }
 
   /* ---- Danger layer: Noise & entity encounters ---- *
@@ -1539,9 +1641,17 @@ export class GameState {
       this.upgrades[u.id] = 0;
     }
 
-    // Reset gear (crafted from run resources, so it rewinds with them)
-    this.gearOwned = [];
-    this.gearEquipped = { tool: null, light: null, pack: null, charm: null };
+    // Gear: you escape with what's ON you. Equipped pieces (and their Scrap
+    // levels) come along; everything benched is auto-dismantled into Scrap.
+    const scrapSalvaged = this.pendingRewindScrap;
+    const kept = new Set(Object.values(this.gearEquipped).filter(Boolean) as string[]);
+    for (const id of this.gearOwned) {
+      if (!kept.has(id)) delete this.gearLevels[id];
+    }
+    this.scrap += scrapSalvaged;
+    this.lastRewindScrap = scrapSalvaged;
+    this.gearOwned = [...kept];
+    this.dismantledGear = [];   // scrapped pieces become craftable again
 
     // Quiet halls again
     this.clearEntity();
@@ -1652,6 +1762,9 @@ export class GameState {
       // Gear
       gearOwned: [...this.gearOwned],
       gearEquipped: { ...this.gearEquipped },
+      gearLevels: { ...this.gearLevels },
+      dismantledGear: [...this.dismantledGear],
+      scrap: this.scrap,
       // Void Shard shop
       voidShards: this.voidShards,
       shopUpgrades: { ...this.shopUpgrades },
@@ -1737,11 +1850,14 @@ export class GameState {
     // random-drop equipment ids are silently dropped).
     this.gearOwned = (data.gearOwned ?? []).filter((id) => GEAR.some((g) => g.id === id));
     const savedGear = data.gearEquipped ?? {};
-    this.gearEquipped = { tool: null, light: null, pack: null, charm: null };
+    this.gearEquipped = { weapon: null, tool: null, light: null, pack: null, charm: null };
     for (const slot of GEAR_SLOTS) {
       const id = savedGear[slot];
       if (id && this.gearOwned.includes(id)) this.gearEquipped[slot] = id;
     }
+    this.gearLevels = data.gearLevels ?? {};
+    this.dismantledGear = data.dismantledGear ?? [];
+    this.scrap = data.scrap ?? 0;
 
     // Void Shard shop
     this.voidShards = data.voidShards ?? 0;

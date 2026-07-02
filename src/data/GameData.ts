@@ -931,14 +931,17 @@ export function getLevel(id: number): LevelDef {
 // Gear resets on Rewind like run upgrades — Deep Pockets / Void Resonance make
 // re-gearing fast, so the two menus interlock.
 
-export type GearSlot = 'tool' | 'light' | 'pack' | 'charm';
+export type GearSlot = 'weapon' | 'tool' | 'light' | 'pack' | 'charm';
 
-export const GEAR_SLOTS: GearSlot[] = ['tool', 'light', 'pack', 'charm'];
+/** Run-animation variants baked into every buddy sheet (run_pistol01.. etc.). */
+export type WeaponStyle = 'pistol' | 'shotgun' | 'AR' | 'gun';
+
+export const GEAR_SLOTS: GearSlot[] = ['weapon', 'tool', 'light', 'pack', 'charm'];
 export const GEAR_SLOT_ICONS: Record<GearSlot, string> = {
-  tool: '\u{1F527}', light: '\u{1F526}', pack: '\u{1F392}', charm: '\u{1F340}',
+  weapon: '\u{1F52B}', tool: '\u{1F527}', light: '\u{1F526}', pack: '\u{1F392}', charm: '\u{1F340}',
 };
 export const GEAR_SLOT_LABELS: Record<GearSlot, string> = {
-  tool: 'TOOL', light: 'LIGHT', pack: 'PACK', charm: 'CHARM',
+  weapon: 'WEAPON', tool: 'TOOL', light: 'LIGHT', pack: 'PACK', charm: 'CHARM',
 };
 
 /**
@@ -970,12 +973,28 @@ export interface GearDef {
   cost: { resourceId: string; amount: number }[];
   effects: Partial<Record<GearEffect, number>>;
   description: string;
+  weaponStyle?: WeaponStyle;   // weapon slot only: which run animation it puts in your hands
 }
 
-// Three items per slot, unlock floors staggered 2–26 so something new to
+// Three items per slot, unlock floors staggered 2–27 so something new to
 // build shows up every couple of floors. Costs are paid in the resources of
 // the floors around the unlock (deeper item → pricier, in deeper ore).
 export const GEAR: GearDef[] = [
+  // WEAPON — entity damage (the danger layer) + some tap power. Each one also
+  // physically appears in the runner's hands (weaponStyle → run animation).
+  { id: 'pipe_pistol', name: 'Pipe Pistol', icon: '\u{1F52B}', slot: 'weapon', unlockFloor: 5, weaponStyle: 'pistol',
+    cost: [{ resourceId: 'cloth_scraps', amount: 40 }, { resourceId: 'fluorescent_tube', amount: 30 }],
+    effects: { repel: 20, tapMult: 10 }, description: 'A pipe, a spring, one nail at a time.' },
+  { id: 'scrap_shotgun', name: 'Scrap Shotgun', icon: '\u{1F52B}', slot: 'weapon', unlockFloor: 11, weaponStyle: 'shotgun',
+    cost: [{ resourceId: 'scrap_metal', amount: 60 }, { resourceId: 'duct_tape', amount: 45 }],
+    effects: { repel: 45, tapMult: 20 }, description: 'Do not look down the barrel. It looks back.' },
+  { id: 'salvaged_ar', name: 'Salvaged AR', icon: '\u{1F52B}', slot: 'weapon', unlockFloor: 18, weaponStyle: 'AR',
+    cost: [{ resourceId: 'maps', amount: 55 }, { resourceId: 'notebook_page', amount: 45 }],
+    effects: { repel: 80, tapMult: 35 }, description: "Someone's last stand, refurbished." },
+  { id: 'impossible_gun', name: 'Impossible Gun', icon: '\u{1F52B}', slot: 'weapon', unlockFloor: 27, weaponStyle: 'gun',
+    cost: [{ resourceId: 'mannequin', amount: 60 }, { resourceId: 'bone_fragments', amount: 70 }],
+    effects: { repel: 140, tapMult: 55, critChance: 2 }, description: "It shouldn't fire. It does anyway." },
+
   // TOOL — tap power (the active half)
   { id: 'crowbar', name: 'Crowbar', icon: '\u{1F527}', iconTexture: 'crowbar', slot: 'tool', unlockFloor: 6,
     cost: [{ resourceId: 'scrap_wood', amount: 45 }, { resourceId: 'cloth_scraps', amount: 25 }],
@@ -1042,6 +1061,34 @@ export function gearEffectSummary(gear: GearDef): string {
   if (e.quiet) parts.push(`-${e.quiet}% noise`);
   if (e.repel) parts.push(`+${e.repel}% vs entities`);
   return parts.join(' · ');
+}
+
+/* ---- Scrap — the salvage currency (permanent, survives Rewind) ---- *
+ * Earned ONLY by dismantling gear: benched pieces by hand mid-run, and
+ * everything not on your body automatically when you Rewind. Spent on gear
+ * levels (each level = +10% of the item's base effects).                  */
+
+export const GEAR_LEVEL_MAX = 5;
+/** Extra effect per gear level: Lv N = base effects × (1 + N × this). */
+export const GEAR_LEVEL_BONUS = 0.1;
+/** Scrap refunded from a dismantled item's level investment (the rest is lost). */
+export const GEAR_LEVEL_REFUND = 0.7;
+
+/** Scrap paid for dismantling a gear item — deeper gear is worth more metal. */
+export function gearScrapValue(g: GearDef): number {
+  return 5 * Math.max(2, g.unlockFloor);
+}
+
+/** Scrap cost to raise a gear item from `level` to level+1 (level is 0-based). */
+export function gearLevelCost(g: GearDef, level: number): number {
+  return Math.round(gearScrapValue(g) * Math.pow(1.5, level));
+}
+
+/** Total Scrap spent reaching `level` (drives dismantle refunds). */
+export function gearLevelInvested(g: GearDef, level: number): number {
+  let total = 0;
+  for (let l = 0; l < level; l++) total += gearLevelCost(g, l);
+  return total;
 }
 
 /* ------------------------------------------------------------------ */

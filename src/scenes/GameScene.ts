@@ -160,6 +160,20 @@ export default class GameScene extends Phaser.Scene {
           repeat: 0,
         });
       }
+      // Armed run cycles — one per weaponStyle (equipped WEAPON gear swaps these
+      // in for the bare-handed run). Rows 14-17 of the sheet.
+      const weaponRows: Record<string, number> = { shotgun: 112, AR: 120, pistol: 128, gun: 136 };
+      for (const [style, first] of Object.entries(weaponRows)) {
+        const key = `buddy${i}_run_${style}`;
+        if (!this.anims.exists(key)) {
+          this.anims.create({
+            key,
+            frames: this.anims.generateFrameNumbers(`buddy${i}`, { frames: [first, first + 1, first + 2, first + 3] }),
+            frameRate: 4,
+            repeat: -1,
+          });
+        }
+      }
     }
 
     // Build UI
@@ -181,6 +195,8 @@ export default class GameScene extends Phaser.Scene {
       onToggleHideMaxed: () => this.handleToggleHideMaxed(),
       onCraftGear: (id) => this.handleCraftGear(id),
       onEquipGear: (id) => this.handleEquipGear(id),
+      onDismantleGear: (id) => this.handleDismantleGear(id),
+      onLevelGear: (id) => this.handleLevelGear(id),
       onBuyShopUpgrade: (id) => this.handleBuyShopUpgrade(id),
       onClaimAchievement: (id) => this.handleClaimAchievement(id),
       onResetProgress: () => this.handleResetProgress(),
@@ -509,7 +525,7 @@ export default class GameScene extends Phaser.Scene {
     const earned = this.state.rewind();
 
     // Play VHS effect, then rebuild the scene
-    this.ui.playRewindEffect(earned, earned > 0 ? this.state.rewindShardBonus : 0, () => {
+    this.ui.playRewindEffect(earned, earned > 0 ? this.state.rewindShardBonus : 0, this.state.lastRewindScrap, () => {
       // Restart the scene to fully rebuild UI (tab bar may change)
       this.saveGame();
       this.scene.restart();
@@ -564,6 +580,7 @@ export default class GameScene extends Phaser.Scene {
       });
       this.ui.updateResourceBar();
       this.ui.refreshGearPanel();
+      this.ui.syncBuddyAppearance();
       RundotGameAPI.analytics.recordCustomEvent('gear_crafted', {
         gear: id,
         level: this.state.currentLevel,
@@ -582,10 +599,40 @@ export default class GameScene extends Phaser.Scene {
         color: '#CCCCCC',
       });
       this.ui.refreshGearPanel();
+      this.ui.syncBuddyAppearance();
       RundotGameAPI.analytics.recordCustomEvent('gear_equipped', { gear: id });
       RundotGameAPI.triggerHapticAsync('light' as never);
       this.saveGame();
     }
+  }
+
+  private handleDismantleGear(id: string): void {
+    const gained = this.state.dismantleGear(id);
+    if (gained <= 0) return;
+    this.ui.addLogMessage({
+      type: 'system',
+      message: `Dismantled ${id.replace(/_/g, ' ')} → +${gained} Scrap`,
+      color: '#C0C8D0',
+    });
+    this.ui.refreshGearPanel();
+    RundotGameAPI.analytics.recordCustomEvent('gear_dismantled', { gear: id, scrap_gained: gained, scrap_total: this.state.scrap });
+    RundotGameAPI.triggerHapticAsync('medium' as never);
+    this.saveGame();
+  }
+
+  private handleLevelGear(id: string): void {
+    if (!this.state.levelGear(id)) return;
+    const lvl = this.state.getGearLevel(id);
+    this.ui.addLogMessage({
+      type: 'event',
+      message: `${id.replace(/_/g, ' ')} upgraded to Lv ${lvl} (+${lvl * 10}% effects)`,
+      color: '#FFD24A',
+    });
+    this.ui.refreshGearPanel();
+    this.ui.syncBuddyAppearance();   // levels feed Gear Rating → the runner's look
+    RundotGameAPI.analytics.recordCustomEvent('gear_leveled', { gear: id, gear_level: lvl, scrap_left: this.state.scrap });
+    RundotGameAPI.triggerHapticAsync('light' as never);
+    this.saveGame();
   }
 
   private handleBuyShopUpgrade(id: string): void {
