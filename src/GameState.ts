@@ -3,13 +3,13 @@ import {
   RESOURCES,
   ORE_SEQUENCE,
   VOID_UPGRADES,
-  PRESTIGE_TIERS,
+  LEGACY_VOID_REFUND,
+  REWIND_MIN_FLOOR,
+  rewindFragmentsFor,
   ABILITIES,
-  GEAR_POOL,
-  GEAR_TIER_VALUE,
-  GEAR_TIER_COLORS,
-  EQUIP_SLOTS,
-  RECIPES,
+  GEAR,
+  GEAR_SLOTS,
+  ENTITIES,
   SHOP_UPGRADES,
   ACHIEVEMENTS,
   FLOOR_BASE_STAGES,
@@ -19,9 +19,9 @@ import {
   getFloorOre,
   tierSuffix,
   type LevelDef,
-  type EquipSlot,
-  type GearDef,
-  type GearTier,
+  type GearSlot,
+  type GearEffect,
+  type EntityDef,
 } from './data/GameData';
 import { MAX_OFFLINE_TICKS, TICK_INTERVAL_MS } from './config';
 import { type Big, D, roundD } from './num';
@@ -59,11 +59,9 @@ export interface SaveData {
   // Milestones & discoveries
   claimedMilestones: Record<number, number[]>;
   memoryFragments: number;
-  // Equipment
-  equipment: Record<string, string | null>;
-  defeatedBosses: Record<number, boolean>;
-  torchTicks: number;
-  firesaltBombActive: boolean;
+  // Gear (crafted loadout — resets on rewind like run upgrades)
+  gearOwned: string[];
+  gearEquipped: Record<string, string | null>;
   // Void Shard shop
   voidShards: number;
   shopUpgrades: Record<string, number>;
@@ -77,7 +75,12 @@ export interface SaveData {
   lifetimeStructuresBuilt: number;             // floor-base stages constructed (Base Builder)
   lifetimePetLevelsGained: number;             // pet level-ups, excluding unlocks (Pet Trainer)
   lifetimeSuperCritsLanded: number;            // Pet Lion crit-on-crit hits (Super Crits)
+  lifetimeGearCrafted: number;                 // gear items ever crafted (Gear Head)
+  lifetimeEntitiesRepelled: number;            // entities driven off (Night Watch)
+  lifetimePhantomsCaught: number;              // phantoms clicked in the dark (Eyes in the Dark)
   achievementClaims: Record<string, number>;   // achievement id → tiers claimed
+  // Danger layer (an active encounter is NOT saved — it just despawns on reload)
+  noise: number;                               // 0-100; at 100 an entity finds you
   // Floor bases (permanent — never reset on rewind)
   floorBases: Record<number, number>;          // floor location (0-30) → base stage built
   // Pets (permanent — never reset on rewind)
@@ -130,6 +133,9 @@ export interface OfflineSummary {
   explorationGained: number;
 }
 
+/** The halls' ambient lighting — pure atmosphere with teeth (see advanceLighting). */
+export type LightingState = 'bright' | 'normal' | 'dark';
+
 /* ------------------------------------------------------------------ */
 /*  GameState                                                          */
 /* ------------------------------------------------------------------ */
@@ -180,11 +186,10 @@ export class GameState {
   claimedMilestones: Record<number, number[]> = {};
   memoryFragments = 0;
 
-  // Equipment (Phase 4)
-  equipment: Record<EquipSlot, string | null> = { head: null, body: null, feet: null, accessory: null };
-  defeatedBosses: Record<number, boolean> = {};
-  torchTicks = 0;
-  firesaltBombActive = false;
+  // Gear — the crafted scavenger loadout. Run-scoped (reset by Rewind, like
+  // run upgrades): re-gearing each run is part of the loop the Void accelerates.
+  gearOwned: string[] = [];
+  gearEquipped: Record<GearSlot, string | null> = { tool: null, light: null, pack: null, charm: null };
 
   // Void Shard shop — permanent across all rewinds
   voidShards = 0;
@@ -202,7 +207,26 @@ export class GameState {
   lifetimeStructuresBuilt = 0;
   lifetimePetLevelsGained = 0;
   lifetimeSuperCritsLanded = 0;
+  lifetimeGearCrafted = 0;
+  lifetimeEntitiesRepelled = 0;
   achievementClaims: Record<string, number> = {};
+
+  // Danger layer — searching is LOUD. Noise builds with every search (faster on
+  // high-danger floors); at 100% an entity from this floor's roster finds you.
+  // While it's here the node is blocked (the drone hides, taps hit the ENTITY):
+  // drive it off for a resource burst, or wait it out and lose the time.
+  noise = 0;                                  // 0-100 (%)
+  activeEntityId: string | null = null;       // entity harassing you — transient, not saved
+  entityPresence: Big = D(0);                 // remaining "presence" to drive off
+  entityPresenceMax: Big = D(1);
+  entityLeaveMsLeft = 0;                      // it gives up on its own when this hits 0
+
+  // Lighting — the halls drift between bright / normal / dark phases (transient,
+  // never saved). Dark: noise builds ×1.5 and phantoms appear (click for a
+  // bonus). Bright: moths visit 2× as often. Deeper floors skew darker.
+  lighting: LightingState = 'normal';
+  lightingMsLeft = 45_000;                    // current phase's remaining time
+  lifetimePhantomsCaught = 0;                 // Eyes in the Dark achievement
 
   // Floor bases — permanent per-floor construction (never reset). Keyed by floor
   // LOCATION (currentLevel % 31), so a base keeps paying out on deeper tier laps.
@@ -301,15 +325,18 @@ export class GameState {
   }
 
   /**
-   * Chance a search is a "lucky find" (crit). Base 0% — granted only by
-   * crit-chance upgrades (effect 'critChance', value in % per level). Capped 60%.
+   * Chance a search is a "lucky find" (crit). Base 0% — granted by crit-chance
+   * upgrades (effect 'critChance') and equipped gear. Capped 60%.
    */
   get critChance(): number {
-    return Math.min(0.6, this.sumEffect('critChance') / 100);
+    return Math.min(0.6, (this.sumEffect('critChance') + this.gearEffect('critChance')) / 100);
   }
 
-  /** Damage multiplier on a lucky find: base ×3, +0.2× per Metal Head level. */
-  get critMult(): number { return 3 + this.sumEffect('critDamage'); }
+  /** Damage multiplier on a lucky find: ×3 base + Metal Head + gear + Fragment Sight (void). */
+  get critMult(): number {
+    return 3 + this.sumEffect('critDamage') + this.gearEffect('critDamage')
+      + this.getVoidLevel('fragment_sight') * 0.25;
+  }
 
   /** Average damage multiplier from crits + super crits (folds them into offline auto). */
   get critMultiplierAvg(): number {
@@ -368,6 +395,9 @@ export class GameState {
   /** Pet Bear level — +5% Explorer power per level while hyped (+milestone bumps). */
   get petBearLevel(): number { return this.getPetLevel('pet_bear'); }
 
+  /** Black Cat level — +4% auto power vs entities per level (+milestone bumps). */
+  get petCatLevel(): number { return this.getPetLevel('pet_cat'); }
+
   /** Chance a LANDED crit rolls again into a Super Crit (Pet Lion: +1%/lvl). */
   get superCritChance(): number { return Math.min(1, this.petLionLevel / 100); }
 
@@ -380,9 +410,254 @@ export class GameState {
     return 2 + (this.petLionLevel >= 10 ? 1 : 0) + (this.petLionLevel >= 20 ? 1 : 0);
   }
 
-  /** Chance (0–1) a passing moth is auto-captured without a click — Trapper + Lamp Trap (+1%/lvl). */
+  /** Chance (0–1) a passing moth is auto-captured without a click — Trapper + Lamp Trap + gear. */
   get autoCaptureChance(): number {
-    return Math.min(1, (this.sumEffect('autoCapture') + this.lampTrapLevel) / 100);
+    return Math.min(1, (this.sumEffect('autoCapture') + this.lampTrapLevel + this.gearEffect('mothCatch')) / 100);
+  }
+
+  /** Multiplier on how OFTEN moths visit — Moth Lure (void) + bright lighting (2×). */
+  get mothRateMult(): number {
+    return (1 + this.getVoidLevel('moth_lure') * 0.1) * (this.lighting === 'bright' ? 2 : 1);
+  }
+
+  /* ---- Gear (crafted loadout — resets on Rewind) ---- */
+
+  /** True once this gear item has been crafted (this run). */
+  gearIsOwned(id: string): boolean { return this.gearOwned.includes(id); }
+
+  /** True while this gear item is in its slot. */
+  gearIsEquipped(id: string): boolean {
+    const def = GEAR.find((g) => g.id === id);
+    return !!def && this.gearEquipped[def.slot] === id;
+  }
+
+  /** Gear stays hidden ("??????") until its unlockFloor has been reached. */
+  isGearUnlocked(id: string): boolean {
+    const def = GEAR.find((g) => g.id === id);
+    if (!def) return false;
+    return this.unlockedLevels.includes(def.unlockFloor);
+  }
+
+  canAffordGear(id: string): boolean {
+    const def = GEAR.find((g) => g.id === id);
+    if (!def) return false;
+    return def.cost.every((c) => (this.resources[c.resourceId] ?? D(0)).gte(c.amount));
+  }
+
+  canCraftGear(id: string): boolean {
+    return this.isGearUnlocked(id) && !this.gearIsOwned(id) && this.canAffordGear(id);
+  }
+
+  /** True if any gear is craftable right now — drives the Gear tab alert dot. */
+  hasCraftableGear(): boolean {
+    return GEAR.some((g) => this.canCraftGear(g.id));
+  }
+
+  /** Craft a gear item: pay its resource cost, own it forever (this run), auto-equip it. */
+  craftGear(id: string): boolean {
+    const def = GEAR.find((g) => g.id === id);
+    if (!def || !this.canCraftGear(id)) return false;
+    for (const c of def.cost) {
+      this.resources[c.resourceId] = (this.resources[c.resourceId] ?? D(0)).sub(c.amount);
+    }
+    this.gearOwned.push(id);
+    this.gearEquipped[def.slot] = id;   // fresh gear goes straight on
+    this.lifetimeGearCrafted += 1;      // Gear Head achievement
+    return true;
+  }
+
+  /** Equip an owned gear item into its slot (swapping out whatever was there). */
+  equipGear(id: string): boolean {
+    const def = GEAR.find((g) => g.id === id);
+    if (!def || !this.gearIsOwned(id) || this.gearIsEquipped(id)) return false;
+    this.gearEquipped[def.slot] = id;
+    return true;
+  }
+
+  /** Sum one gear effect across the equipped loadout. */
+  gearEffect(key: GearEffect): number {
+    let total = 0;
+    for (const slot of GEAR_SLOTS) {
+      const id = this.gearEquipped[slot];
+      if (!id) continue;
+      const def = GEAR.find((g) => g.id === id);
+      total += def?.effects[key] ?? 0;
+    }
+    return total;
+  }
+
+  /* ---- Danger layer: Noise & entity encounters ---- *
+   * Noise is % per search, scaled by the floor's danger rating. At 100% an
+   * entity spawns with a "presence" pool proportional to the floor's node HP;
+   * taps drain it (the node is blocked meanwhile, and the drone hides). Driving
+   * it off pays a resource burst; ignoring it costs ENTITY_LEAVE_MS of idling. */
+  private static readonly ENTITY_LEAVE_MS = 45_000;
+  private static readonly NOISE_DECAY_PER_TICK = 0.5;   // fades while the drone is silent
+
+  get entityActive(): boolean { return this.activeEntityId !== null; }
+
+  /** The entity currently harassing you (null when the halls are quiet). */
+  get activeEntity(): EntityDef | null {
+    return this.activeEntityId ? ENTITIES[this.activeEntityId] ?? null : null;
+  }
+
+  /** Fraction (0-1) of searching noise removed — Soft Soles + gear. Capped 75%. */
+  get noiseReduction(): number {
+    return Math.min(0.75, (this.sumEffect('quiet') + this.gearEffect('quiet')) / 100);
+  }
+
+  /** Noise multiplier from the lighting: things hear you better in the dark. */
+  get lightingNoiseMult(): number { return this.lighting === 'dark' ? 1.5 : 1; }
+
+  /** Noise one TAP adds (%). Deeper danger = louder halls; the dark amplifies. */
+  get noisePerTap(): number {
+    return (0.22 + 0.025 * this.level.danger) * (1 - this.noiseReduction) * this.lightingNoiseMult;
+  }
+
+  /** Noise one drone TICK adds (%) — slower than tapping, so idle play is calmer. */
+  get noisePerTick(): number {
+    return (0.35 + 0.045 * this.level.danger) * (1 - this.noiseReduction) * this.lightingNoiseMult;
+  }
+
+  /** Damage multiplier against entities — Camera Flash + gear 'repel'. */
+  get repelMult(): number {
+    return 1 + (this.sumEffect('repel') + this.gearEffect('repel')) / 100;
+  }
+
+  /**
+   * Fraction (0-1) of AUTO power that keeps working against an entity each tick
+   * — the idle counterplay: Escape Plan (+7%/lvl) + the Black Cat (+4%/lvl).
+   * 0 by default, so un-upgraded encounters still stop the drone cold.
+   */
+  get autoRepelPct(): number {
+    return (this.sumEffect('autoRepel') + this.petCatLevel * 4) / 100;
+  }
+
+  /** Entity-presence multiplier from this floor's base (Watchtower). */
+  get basePresenceMult(): number {
+    return this.builtBaseStages.reduce((m, st) => m * (st.presenceMult ?? 1), 1);
+  }
+
+  /**
+   * How long an entity harasses you before giving up: 45s base, −3s per Umbral
+   * Veil (void), ×0.75 at Black Cat Lv 10, × this floor's Watchtower. Min 5s.
+   */
+  get entityLeaveMs(): number {
+    const base = GameState.ENTITY_LEAVE_MS - this.getVoidLevel('umbral_veil') * 3000;
+    const catMult = this.petCatLevel >= 10 ? 0.75 : 1;
+    const baseMult = this.builtBaseStages.reduce((m, st) => m * (st.leaveMult ?? 1), 1);
+    return Math.max(5000, base * catMult * baseMult);
+  }
+
+  /** Raise noise; at 100 the floor's roster rolls an entity. */
+  private addNoise(amount: number, events: GameEvent[]): void {
+    if (this.entityActive) return;   // it already found you
+    this.noise = Math.min(100, this.noise + amount);
+    if (this.noise >= 100) this.spawnEntity(events);
+  }
+
+  /** An entity finds you: presence scales with node HP AND danger; noise resets. */
+  private spawnEntity(events: GameEvent[]): void {
+    const roster = this.level.entityIds.filter((id) => ENTITIES[id]);
+    if (roster.length === 0) { this.noise = 0; return; }
+    const entity = ENTITIES[roster[Math.floor(Math.random() * roster.length)]];
+    this.activeEntityId = entity.id;
+    this.entityPresenceMax = this.nodeIntegrityMax
+      .mul((1 + this.level.danger / 4) * this.basePresenceMult).floor().max(D(1));
+    this.entityPresence = this.entityPresenceMax;
+    this.entityLeaveMsLeft = this.entityLeaveMs;
+    this.noise = 0;
+    this.stats.entitiesEncountered += 1;
+    events.push({ type: 'entity', message: entity.encounterMessage, color: '#FF6666', iconKey: entity.iconKey });
+  }
+
+  /** Drive-off resolved: burst of the floor resource (scaled by danger + yield bonuses). */
+  private repelEntity(events: GameEvent[]): void {
+    const entity = this.activeEntity;
+    if (!entity) return;
+    const ore = this.floorOre;
+    const catMult = this.petCatLevel >= 20 ? 2 : 1;   // Cat Lv 20: ×2 drive-off rewards
+    const gain = Math.round((2 + this.level.danger) * (1 + this.flatYieldBonus)) * catMult;
+    this.resources[ore.resource] = (this.resources[ore.resource] ?? D(0)).add(gain);
+    this.stats.resourcesFound += gain;
+    this.lifetimeResourcesCollected += gain;
+    this.exploration = Math.min(ore.required, this.exploration + gain);
+    this.lifetimeEntitiesRepelled += 1;   // Night Watch achievement
+    this.clearEntity();
+    events.push({ type: 'entity', message: entity.defeatMessage, color: '#7CFF7C', iconKey: entity.iconKey });
+    events.push({ type: 'resource', message: `+ ${RESOURCES[ore.resource].name}${tierSuffix(ore.tier)}`, color: '#7CFF7C', iconKey: ore.resource, value: gain });
+    this.tryPetLevelUp('pet_cat', events);   // the Cat grows on drive-offs
+  }
+
+  private clearEntity(): void {
+    this.activeEntityId = null;
+    this.entityPresence = D(0);
+    this.entityLeaveMsLeft = 0;
+    this.noise = 0;
+  }
+
+  /**
+   * Advance the encounter's give-up timer (called every frame). When it runs
+   * out the entity leaves on its own — no reward, message only.
+   */
+  advanceEntity(deltaMs: number): GameEvent[] {
+    if (!this.entityActive) return [];
+    this.entityLeaveMsLeft -= deltaMs;
+    if (this.entityLeaveMsLeft > 0) return [];
+    const entity = this.activeEntity;
+    this.clearEntity();
+    return entity
+      ? [{ type: 'entity', message: entity.surviveMessage, color: '#AAAAAA', iconKey: entity.iconKey }]
+      : [];
+  }
+
+  /* ---- Lighting phases ---- *
+   * The halls drift between bright / normal / dark on a 40-90s cycle. It's the
+   * mood layer with mechanical teeth: dark amplifies noise ×1.5 and lets
+   * PHANTOMS drift in (click one for a bonus + calm); bright doubles moth
+   * visits. Deeper floors roll dark more often. Never persisted — every session
+   * opens under normal light. */
+  private static readonly LIGHT_PHASE_MIN_MS = 40_000;
+  private static readonly LIGHT_PHASE_MAX_MS = 90_000;
+
+  /**
+   * Advance the lighting phase timer (called every frame). On rollover, pick
+   * the next phase — never the same twice, so every shift is visible.
+   */
+  advanceLighting(deltaMs: number): { changed: boolean; lighting: LightingState } {
+    this.lightingMsLeft -= deltaMs;
+    if (this.lightingMsLeft > 0) return { changed: false, lighting: this.lighting };
+    const darkW = 0.2 + Math.min(0.2, this.level.danger * 0.02);   // deeper = darker
+    const brightW = 0.25;
+    let next: LightingState = this.lighting;
+    while (next === this.lighting) {
+      const r = Math.random();
+      next = r < darkW ? 'dark' : r < darkW + brightW ? 'bright' : 'normal';
+    }
+    this.lighting = next;
+    this.lightingMsLeft = GameState.LIGHT_PHASE_MIN_MS
+      + Math.random() * (GameState.LIGHT_PHASE_MAX_MS - GameState.LIGHT_PHASE_MIN_MS);
+    return { changed: true, lighting: next };
+  }
+
+  /**
+   * Stare down a phantom (the click-to-catch bonus of dark phases): a burst of
+   * the floor resource, −20 Noise (you faced the fear), and the Eyes in the
+   * Dark / Mob Farm counters. The UI owns spawning; this banks the catch.
+   */
+  collectPhantom(): { gain: number; events: GameEvent[] } {
+    const events: GameEvent[] = [];
+    const ore = this.floorOre;
+    const gain = Math.round((1 + this.level.danger) * (1 + this.flatYieldBonus));
+    this.resources[ore.resource] = (this.resources[ore.resource] ?? D(0)).add(gain);
+    this.stats.resourcesFound += gain;
+    this.lifetimeResourcesCollected += gain;
+    this.exploration = Math.min(ore.required, this.exploration + gain);
+    this.noise = Math.max(0, this.noise - 20);
+    this.lifetimePhantomsCaught += 1;   // Eyes in the Dark achievement
+    this.lifetimeCreaturesCaught += 1;  // Mob Farm counts any creature caught
+    events.push({ type: 'event', message: 'You meet its gaze. It was never there.', color: '#9FB4FF' });
+    return { gain, events };
   }
 
   /* ---- Floor bases (permanent per-floor construction) ---- *
@@ -414,9 +689,11 @@ export class GameState {
    * before the next one appears (so you actually see the Integrity hit zero, even
    * on a one-shot). */
   private static readonly RESPAWN_MS_BASE = 500;
-  /** Time (ms) a broken node takes to respawn — shortened by this floor's base (Outpost). */
+  /** Time (ms) a broken node takes to respawn — shortened by this floor's base (Outpost) and gear. */
   get nodeRespawnTime(): number {
-    return GameState.RESPAWN_MS_BASE * this.builtBaseStages.reduce((m, st) => m * (st.respawnMult ?? 1), 1);
+    return GameState.RESPAWN_MS_BASE
+      * this.builtBaseStages.reduce((m, st) => m * (st.respawnMult ?? 1), 1)
+      * Math.max(0.1, 1 - this.gearEffect('respawn') / 100);
   }
   /** True while the current node is broken and regrowing (no node to search). */
   get isRespawning(): boolean { return this.respawnMsLeft > 0; }
@@ -461,10 +738,12 @@ export class GameState {
   selfHypeRollMsLeft = GameState.SELF_HYPE_ROLL_MS;     // Hype Train: time until the next self-hype roll
 
   get hypeActive(): boolean { return this.hypeActiveMsLeft > 0; }
-  get hypeMultiplier(): number { return 3; }                          // upgradable later
-  /** Buff length: base 15s + 0.5s per Rally Cry level; ×1.5 at Pet Bear Lv 10. */
+  /** Hype auto-search multiplier: ×3 base, +0.5× per Void Hunger level. */
+  get hypeMultiplier(): number { return 3 + this.getVoidLevel('void_hunger') * 0.5; }
+  /** Buff length: (15s + 0.5s/Rally Cry) × gear hypeDur %; ×1.5 at Pet Bear Lv 10. */
   get hypeDuration(): number {
-    const base = GameState.HYPE_DURATION_MS + this.sumEffect('hypeDuration') * 1000;
+    let base = GameState.HYPE_DURATION_MS + this.sumEffect('hypeDuration') * 1000;
+    base *= 1 + this.gearEffect('hypeDur') / 100;
     return this.petBearLevel >= 10 ? base * 1.5 : base;
   }
   get hypeCooldown(): number { return GameState.HYPE_COOLDOWN_MS; }   // upgradable later
@@ -603,18 +882,6 @@ export class GameState {
     return this.voidUpgrades[id] ?? 0;
   }
 
-  /** Sum of a specific gear effect across all equipped gear */
-  getGearBonus(effectKey: string): number {
-    let total = 0;
-    for (const slot of EQUIP_SLOTS) {
-      const gearId = this.equipment[slot];
-      if (!gearId) continue;
-      const gear = GEAR_POOL.find(g => g.id === gearId);
-      if (gear && gear.effects[effectKey]) total += gear.effects[effectKey];
-    }
-    return total;
-  }
-
   /** Sum effectPerLevel × level across all upgrades with a given effect. */
   private sumEffect(effect: string): number {
     let s = 0;
@@ -644,14 +911,29 @@ export class GameState {
   /** Tap + per-Explorer power (Splinters +3/lvl, effect 'tapExplorer'). */
   get tapExplorerPower(): number { return this.sumEffect('tapExplorer'); }
 
-  /** Search power per tap (before the floor magnitude scale). Base 1 + flat + tap-only. */
-  get clickPower(): Big { return D(1 + this.flatPower + this.tapPower + this.searchUpgradeBonus + this.tapExplorerPower); }
+  /**
+   * Void Resonance: ×1.25 per level on ALL search power (tap, drone, Explorer).
+   * The compounding multiplier that keeps power abreast of the ×1.5 HP curve.
+   */
+  get voidPowerMult(): number {
+    return Math.pow(1.25, this.getVoidLevel('void_resonance'));
+  }
 
   /**
-   * Explorers the player commands. Each runs auto-searches. Only 1 today; later
-   * upgrades will raise this and every per-Explorer bonus scales with it.
+   * Search power per tap (before the floor magnitude scale): the summed flat
+   * channels, then the multiplicative layers — gear tapMult % and Void Resonance.
    */
-  get explorerCount(): number { return 1; }
+  get clickPower(): Big {
+    return D(1 + this.flatPower + this.tapPower + this.searchUpgradeBonus + this.tapExplorerPower)
+      .mul(1 + this.gearEffect('tapMult') / 100)
+      .mul(this.voidPowerMult);
+  }
+
+  /**
+   * Explorers the player commands. Each runs auto-searches and counts every
+   * per-Explorer bonus once. Starts at 1; the shop's Another Explorer adds more.
+   */
+  get explorerCount(): number { return 1 + this.getShopLevel('second_explorer'); }
 
   /** Drone auto-search (Auto Explore) + Search Upgrade. Feeds the total only — NOT any Explorer. */
   get droneAuto(): number { return this.sumEffect('autoMine') + this.searchUpgradeBonus; }
@@ -695,6 +977,8 @@ export class GameState {
     if (this.hypeActive) explorers *= 1 + this.petBearLevel * 0.05;
     let total = (this.droneAuto + explorers) * this.achievementAutoBonus;
     if (this.petBearLevel >= 20) total *= 1.15;   // Bear Lv 20: +15% gathering speed, always on
+    // Multiplicative layers: gear autoMult % and Void Resonance (×1.25/lvl).
+    total *= (1 + this.gearEffect('autoMult') / 100) * this.voidPowerMult;
     // The multipliers make this fractional — auto search is always a whole
     // number, so round to the nearest int.
     return Math.round(total);
@@ -714,20 +998,6 @@ export class GameState {
     }
     return Math.max(60, 500 * m);
   }
-  get damageReduction(): number {
-    return Math.min(0.85, this.getUpgradeLevel('thick_skin') * 0.10
-      + this.getVoidLevel('thick_hide') * 0.03
-      + this.getGearBonus('damageReduction') * 0.01);
-  }
-  get sanityDrainReduction(): number {
-    return Math.min(0.85, this.getUpgradeLevel('iron_will') * 0.10
-      + this.getVoidLevel('inner_peace') * 0.03
-      + this.getGearBonus('sanityReduction') * 0.01);
-  }
-  get entityAvoidChance(): number {
-    return Math.min(0.60, this.getUpgradeLevel('quiet_steps') * 0.08
-      + this.getGearBonus('entityAvoidance') * 0.01);
-  }
   /** Per-floor quality-chance bonus from this floor's base (Supply Cache). */
   get levelQualityBonus(): number {
     return this.builtBaseStages.reduce((s, st) => s + (st.qualityBonus ?? 0), 0);
@@ -739,7 +1009,7 @@ export class GameState {
    * base (levelQualityBonus). Capped at 90%.
    */
   get qualityChance(): number {
-    let c = this.levelQualityBonus;
+    let c = this.levelQualityBonus + this.gearEffect('quality') / 100;
     for (const u of UPGRADES) {
       if (u.effect === 'quality' || u.effect === 'bonusOre') c += (u.effectPerLevel / 100) * this.getUpgradeLevel(u.id);
     }
@@ -761,7 +1031,7 @@ export class GameState {
    * (effect 'mint') and this floor's base (levelMintBonus). Capped at 90%.
    */
   get mintChance(): number {
-    let c = this.levelMintBonus;
+    let c = this.levelMintBonus + this.gearEffect('mint') / 100;
     for (const u of UPGRADES) {
       if (u.effect === 'mint') c += (u.effectPerLevel / 100) * this.getUpgradeLevel(u.id);
     }
@@ -776,26 +1046,23 @@ export class GameState {
    * Independent of quality/mint (a node can be easy-access AND mint).
    */
   get easyAccessChance(): number {
-    return Math.min(0.9, this.sumEffect('easyAccess') / 100);
-  }
-  get healthRegen(): number {
-    return this.getUpgradeLevel('regeneration') * 0.5;
-  }
-  get sanityRegen(): number {
-    return this.getUpgradeLevel('meditation') * 0.5;
+    return Math.min(0.9, (this.sumEffect('easyAccess') + this.gearEffect('easyAccess')) / 100);
   }
 
-  /** Base max HP including void bonuses (before per-run upgrades) */
-  get baseMaxHealth(): number {
-    return 100 + this.getVoidLevel('hardened_soul') * 10;
+  /**
+   * Flat extra resources EVERY node break yields: this floor's base (Secured
+   * Room) + equipped pack gear + Deep Pockets (void). Folded into offline too.
+   */
+  get flatYieldBonus(): number {
+    return this.floorBaseYield + this.gearEffect('yield') + this.getVoidLevel('deep_pockets');
   }
-  /** Base max Sanity including void bonuses */
-  get baseMaxSanity(): number {
-    return 100 + this.getVoidLevel('iron_psyche') * 10;
-  }
-  /** Effective offline tick cap including void bonuses */
+
+  /** Base max HP/Sanity (the survival stats are dormant; kept for the future entity layer). */
+  get baseMaxHealth(): number { return 100; }
+  get baseMaxSanity(): number { return 100; }
+  /** Effective offline tick cap including Lucid Memory (void). */
   get offlineTickCap(): number {
-    return MAX_OFFLINE_TICKS + this.getVoidLevel('deep_memory') * 200;
+    return MAX_OFFLINE_TICKS + this.getVoidLevel('lucid_memory') * 200;
   }
 
   /* ---- Consumables ---- */
@@ -817,6 +1084,8 @@ export class GameState {
   /** One tap on the ore node (active search). Cooldown is enforced by the UI. */
   manualSearch(): SearchHit {
     const events: GameEvent[] = [];
+    // An entity has you cornered: taps hit IT instead of the node.
+    if (this.entityActive) return this.searchEntity(events);
     // No node to hit while one is respawning.
     if (this.isRespawning) return { events, damage: D(0), crit: false, superCrit: false, struck: false };
     const crit = Math.random() < this.critChance;
@@ -831,6 +1100,24 @@ export class GameState {
     const damage = roundD(this.searchPower.mul(crit ? this.critMult : 1).mul(superCrit ? this.superCritMult : 1));
     this.nodeDamage = this.nodeDamage.add(damage);
     this.resolveNode(events);
+    this.addNoise(this.noisePerTap, events);   // searching is loud
+    return { events, damage, crit, superCrit, struck: true };
+  }
+
+  /** A tap during an encounter: same power/crit pipeline, aimed at the entity. */
+  private searchEntity(events: GameEvent[]): SearchHit {
+    const crit = Math.random() < this.critChance;
+    let superCrit = false;
+    if (crit) {
+      this.lifetimeCritsLanded += 1;
+      superCrit = Math.random() < this.superCritChance;
+      if (superCrit) this.lifetimeSuperCritsLanded += 1;
+      this.tryPetLevelUp('pet_lion', events);
+    }
+    const damage = roundD(this.searchPower.mul(crit ? this.critMult : 1)
+      .mul(superCrit ? this.superCritMult : 1).mul(this.repelMult));
+    this.entityPresence = this.entityPresence.sub(damage).max(0);
+    if (this.entityPresence.lte(0)) this.repelEntity(events);
     return { events, damage, crit, superCrit, struck: true };
   }
 
@@ -873,7 +1160,7 @@ export class GameState {
       this.stats.qualityFinds += 1;
       this.tryPetLevelUp('pet_magpie', events);   // the Magpie grows on quality finds
     }
-    gain += this.floorBaseYield;   // this floor's base pays its flat bonus on EVERY break
+    gain += this.flatYieldBonus;   // floor base + pack gear + Deep Pockets pay on EVERY break
     if (this.nodeIsEasyAccess) this.stats.easyAccessFinds += 1;   // brittle node mined (independent of grade)
     this.resources[ore.resource] = (this.resources[ore.resource] ?? D(0)).add(gain);   // inventory (uncapped)
     this.stats.resourcesFound += gain;
@@ -924,6 +1211,7 @@ export class GameState {
     this.exploration = this.explorationPerLevel[this.currentLevel] ?? 0;
     this.respawnMsLeft = 0;
     this.spawnFreshNode();
+    this.clearEntity();   // whatever was hunting you stays on its own floor
     this.stats.levelsEscaped++;
     this.totalDepth++;
     // Advancing to genuinely new territory pays a Void Shard (once per depth).
@@ -944,6 +1232,7 @@ export class GameState {
     this.exploration = this.explorationPerLevel[levelId] ?? 0;
     this.respawnMsLeft = 0;
     this.spawnFreshNode();
+    this.clearEntity();   // whatever was hunting you stays on its own floor
     return true;
   }
 
@@ -1005,10 +1294,11 @@ export class GameState {
     // (~10-15 rolls per burst, more with longer hype).
     if (this.hypeActive) this.tryPetLevelUp('pet_bear', events);
 
-    // 1. Idle auto-search (drone). Skipped while a node is respawning. The batch
-    //    can roll a lucky find (crit) just like a manual tap — same chance/×,
-    //    including the Pet Lion's super-crit roll on top.
-    if (!this.isRespawning) {
+    // 1. Idle auto-search (drone). Skipped while a node is respawning — and
+    //    while an ENTITY is present (the drone hides; taps must drive it off or
+    //    it leaves on its own). The batch can roll a lucky find (crit) just like
+    //    a manual tap — same chance/×, including the Pet Lion's super-crit roll.
+    if (!this.isRespawning && !this.entityActive) {
       autoCrit = Math.random() < this.critChance;
       const superCrit = autoCrit && Math.random() < this.superCritChance;
       const hypeMult = this.hypeActive ? this.hypeMultiplier : 1;
@@ -1023,131 +1313,34 @@ export class GameState {
           if (superCrit) this.lifetimeSuperCritsLanded += 1;   // Super Crits achievement
           this.tryPetLevelUp('pet_lion', events); // the Lion grows on landed crits
         }
+        this.addNoise(this.noisePerTick, events);   // the drone is loud too
+      } else {
+        // A silent tick — the halls settle and noise fades a little.
+        this.noise = Math.max(0, this.noise - GameState.NOISE_DECAY_PER_TICK);
       }
       this.nodeDamage = this.nodeDamage.add(dmg);
       this.resolveNode(events);
+    } else if (this.entityActive && this.autoRepelPct > 0) {
+      // The idle counterplay (Escape Plan + Black Cat): Explorers keep working
+      // through the encounter, applying a fraction of auto power to the entity
+      // each tick. Hype and Camera Flash apply; crits don't (that's tap flair).
+      const hypeMult = this.hypeActive ? this.hypeMultiplier : 1;
+      const dmg = roundD(this.autoSearchPower.mul(this.autoRepelPct).mul(this.repelMult).mul(hypeMult));
+      if (dmg.gt(0)) {
+        autoDamage = dmg;   // surface the floating number so idle repel is visible
+        this.entityPresence = this.entityPresence.sub(dmg).max(0);
+        if (this.entityPresence.lte(0)) this.repelEntity(events);
+      }
     }
 
-    // 2. Atmosphere only — ambient flavor. No random loot. (Entities are coming
-    //    back later; their flavor text is removed for now.)
-    if (Math.random() < 0.45) {
+    // 2. Atmosphere only — ambient flavor. No random loot. Muted during an
+    //    encounter so the entity owns the screen.
+    if (!this.entityActive && Math.random() < 0.45) {
       const msgs = lvl.ambientMessages;
       events.push({ type: 'ambient', message: msgs[Math.floor(Math.random() * msgs.length)], color: lvl.textColor });
     }
 
     return { events, autoDamage, autoCrit, autoSuperCrit };
-  }
-
-  /* ---- Gear drops & equipping ---- */
-
-  rollGearDrop(forceTier?: GearTier): GearDef | null {
-    const eligible = GEAR_POOL.filter(g => this.currentLevel >= g.minLevelId);
-    if (eligible.length === 0) return null;
-
-    let tier: GearTier;
-    if (forceTier) {
-      tier = forceTier;
-    } else {
-      const danger = this.level.danger;
-      const tierRoll = Math.random() * 100;
-      if (tierRoll < danger) tier = 'legendary';
-      else if (tierRoll < danger * 3) tier = 'rare';
-      else if (tierRoll < danger * 6) tier = 'uncommon';
-      else tier = 'common';
-    }
-
-    let pool = eligible.filter(g => g.tier === tier);
-    if (pool.length === 0) pool = eligible;
-    return pool[Math.floor(Math.random() * pool.length)];
-  }
-
-  tryEquipGear(gear: GearDef, events: GameEvent[]): void {
-    const current = this.equipment[gear.slot];
-    const tierColor = GEAR_TIER_COLORS[gear.tier];
-
-    if (!current) {
-      this.equipment[gear.slot] = gear.id;
-      events.push({
-        type: 'event',
-        message: `Found ${gear.name} (${gear.tier})! Equipped.`,
-        color: tierColor,
-        iconKey: gear.id,
-      });
-    } else {
-      const currentGear = GEAR_POOL.find(g => g.id === current);
-      if (currentGear && GEAR_TIER_VALUE[gear.tier] > GEAR_TIER_VALUE[currentGear.tier]) {
-        this.equipment[gear.slot] = gear.id;
-        events.push({
-          type: 'event',
-          message: `Found ${gear.name} (${gear.tier})! Replaced ${currentGear.name}.`,
-          color: tierColor,
-          iconKey: gear.id,
-        });
-      } else {
-        events.push({
-          type: 'event',
-          message: `Found ${gear.name} (${gear.tier}) but kept current ${gear.slot} gear.`,
-          color: '#888888',
-          iconKey: gear.id,
-        });
-      }
-    }
-  }
-
-  /* ---- Crafting ---- */
-
-  canCraft(recipeId: string): boolean {
-    const recipe = RECIPES.find(r => r.id === recipeId);
-    if (!recipe) return false;
-    return recipe.ingredients.every(
-      ing => (this.resources[ing.resourceId] ?? D(0)).gte(ing.amount),
-    );
-  }
-
-  craft(recipeId: string): GameEvent[] {
-    const recipe = RECIPES.find(r => r.id === recipeId);
-    if (!recipe || !this.canCraft(recipeId)) return [];
-
-    const events: GameEvent[] = [];
-
-    // Consume ingredients
-    for (const ing of recipe.ingredients) {
-      this.resources[ing.resourceId] = (this.resources[ing.resourceId] ?? D(0)).sub(ing.amount);
-    }
-
-    // Apply effect
-    switch (recipe.effectType) {
-      case 'healHP':
-        this.health = Math.min(this.maxHealth, this.health + recipe.effectValue);
-        events.push({ type: 'event', message: `Crafted ${recipe.name}: +${recipe.effectValue} HP`, color: '#88FF88' });
-        break;
-      case 'healSanity':
-        this.sanity = Math.min(this.maxSanity, this.sanity + recipe.effectValue);
-        events.push({ type: 'event', message: `Crafted ${recipe.name}: +${recipe.effectValue} Sanity`, color: '#88AAFF' });
-        break;
-      case 'fullHP':
-        this.health = this.maxHealth;
-        events.push({ type: 'event', message: `Crafted ${recipe.name}: Full HP!`, color: '#88FF88' });
-        break;
-      case 'fullSanity':
-        this.sanity = this.maxSanity;
-        events.push({ type: 'event', message: `Crafted ${recipe.name}: Full Sanity!`, color: '#88AAFF' });
-        break;
-      case 'buff':
-        if (recipe.buffId === 'torch') {
-          this.torchTicks = recipe.effectValue;
-          events.push({ type: 'event', message: `Crafted ${recipe.name}: Fewer entities!`, color: '#FFAA44' });
-        } else if (recipe.buffId === 'barricade') {
-          this.barricadeTicks = recipe.effectValue;
-          events.push({ type: 'event', message: `Crafted ${recipe.name}: Damage blocked!`, color: '#8888FF' });
-        } else if (recipe.buffId === 'firesaltBomb') {
-          this.firesaltBombActive = true;
-          events.push({ type: 'event', message: `Crafted ${recipe.name}: Next entity auto-killed!`, color: '#FF4444' });
-        }
-        break;
-    }
-
-    return events;
   }
 
   /* ---- Void Shard shop ---- */
@@ -1198,6 +1391,11 @@ export class GameState {
       case 'structuresBuilt': return this.lifetimeStructuresBuilt;
       case 'petLevelsGained': return this.lifetimePetLevelsGained;
       case 'superCritsLanded': return this.lifetimeSuperCritsLanded;
+      case 'depthReached': return this.totalDepth;
+      case 'rewindsDone': return this.prestigeCount;
+      case 'gearCrafted': return this.lifetimeGearCrafted;
+      case 'entitiesRepelled': return this.lifetimeEntitiesRepelled;
+      case 'phantomsCaught': return this.lifetimePhantomsCaught;
       default: return 0;
     }
   }
@@ -1259,7 +1457,7 @@ export class GameState {
       // Fold in the average quality (+qualityBonus) and mint (+9) bonuses, plus the
       // floor base's flat yield, so offline ≈ live. (Base CONSTRUCTION rolls don't
       // happen offline — stages only advance while playing.)
-      const count = Math.round(cycles * (1 + this.floorBaseYield + this.qualityChance * this.qualityBonus + 9 * this.mintChance));
+      const count = Math.round(cycles * (1 + this.flatYieldBonus + this.qualityChance * this.qualityBonus + 9 * this.mintChance));
       this.resources[ore.resource] = (this.resources[ore.resource] ?? D(0)).add(count);
       this.stats.resourcesFound += count;
       this.lifetimeResourcesCollected += count;
@@ -1273,54 +1471,82 @@ export class GameState {
 
   /* ---- Prestige (Rewind) ---- */
 
-  /** Can rewind if player has reached level index 4+ (Electrical Station) */
+  /** Rewind unlocks once the REWIND_MIN_FLOOR gate has been reached this run. */
   canRewind(): boolean {
-    return this.currentLevel >= 4 || this.stats.levelsEscaped >= 4;
+    return this.currentLevel >= REWIND_MIN_FLOOR || this.stats.levelsEscaped >= REWIND_MIN_FLOOR;
   }
 
-  /** Calculate how many void fragments the player would earn from a rewind */
+  /** Deepest floor unlocked THIS RUN — what a Rewind pays out on. */
+  get deepestFloorThisRun(): number {
+    return this.unlockedLevels.length ? Math.max(...this.unlockedLevels) : 0;
+  }
+
+  /** Floors the next run starts with pre-explored — Familiar Halls (void). */
+  get rewindHeadStart(): number {
+    return Math.min(this.getVoidLevel('familiar_halls') * 2, this.highestLevelReached);
+  }
+
+  /**
+   * Void Fragments a Rewind would pay right now: every floor from the gate down
+   * to the run's deepest pays exponentially more (see rewindFragmentsFor) —
+   * MINUS the Familiar Halls head start, so floors the Void hands you for free
+   * never pay out (no instant-rewind fragment farm).
+   */
   calculateRewindFragments(): number {
-    const fromLevels = this.stats.levelsEscaped * 2;
-    const fromExploration = Math.floor(this.stats.totalExploration / 100);
-    const totalUpgrades = Object.values(this.upgrades).reduce((s, v) => s + v, 0);
-    const fromUpgrades = Math.floor(totalUpgrades * 0.5);
-    const fromDeaths = Math.floor(this.stats.deaths * 0.3);
-    return Math.max(1, Math.floor(fromLevels + fromExploration + fromUpgrades + fromDeaths));
+    return Math.max(0, rewindFragmentsFor(this.deepestFloorThisRun) - rewindFragmentsFor(this.rewindHeadStart));
   }
 
-  /** Perform the rewind: reset run state, award fragments + shard, apply void bonuses */
+  /** Void Shards a Rewind also grants — Void Conduit (+1 per level). */
+  get rewindShardBonus(): number {
+    return this.getVoidLevel('void_conduit');
+  }
+
+  /**
+   * Perform the rewind: bank fragments (+ Void Conduit shards), then reset the
+   * run — floor, resources, run upgrades, gear. Permanent systems (void
+   * upgrades, shards, shop, achievements, floor bases, pets) survive.
+   * Familiar Halls (void) pre-clears its floors so the run restarts deep.
+   */
   rewind(): number {
     const fragments = this.calculateRewindFragments();
     this.voidFragments += fragments;
     this.prestigeCount++;
-
-    // Update max level unlocked based on prestige tiers
-    for (const tier of PRESTIGE_TIERS) {
-      if (this.prestigeCount >= tier.prestigeRequired && tier.unlocksLevelId !== null) {
-        this.maxLevelUnlocked = Math.max(this.maxLevelUnlocked, tier.unlocksLevelId);
-      }
+    // Void Conduit only pays on a PRODUCTIVE rewind (one that earned fragments)
+    // — otherwise Familiar Halls + instant rewinds would mint free shards.
+    if (this.rewindShardBonus > 0 && fragments > 0) {
+      this.voidShards += this.rewindShardBonus;
     }
 
-    // Reset run state
-    this.currentLevel = 0;
-    this.unlockedLevels = [0];
-    this.exploration = 0;
+    // Familiar Halls: start headStart floors deep, those floors pre-explored.
+    const headStart = this.rewindHeadStart;
+    this.unlockedLevels = [];
     this.explorationPerLevel = {};
+    for (let i = 0; i <= headStart; i++) {
+      this.unlockedLevels.push(i);
+      if (i < headStart) this.explorationPerLevel[i] = getFloorOre(i).required;
+    }
+    this.currentLevel = headStart;
+    this.exploration = 0;
 
-    // Reset resources with Pack Rat bonus
+    // Reset resources
     for (const key of Object.keys(RESOURCES)) {
       this.resources[key] = D(0);
     }
-    const packRatLvl = this.getVoidLevel('pack_rat');
-    this.resources['almond_water'] = D(5 + packRatLvl * 3);
-    this.resources['canned_food'] = D(packRatLvl * 2);
+    this.resources['almond_water'] = D(5);
 
-    // Reset upgrades
+    // Reset run upgrades
     for (const u of UPGRADES) {
       this.upgrades[u.id] = 0;
     }
 
-    // Reset HP/Sanity to base (with void bonuses)
+    // Reset gear (crafted from run resources, so it rewinds with them)
+    this.gearOwned = [];
+    this.gearEquipped = { tool: null, light: null, pack: null, charm: null };
+
+    // Quiet halls again
+    this.clearEntity();
+
+    // Reset HP/Sanity to base (dormant, but keep them clean)
     this.maxHealth = this.baseMaxHealth;
     this.maxSanity = this.baseMaxSanity;
     this.health = this.maxHealth;
@@ -1343,12 +1569,6 @@ export class GameState {
     // floorBases persist too — a constructed base can NEVER be lost
     // petLevels persist too — pets are forever
 
-    // Reset equipment & bosses (gear resets on prestige)
-    this.equipment = { head: null, body: null, feet: null, accessory: null };
-    this.defeatedBosses = {};
-    this.torchTicks = 0;
-    this.firesaltBombActive = false;
-
     // Reset run stats (but NOT totalDepth or prestige stats)
     this.stats = {
       totalExploration: 0,
@@ -1366,31 +1586,30 @@ export class GameState {
 
   /* ---- Void Upgrades ---- */
 
+  /** Fragments the NEXT level costs: round(baseCost × costGrowth^level). */
   getVoidUpgradeCost(id: string): number {
     const def = VOID_UPGRADES.find((v) => v.id === id);
     if (!def) return Infinity;
-    return def.costPerLevel;
+    return Math.round(def.baseCost * Math.pow(def.costGrowth, this.getVoidLevel(id)));
   }
 
   canAffordVoidUpgrade(id: string): boolean {
     const def = VOID_UPGRADES.find((v) => v.id === id);
     if (!def) return false;
     if (this.getVoidLevel(id) >= def.maxLevel) return false;
-    return this.voidFragments >= def.costPerLevel;
+    return this.voidFragments >= this.getVoidUpgradeCost(id);
+  }
+
+  /** True if any void upgrade is affordable — drives the Void tab alert dot. */
+  hasAffordableVoidUpgrade(): boolean {
+    return VOID_UPGRADES.some((v) => this.canAffordVoidUpgrade(v.id));
   }
 
   buyVoidUpgrade(id: string): boolean {
     const def = VOID_UPGRADES.find((v) => v.id === id);
     if (!def || !this.canAffordVoidUpgrade(id)) return false;
-    this.voidFragments -= def.costPerLevel;
+    this.voidFragments -= this.getVoidUpgradeCost(id);
     this.voidUpgrades[id] = this.getVoidLevel(id) + 1;
-
-    // Apply immediate effects for HP/Sanity void upgrades
-    if (id === 'hardened_soul') {
-      this.maxHealth = this.baseMaxHealth + this.getUpgradeLevel('tough_body') * 10;
-    } else if (id === 'iron_psyche') {
-      this.maxSanity = this.baseMaxSanity + this.getUpgradeLevel('strong_mind') * 10;
-    }
     return true;
   }
 
@@ -1430,11 +1649,9 @@ export class GameState {
       // Milestones & discoveries
       claimedMilestones: JSON.parse(JSON.stringify(this.claimedMilestones)),
       memoryFragments: this.memoryFragments,
-      // Equipment
-      equipment: { ...this.equipment },
-      defeatedBosses: { ...this.defeatedBosses },
-      torchTicks: this.torchTicks,
-      firesaltBombActive: this.firesaltBombActive,
+      // Gear
+      gearOwned: [...this.gearOwned],
+      gearEquipped: { ...this.gearEquipped },
       // Void Shard shop
       voidShards: this.voidShards,
       shopUpgrades: { ...this.shopUpgrades },
@@ -1448,7 +1665,11 @@ export class GameState {
       lifetimeStructuresBuilt: this.lifetimeStructuresBuilt,
       lifetimePetLevelsGained: this.lifetimePetLevelsGained,
       lifetimeSuperCritsLanded: this.lifetimeSuperCritsLanded,
+      lifetimeGearCrafted: this.lifetimeGearCrafted,
+      lifetimeEntitiesRepelled: this.lifetimeEntitiesRepelled,
+      lifetimePhantomsCaught: this.lifetimePhantomsCaught,
       achievementClaims: { ...this.achievementClaims },
+      noise: this.noise,
       // Floor bases (permanent)
       floorBases: { ...this.floorBases },
       // Pets (permanent)
@@ -1487,6 +1708,14 @@ export class GameState {
     this.totalDepth = data.totalDepth ?? 0;
     this.maxLevelUnlocked = data.maxLevelUnlocked ?? 5;
 
+    // Migration: refund fragments spent on RETIRED void upgrades (the old
+    // HP/sanity set), then drop them — nothing a player paid for is lost.
+    for (const [id, lvl] of Object.entries(this.voidUpgrades)) {
+      if (VOID_UPGRADES.some((v) => v.id === id)) continue;
+      this.voidFragments += (LEGACY_VOID_REFUND[id] ?? 4) * (lvl ?? 0);
+      delete this.voidUpgrades[id];
+    }
+
     // Ensure void upgrade keys exist
     for (const v of VOID_UPGRADES) {
       if (this.voidUpgrades[v.id] === undefined) this.voidUpgrades[v.id] = 0;
@@ -1504,17 +1733,15 @@ export class GameState {
     this.claimedMilestones = data.claimedMilestones ?? {};
     this.memoryFragments = data.memoryFragments ?? 0;
 
-    // Equipment
-    const savedEquip = data.equipment ?? {};
-    this.equipment = {
-      head: savedEquip['head'] ?? null,
-      body: savedEquip['body'] ?? null,
-      feet: savedEquip['feet'] ?? null,
-      accessory: savedEquip['accessory'] ?? null,
-    };
-    this.defeatedBosses = data.defeatedBosses ?? {};
-    this.torchTicks = data.torchTicks ?? 0;
-    this.firesaltBombActive = data.firesaltBombActive ?? false;
+    // Gear — only ids that still exist in the roster survive a load (old saves'
+    // random-drop equipment ids are silently dropped).
+    this.gearOwned = (data.gearOwned ?? []).filter((id) => GEAR.some((g) => g.id === id));
+    const savedGear = data.gearEquipped ?? {};
+    this.gearEquipped = { tool: null, light: null, pack: null, charm: null };
+    for (const slot of GEAR_SLOTS) {
+      const id = savedGear[slot];
+      if (id && this.gearOwned.includes(id)) this.gearEquipped[slot] = id;
+    }
 
     // Void Shard shop
     this.voidShards = data.voidShards ?? 0;
@@ -1542,7 +1769,14 @@ export class GameState {
     this.lifetimePetLevelsGained = data.lifetimePetLevelsGained
       ?? Object.values(data.petLevels ?? {}).reduce((s, v) => s + Math.max(0, v - 1), 0);
     this.lifetimeSuperCritsLanded = data.lifetimeSuperCritsLanded ?? 0;
+    this.lifetimeGearCrafted = data.lifetimeGearCrafted ?? 0;
+    this.lifetimeEntitiesRepelled = data.lifetimeEntitiesRepelled ?? 0;
+    this.lifetimePhantomsCaught = data.lifetimePhantomsCaught ?? 0;
     this.achievementClaims = data.achievementClaims ?? {};
+
+    // Danger layer: noise persists; an active encounter never does (fresh calm).
+    this.clearEntity();
+    this.noise = data.noise ?? 0;
 
     // Floor bases (permanent — default empty for old saves)
     this.floorBases = data.floorBases ?? {};

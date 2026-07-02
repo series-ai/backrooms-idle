@@ -32,14 +32,16 @@ export interface ResourceDef {
 export interface EntityDef {
   id: string;
   name: string;
-  damage: number;
-  sanityDamage: number;
+  icon: string;          // emoji fallback for the encounter display
+  iconKey?: string;      // loaded PNG icon id (preferred when set)
+  damage: number;        // dormant (combat layer) — kept for the future
+  sanityDamage: number;  // dormant
   encounterMessage: string;
-  surviveMessage: string;
-  defeatMessage: string;
+  surviveMessage: string;   // shown when it leaves on its own
+  defeatMessage: string;    // shown when you drive it off
 }
 
-export type UpgradeEffect = 'cooldown' | 'power' | 'autoMine' | 'explorerAuto' | 'bonusOre' | 'quality' | 'qualityYield' | 'mint' | 'flatPower' | 'critChance' | 'autoCapture' | 'hypeDuration' | 'tapExplorer' | 'critDamage' | 'easyAccess';
+export type UpgradeEffect = 'cooldown' | 'power' | 'autoMine' | 'explorerAuto' | 'bonusOre' | 'quality' | 'qualityYield' | 'mint' | 'flatPower' | 'critChance' | 'autoCapture' | 'hypeDuration' | 'tapExplorer' | 'critDamage' | 'easyAccess' | 'quiet' | 'repel' | 'autoRepel';
 
 /* ------------------------------------------------------------------ */
 /*  Floor ores — each level is ONE ore you mine toward a target.       */
@@ -144,6 +146,8 @@ export interface FloorBaseStage {
   qualityBonus?: number; // + quality chance (fraction)
   respawnMult?: number;  // × node respawn time
   mintBonus?: number;    // + mint chance (fraction)
+  presenceMult?: number; // × entity presence on this floor (danger layer)
+  leaveMult?: number;    // × entity give-up time on this floor (danger layer)
 }
 
 export const FLOOR_BASE_STAGES: FloorBaseStage[] = [
@@ -151,6 +155,9 @@ export const FLOOR_BASE_STAGES: FloorBaseStage[] = [
   { name: 'Supply Cache', chance: 250, desc: '+5% quality', qualityBonus: 0.05 },
   { name: 'Outpost', chance: 500, desc: '30% faster respawn', respawnMult: 0.7 },
   { name: 'Safe Room of Operations', chance: 750, desc: '+3% Mint', mintBonus: 0.03 },
+  // The danger-layer stage: a manned lookout makes this floor's entities weaker
+  // and more skittish — permanent, so old haunts stay safe.
+  { name: 'Watchtower', chance: 1000, desc: 'entities 25% weaker & give up 25% sooner', presenceMult: 0.75, leaveMult: 0.75 },
 ];
 
 export interface UpgradeDef {
@@ -178,7 +185,8 @@ export interface VoidUpgradeDef {
   name: string;
   icon: string;
   description: string;
-  costPerLevel: number;
+  baseCost: number;    // Void Fragments for level 0 → 1
+  costGrowth: number;  // per-level cost multiplier: round(baseCost × costGrowth^level)
   maxLevel: number;
   effectPerLevel: number;
   effectUnit: string;
@@ -287,83 +295,154 @@ export const ENTITIES: Record<string, EntityDef> = {
   smiler: {
     id: 'smiler',
     name: 'Smiler',
+    icon: '\u{1F600}',
+    iconKey: 'smiler',
     damage: 8,
     sanityDamage: 5,
     encounterMessage: 'A wide grin appears in the darkness...',
-    surviveMessage: 'You avert your eyes and back away slowly.',
-    defeatMessage: 'You toss firesalt. It shrieks and fades.',
+    surviveMessage: 'You avert your eyes. The grin backs into the dark.',
+    defeatMessage: 'The grin flickers, thins, and goes out.',
   },
   hound: {
     id: 'hound',
     name: 'Hound',
+    icon: '\u{1F43A}',
+    iconKey: 'hound',
     damage: 12,
     sanityDamage: 3,
     encounterMessage: 'Rapid footsteps echo behind you. Closer.',
     surviveMessage: 'You press against the wall. It runs past.',
-    defeatMessage: 'The firesalt hits it. It yelps and flees.',
+    defeatMessage: 'It yelps and bolts into the corridors.',
   },
   skin_stealer: {
     id: 'skin_stealer',
     name: 'Skin-Stealer',
+    icon: '\u{1FAE5}',
+    iconKey: 'skin_stealer',
     damage: 15,
     sanityDamage: 15,
     encounterMessage: 'Someone calls your name... but you are alone.',
     surviveMessage: 'You stay silent. The voice moves on.',
-    defeatMessage: 'Firesalt reveals its true form. It retreats.',
+    defeatMessage: 'Caught in the light, it sheds its face and flees.',
   },
   partygoer: {
     id: 'partygoer',
     name: 'Partygoer',
+    icon: '\u{1F388}',
+    iconKey: 'partygoer',
     damage: 18,
     sanityDamage: 20,
     encounterMessage: '=) Hey! Come join the party! =)',
     surviveMessage: 'You resist the urge to follow. It fades.',
-    defeatMessage: 'Firesalt sizzles against it. The smile drops.',
+    defeatMessage: 'The smile drops. The party moves on without you.',
   },
   wretched: {
     id: 'wretched',
     name: 'The Wretched',
+    icon: '\u{1F480}',
+    iconKey: 'wretched',
     damage: 30,
     sanityDamage: 25,
     encounterMessage: 'An inhuman shriek pierces the silence.',
     surviveMessage: 'You hide. It passes, clawing the walls.',
-    defeatMessage: 'Desperate firesalt throw. It howls and retreats.',
+    defeatMessage: 'It howls and drags itself back into the dark.',
   },
   crimson_watcher: {
     id: 'crimson_watcher',
     name: 'Crimson Watcher',
+    icon: '\u{1F534}',
     damage: 22,
     sanityDamage: 18,
     encounterMessage: 'Red light pulses from around the corner. Something watches.',
     surviveMessage: 'You freeze. The red light fades slowly.',
-    defeatMessage: 'Firesalt flares bright white. The red retreats.',
+    defeatMessage: 'The red light gutters out like a dying bulb.',
   },
   ink_crawler: {
     id: 'ink_crawler',
     name: 'Ink Crawler',
+    icon: '\u{1F58B}\u{FE0F}',
     damage: 12,
     sanityDamage: 30,
     encounterMessage: 'Words crawl off the pages and skitter toward you.',
     surviveMessage: 'You shut your eyes. The whispers stop.',
-    defeatMessage: 'Firesalt burns the ink away. Pages scatter.',
+    defeatMessage: 'The ink scatters back into the margins.',
   },
   archivist: {
     id: 'archivist',
     name: 'The Archivist',
+    icon: '\u{1F4DA}',
     damage: 25,
     sanityDamage: 35,
     encounterMessage: '"You are not catalogued." A figure turns from the shelves.',
     surviveMessage: 'You pretend to read. It loses interest.',
-    defeatMessage: 'Firesalt on the books. It screams and vanishes.',
+    defeatMessage: 'It files you under MISSED and returns to the stacks.',
   },
   frost_shade: {
     id: 'frost_shade',
     name: 'Frost Shade',
+    icon: '\u{2744}\u{FE0F}',
     damage: 35,
     sanityDamage: 20,
     encounterMessage: 'Your breath turns to ice. Something moves in the fog.',
     surviveMessage: 'You hold still until the cold passes.',
-    defeatMessage: 'Firesalt melts through the ice. It shatters.',
+    defeatMessage: 'The cold recoils and the fog thins.',
+  },
+
+  // ---- Staged-art entities (icons in icons/entities/) ----
+  clump: {
+    id: 'clump',
+    name: 'The Clump',
+    icon: '\u{1F9DF}',
+    iconKey: 'clump',
+    damage: 20,
+    sanityDamage: 15,
+    encounterMessage: 'A mass of tangled limbs drags itself toward you.',
+    surviveMessage: 'The Clump loses your scent and slumps still.',
+    defeatMessage: 'The Clump collapses into parts and scatters.',
+  },
+  doll_face: {
+    id: 'doll_face',
+    name: 'Doll Face',
+    icon: '\u{1F3AD}',
+    iconKey: 'doll_face',
+    damage: 14,
+    sanityDamage: 22,
+    encounterMessage: 'A porcelain face turns to you. It was on a mannequin.',
+    surviveMessage: 'Doll Face tilts its head, then goes rigid again.',
+    defeatMessage: 'Doll Face cracks down the middle and goes dark.',
+  },
+  scrambles: {
+    id: 'scrambles',
+    name: 'Scrambles',
+    icon: '\u{1F577}\u{FE0F}',
+    iconKey: 'scrambles',
+    damage: 10,
+    sanityDamage: 12,
+    encounterMessage: 'Something skitters out of the vents. Fast.',
+    surviveMessage: 'Scrambles rattles back into the ductwork.',
+    defeatMessage: 'Scrambles flees into a wall gap, hissing.',
+  },
+  corpus_vitis: {
+    id: 'corpus_vitis',
+    name: 'Corpus Vitis',
+    icon: '\u{1F33F}',
+    iconKey: 'corpus_vitis',
+    damage: 16,
+    sanityDamage: 18,
+    encounterMessage: 'The vines are moving. The vines were never vines.',
+    surviveMessage: 'The growth stills, pretending to be plants again.',
+    defeatMessage: 'The vine-thing withers back into the beds.',
+  },
+  lucky_crane: {
+    id: 'lucky_crane',
+    name: 'Lucky Crane',
+    icon: '\u{1F3B0}',
+    iconKey: 'lucky_crane',
+    damage: 12,
+    sanityDamage: 25,
+    encounterMessage: 'An arcade claw unfolds from the dark, reaching for you.',
+    surviveMessage: 'The claw retracts. A coin clatters somewhere.',
+    defeatMessage: 'The crane sparks and droops. You keep the prize: you.',
   },
 };
 
@@ -386,17 +465,17 @@ export const LEVELS: LevelDef[] = [
   // 6 — scrap_wood
   { id: 6, name: 'THE CARPENTRY', subtitle: 'Abandoned Mid-Cut', description: 'Endless wooden framing, sawdust underfoot, projects abandoned mid-cut.', bgColor: 0x3a2a18, textColor: '#C8A878', danger: 3, explorationRequired: 300, resourceDrops: [], entityIds: ['hound', 'wretched'], ambientMessages: ['Sawdust drifts in the still air.', 'A saw rests mid-cut in a board.', 'Half-built doorways lead nowhere.', 'The wood is warm, like it was just worked.', 'Nails are scattered in patterns you do not like.'] },
   // 7 — scrap_metal
-  { id: 7, name: 'THE MACHINE YARD', subtitle: 'Something Still Moves', description: 'Heaps of rusted machinery and scrap rise in the gloom like dunes.', bgColor: 0x2a2a2e, textColor: '#A8A8B0', danger: 3, explorationRequired: 350, resourceDrops: [], entityIds: ['skin_stealer', 'wretched'], ambientMessages: ['Metal groans somewhere in the dark.', 'Rust flakes coat everything you touch.', 'A heap of scrap shifts on its own.', 'You find tools, still oily.', 'Something metal scrapes, far off.'] },
+  { id: 7, name: 'THE MACHINE YARD', subtitle: 'Something Still Moves', description: 'Heaps of rusted machinery and scrap rise in the gloom like dunes.', bgColor: 0x2a2a2e, textColor: '#A8A8B0', danger: 3, explorationRequired: 350, resourceDrops: [], entityIds: ['skin_stealer', 'wretched', 'scrambles'], ambientMessages: ['Metal groans somewhere in the dark.', 'Rust flakes coat everything you touch.', 'A heap of scrap shifts on its own.', 'You find tools, still oily.', 'Something metal scrapes, far off.'] },
   // 8 — copper_wire
   { id: 8, name: 'THE BOILER ROOMS', subtitle: 'It Breathes in the Pipes', description: 'Concrete tunnels lined with pipes. Unknown fluids drip from above.', bgColor: 0x1c2833, textColor: '#7FB3D3', danger: 3, explorationRequired: 500, resourceDrops: [], entityIds: ['smiler', 'skin_stealer', 'partygoer'], ambientMessages: ['Pipes groan and shudder overhead.', 'A dark liquid drips onto your shoulder.', 'The tunnel splits three ways. You pick one.', 'Steam hisses from a cracked pipe.', 'Rust flakes off the pipe you brush against.', 'Something splashes in the distance.'] },
   // 9 — duct_tape
-  { id: 9, name: 'MAINTENANCE TUNNELS', subtitle: 'No One Maintains It', description: 'Cramped utility crawlways where everything is patched with tape and prayer.', bgColor: 0x2e2a20, textColor: '#C0B890', danger: 4, explorationRequired: 600, resourceDrops: [], entityIds: ['wretched', 'skin_stealer'], ambientMessages: ['Tape holds a pipe that should not hold.', 'Every surface is patched and re-patched.', 'A valve drips no matter how tight.', 'The tunnels narrow, then narrow again.', 'Someone wrote "TEMPORARY" on everything.'] },
+  { id: 9, name: 'MAINTENANCE TUNNELS', subtitle: 'No One Maintains It', description: 'Cramped utility crawlways where everything is patched with tape and prayer.', bgColor: 0x2e2a20, textColor: '#C0B890', danger: 4, explorationRequired: 600, resourceDrops: [], entityIds: ['wretched', 'skin_stealer', 'scrambles'], ambientMessages: ['Tape holds a pipe that should not hold.', 'Every surface is patched and re-patched.', 'A valve drips no matter how tight.', 'The tunnels narrow, then narrow again.', 'Someone wrote "TEMPORARY" on everything.'] },
   // 10 — glass_shard
-  { id: 10, name: 'THE GREENHOUSE', subtitle: 'It Grew Toward You', description: 'A vast collapsed arcade, the floor a carpet of broken glass under dead skylights.', bgColor: 0x1a2a2e, textColor: '#A8D0D8', danger: 4, explorationRequired: 700, resourceDrops: [], entityIds: ['partygoer', 'ink_crawler'], ambientMessages: ['Glass crunches no matter where you step.', 'Your reflection scatters across a thousand shards.', 'A skylight gives way somewhere distant.', 'The shards are arranged, almost deliberately.', 'You bleed a little. You do not remember when.'] },
+  { id: 10, name: 'THE GREENHOUSE', subtitle: 'It Grew Toward You', description: 'A vast collapsed arcade, the floor a carpet of broken glass under dead skylights.', bgColor: 0x1a2a2e, textColor: '#A8D0D8', danger: 4, explorationRequired: 700, resourceDrops: [], entityIds: ['corpus_vitis', 'partygoer', 'ink_crawler'], ambientMessages: ['Glass crunches no matter where you step.', 'Your reflection scatters across a thousand shards.', 'A skylight gives way somewhere distant.', 'The shards are arranged, almost deliberately.', 'You bleed a little. You do not remember when.'] },
   // 11 — batteries
   { id: 11, name: 'ELECTRICAL STATION', subtitle: 'Live to the Touch', description: 'Banks of humming machinery. Sparks fly from exposed wiring.', bgColor: 0x0d0d1a, textColor: '#8080FF', danger: 4, explorationRequired: 750, resourceDrops: [], entityIds: ['wretched', 'partygoer', 'skin_stealer'], ambientMessages: ['Sparks fly from a panel on the wall.', 'The machinery hums louder. Then quiets.', 'Warning lights flash in the corridor.', 'You smell ozone and burnt plastic.', 'Cables hang from the ceiling like vines.', 'The lights cut out. Then slam back on.'] },
   // 12 — lamp
-  { id: 12, name: 'THE SHOWROOM', subtitle: 'Someone Was Just Sitting Here', description: 'An infinite furniture showroom, every room staged and lit by countless lamps.', bgColor: 0x2a241a, textColor: '#E0C890', danger: 5, explorationRequired: 850, resourceDrops: [], entityIds: ['partygoer', 'skin_stealer'], ambientMessages: ['Every lamp is on. No one turned them on.', 'The furniture is arranged for guests.', 'A price tag reads a number that hurts to look at.', 'You sink into a couch. It is warm.', 'Each room is staged. Each room is empty.'] },
+  { id: 12, name: 'THE SHOWROOM', subtitle: 'Someone Was Just Sitting Here', description: 'An infinite furniture showroom, every room staged and lit by countless lamps.', bgColor: 0x2a241a, textColor: '#E0C890', danger: 5, explorationRequired: 850, resourceDrops: [], entityIds: ['doll_face', 'partygoer', 'skin_stealer'], ambientMessages: ['Every lamp is on. No one turned them on.', 'The furniture is arranged for guests.', 'A price tag reads a number that hurts to look at.', 'You sink into a couch. It is warm.', 'Each room is staged. Each room is empty.'] },
   // 13 — radio
   { id: 13, name: 'THE BROADCAST STATION', subtitle: 'It Says Your Name', description: 'A derelict broadcast station, every speaker hissing with static and half-words.', bgColor: 0x1a1e26, textColor: '#90B0C0', danger: 5, explorationRequired: 950, resourceDrops: [], entityIds: ['wretched', 'ink_crawler'], ambientMessages: ['Static resolves into a voice, then back.', 'A reel-to-reel spins with nothing on it.', 'The dial moves on its own.', 'You hear your name between stations.', 'Every channel is the same breathing.'] },
   // 14 — CCTV_camera
@@ -424,15 +503,15 @@ export const LEVELS: LevelDef[] = [
   // 25 — charcoal
   { id: 25, name: 'THE INCINERATOR', subtitle: 'Something Burned Here', description: 'A scorched maze of furnaces, the walls black with old soot and heat.', bgColor: 0x18120e, textColor: '#C09060', danger: 8, explorationRequired: 2100, resourceDrops: [], entityIds: ['wretched', 'crimson_watcher'], ambientMessages: ['A furnace ticks as it cools. Or heats.', 'Soot coats your hands, your throat.', 'Embers glow in a grate no one tends.', 'The heat comes in waves, like breath.', 'Charcoal crunches into black dust underfoot.'] },
   // 26 — bone_fragments
-  { id: 26, name: 'THE CATACOMBS', subtitle: 'The Bones Remember', description: 'Shelves of bone tablets. The inscriptions change when you look away.', bgColor: 0x1a1412, textColor: '#D4C4A4', danger: 8, explorationRequired: 2200, resourceDrops: [], entityIds: ['archivist', 'ink_crawler', 'crimson_watcher'], ambientMessages: ['Bone tablets line the walls, inscribed.', 'The carvings rearrange when you blink.', 'A skull watches from a niche.', 'Your footsteps echo like a tally.', 'The dust here is pale and fine and old.'] },
+  { id: 26, name: 'THE CATACOMBS', subtitle: 'The Bones Remember', description: 'Shelves of bone tablets. The inscriptions change when you look away.', bgColor: 0x1a1412, textColor: '#D4C4A4', danger: 8, explorationRequired: 2200, resourceDrops: [], entityIds: ['clump', 'archivist', 'ink_crawler', 'crimson_watcher'], ambientMessages: ['Bone tablets line the walls, inscribed.', 'The carvings rearrange when you blink.', 'A skull watches from a niche.', 'Your footsteps echo like a tally.', 'The dust here is pale and fine and old.'] },
   // 27 — mannequin
-  { id: 27, name: 'THE MALL', subtitle: 'The Mannequins Moved', description: 'A dead department store, mannequins posed mid-gesture in the gloom.', bgColor: 0x201a24, textColor: '#C0A0C0', danger: 8, explorationRequired: 2300, resourceDrops: [], entityIds: ['partygoer', 'skin_stealer', 'smiler'], ambientMessages: ['A mannequin faces you. It did not before.', 'Escalators run to floors that do not exist.', 'A fountain trickles in the empty atrium.', 'The mannequins are posed like they are waiting.', 'A mall map says "YOU ARE HERE." You are not.'] },
+  { id: 27, name: 'THE MALL', subtitle: 'The Mannequins Moved', description: 'A dead department store, mannequins posed mid-gesture in the gloom.', bgColor: 0x201a24, textColor: '#C0A0C0', danger: 8, explorationRequired: 2300, resourceDrops: [], entityIds: ['doll_face', 'clump', 'partygoer', 'smiler'], ambientMessages: ['A mannequin faces you. It did not before.', 'Escalators run to floors that do not exist.', 'A fountain trickles in the empty atrium.', 'The mannequins are posed like they are waiting.', 'A mall map says "YOU ARE HERE." You are not.'] },
   // 28 — pool_water
   { id: 28, name: 'THE POOLROOMS', subtitle: 'Do Not Touch the Water', description: 'Pristine blue pools stretch into infinity. Beautiful... but wrong.', bgColor: 0x14544a, textColor: '#A0F0E0', danger: 7, explorationRequired: 2400, resourceDrops: [], entityIds: ['partygoer'], ambientMessages: ['The water is perfectly still. Almost too still.', 'White tiles gleam under fluorescent light.', 'Your footsteps echo across the pool deck.', 'The water looks inviting. You resist.', 'Reflections in the water do not match the room.', 'A sign reads: "NO LIFEGUARD ON DUTY"'] },
   // 29 — liquid_pain
   { id: 29, name: 'THE RED HALLS', subtitle: 'It Tastes Like Copper', description: 'Blood-red walls stretch endlessly. The air tastes like copper.', bgColor: 0x3a0a0a, textColor: '#FF6666', danger: 8, explorationRequired: 2500, resourceDrops: [], entityIds: ['crimson_watcher', 'wretched', 'skin_stealer'], ambientMessages: ['The walls pulse faintly. Like a heartbeat.', 'A distant scream echoes. Or was it laughter?', 'The ceiling drips. You do not look up.', 'Handprints on the wall. Too many fingers.', 'You find a mirror. Your reflection is delayed.', 'The lights here are red. Everything is red.'] },
   // 30 — lucky_coins
-  { id: 30, name: 'THE FOUNTAIN', subtitle: 'Make No Wishes', description: 'A grand wishing fountain in a dead arcade, its water full of coins and want.', bgColor: 0x1a2418, textColor: '#E0D070', danger: 8, explorationRequired: 2600, resourceDrops: [], entityIds: ['partygoer', 'archivist', 'crimson_watcher'], ambientMessages: ['Coins glitter under black water.', 'The fountain whispers when you near it.', 'A wish surfaces, not yours.', 'Arcade machines flicker to attract no one.', 'Every coin you take, two appear.'] },
+  { id: 30, name: 'THE FOUNTAIN', subtitle: 'Make No Wishes', description: 'A grand wishing fountain in a dead arcade, its water full of coins and want.', bgColor: 0x1a2418, textColor: '#E0D070', danger: 8, explorationRequired: 2600, resourceDrops: [], entityIds: ['lucky_crane', 'partygoer', 'archivist', 'crimson_watcher'], ambientMessages: ['Coins glitter under black water.', 'The fountain whispers when you near it.', 'A wish surfaces, not yours.', 'Arcade machines flicker to attract no one.', 'Every coin you take, two appear.'] },
 ];
 
 // Mining upgrades. Every collectible resource feeds one, so each floor's ore is
@@ -573,111 +652,208 @@ export const UPGRADES: UpgradeDef[] = [
     effectPerLevel: 1, effectUnit: '% quality chance', costResource: 'duct_tape', effect: 'quality',
     unlockFloor: 9,
   },
+  // Floors 10-14 continue the ladder per the scaling rule: growth 1.45 → 1.5 →
+  // 1.5 → 1.55 → 1.55 → 1.6, base +3-4 per floor, each rotating the lever.
+  // Crit chance again (after floor 3's Lucky Find) — the shards catch the light.
+  // Cost = round(30 × 1.5^level) in Glass Shard. Locked until floor 10.
+  {
+    id: 'prism_sight', name: 'Prism Sight', icon: '\u{1F537}',
+    description: '+1% Crit Chance per level',
+    baseCost: 30, costMultiplier: 1.5, maxLevel: 15,
+    effectPerLevel: 1, effectUnit: '% crit', costResource: 'glass_shard', effect: 'critChance',
+    unlockFloor: 10,
+  },
+  // Per-Explorer auto power, floor-11 rung (after floor 4's Heavy Sweep).
+  // Cost = round(34 × 1.5^level) in Batteries. Locked until floor 11.
+  {
+    id: 'battery_pack', name: 'Battery Pack', icon: '\u{1F50B}',
+    description: '+4 auto search power per Explorer per level',
+    baseCost: 34, costMultiplier: 1.5, maxLevel: 15,
+    effectPerLevel: 4, effectUnit: '/s', costResource: 'batteries', effect: 'explorerAuto',
+    unlockFloor: 11,
+  },
+  // Hype duration again (after floor 2's Rally Cry) but a full +1s per level.
+  // Cost = round(38 × 1.55^level) in Lamp. Locked until floor 12.
+  {
+    id: 'bright_idea', name: 'Bright Idea', icon: '\u{1FA94}',
+    description: '+1s Explorer hype duration per level',
+    baseCost: 38, costMultiplier: 1.55, maxLevel: 15,
+    effectPerLevel: 1, effectUnit: 's hype', costResource: 'lamp', effect: 'hypeDuration',
+    unlockFloor: 12,
+  },
+  // Flat tap + auto power (the Moth Powers channel), floor-13 rung.
+  // Cost = round(42 × 1.55^level) in Radio. Locked until floor 13.
+  {
+    id: 'dead_air', name: 'Dead Air', icon: '\u{1F4FB}',
+    description: '+6 auto search & tap power per level',
+    baseCost: 42, costMultiplier: 1.55, maxLevel: 15,
+    effectPerLevel: 6, effectUnit: ' power', costResource: 'radio', effect: 'flatPower',
+    unlockFloor: 13,
+  },
+  // Easy Access again (after floor 8's Stocked Shelves) at double the step.
+  // Cost = round(46 × 1.6^level) in CCTV Camera. Locked until floor 14.
+  {
+    id: 'watchful_eye', name: 'Watchful Eye', icon: '\u{1F4F9}',
+    description: '+1% Easy Access chance for all resources per level',
+    baseCost: 46, costMultiplier: 1.6, maxLevel: 15,
+    effectPerLevel: 1, effectUnit: '% easy access', costResource: 'CCTV_camera', effect: 'easyAccess',
+    unlockFloor: 14,
+  },
+  // The danger-layer counters (floors 15-16, growth stepping 1.6 → 1.65).
+  // Quieter searching — every search generates 2% less Noise per level.
+  // Cost = round(50 × 1.65^level) in Computer. Locked until floor 15.
+  {
+    id: 'soft_soles', name: 'Soft Soles', icon: '\u{1F45F}',
+    description: '-2% Noise from searching per level',
+    baseCost: 50, costMultiplier: 1.65, maxLevel: 15,
+    effectPerLevel: 2, effectUnit: '% quieter', costResource: 'computer', effect: 'quiet',
+    unlockFloor: 15,
+  },
+  // Harder drive-offs — taps hit entities 5% harder per level (effect 'repel').
+  // Cost = round(55 × 1.65^level) in VHS Tape. Locked until floor 16.
+  {
+    id: 'camera_flash', name: 'Camera Flash', icon: '\u{1F4F8}',
+    description: '+5% damage against entities per level',
+    baseCost: 55, costMultiplier: 1.65, maxLevel: 15,
+    effectPerLevel: 5, effectUnit: '% entity damage', costResource: 'vhs_tape', effect: 'repel',
+    unlockFloor: 16,
+  },
+  // The IDLE answer to entities: Explorers keep working through an encounter,
+  // applying this % of auto-search power against the entity each tick (effect
+  // 'autoRepel' — stacks with the Black Cat). Un-upgraded play keeps the wait.
+  // Cost = round(60 × 1.7^level) in Notebook Page. Locked until floor 17.
+  {
+    id: 'escape_plan', name: 'Escape Plan', icon: '\u{1F4C4}',
+    description: 'Explorers keep working in encounters: +7% auto power vs entities per level',
+    baseCost: 60, costMultiplier: 1.7, maxLevel: 15,
+    effectPerLevel: 7, effectUnit: '% auto vs entities', costResource: 'notebook_page', effect: 'autoRepel',
+    unlockFloor: 17,
+  },
 ];
 
 /* ------------------------------------------------------------------ */
 /*  Void (Prestige) Upgrades                                           */
 /* ------------------------------------------------------------------ */
 
+// The prestige layer, rebuilt around the LIVE game loop. Rewinding pays Void
+// Fragments (deeper runs pay exponentially more — see REWIND_* below); these
+// upgrades are PERMANENT and survive every rewind. Void Resonance is the
+// "other half of balance": a compounding ×1.25/level on ALL search power that
+// lets the player keep pace with the ×1.5-per-floor node-HP curve, run after
+// run. Costs follow round(baseCost × costGrowth^level).
 export const VOID_UPGRADES: VoidUpgradeDef[] = [
   {
-    id: 'hardened_soul',
-    name: 'Hardened Soul',
-    icon: '\u{2764}\u{FE0F}',
-    description: '+base Max HP per run',
-    costPerLevel: 3,
-    maxLevel: 20,
-    effectPerLevel: 10,
-    effectUnit: ' Max HP',
+    id: 'void_resonance',
+    name: 'Void Resonance',
+    icon: '\u{1F300}',
+    description: 'ALL search power ×1.25 per level (tap, drone & Explorer — compounds)',
+    baseCost: 3, costGrowth: 1.6, maxLevel: 25,
+    effectPerLevel: 25,
+    effectUnit: '% power (compounding)',
   },
   {
-    id: 'iron_psyche',
-    name: 'Iron Psyche',
-    icon: '\u{1F9E0}',
-    description: '+base Max Sanity per run',
-    costPerLevel: 3,
-    maxLevel: 20,
-    effectPerLevel: 10,
-    effectUnit: ' Max Sanity',
-  },
-  {
-    id: 'speed_runner',
-    name: 'Speed Runner',
-    icon: '\u{26A1}',
-    description: '+base explore speed per run',
-    costPerLevel: 4,
-    maxLevel: 20,
-    effectPerLevel: 5,
-    effectUnit: '% speed',
-  },
-  {
-    id: 'keen_senses',
-    name: 'Keen Senses',
-    icon: '\u{1F50D}',
-    description: '+base find rate per run',
-    costPerLevel: 4,
-    maxLevel: 20,
-    effectPerLevel: 5,
-    effectUnit: '% find rate',
-  },
-  {
-    id: 'thick_hide',
-    name: 'Thick Hide',
-    icon: '\u{1F6E1}\u{FE0F}',
-    description: '+base damage reduction per run',
-    costPerLevel: 5,
-    maxLevel: 10,
-    effectPerLevel: 3,
-    effectUnit: '% reduction',
-  },
-  {
-    id: 'inner_peace',
-    name: 'Inner Peace',
-    icon: '\u{1F54A}\u{FE0F}',
-    description: '+base sanity drain reduction per run',
-    costPerLevel: 5,
-    maxLevel: 10,
-    effectPerLevel: 3,
-    effectUnit: '% reduction',
-  },
-  {
-    id: 'pack_rat',
-    name: 'Pack Rat',
+    id: 'deep_pockets',
+    name: 'Deep Pockets',
     icon: '\u{1F9F3}',
-    description: 'Start with extra supplies each run',
-    costPerLevel: 8,
-    maxLevel: 5,
+    description: '+1 resource from every node break per level',
+    baseCost: 5, costGrowth: 2.0, maxLevel: 10,
     effectPerLevel: 1,
-    effectUnit: ' bundle',
+    effectUnit: ' resource/break',
   },
   {
-    id: 'deep_memory',
-    name: 'Deep Memory',
-    icon: '\u{1F4FC}',
-    description: '+offline progress cap',
-    costPerLevel: 6,
-    maxLevel: 10,
+    id: 'familiar_halls',
+    name: 'Familiar Halls',
+    icon: '\u{1F6AA}',
+    description: 'Start every run 2 floors deep per level (already explored)',
+    baseCost: 4, costGrowth: 1.8, maxLevel: 10,
+    effectPerLevel: 2,
+    effectUnit: ' floors head start',
+  },
+  {
+    id: 'fragment_sight',
+    name: 'Fragment Sight',
+    icon: '\u{1F441}\u{FE0F}',
+    description: '+0.25x Crit Damage per level',
+    baseCost: 5, costGrowth: 1.6, maxLevel: 12,
+    effectPerLevel: 0.25,
+    effectUnit: 'x crit damage',
+  },
+  {
+    id: 'void_hunger',
+    name: 'Void Hunger',
+    icon: '\u{1F573}\u{FE0F}',
+    description: '+0.5x Hype multiplier per level',
+    baseCost: 6, costGrowth: 1.7, maxLevel: 10,
+    effectPerLevel: 0.5,
+    effectUnit: 'x hype',
+  },
+  {
+    id: 'moth_lure',
+    name: 'Moth Lure',
+    icon: '\u{1F98B}',
+    description: 'Moths visit 10% more often per level',
+    baseCost: 4, costGrowth: 1.6, maxLevel: 10,
+    effectPerLevel: 10,
+    effectUnit: '% moth visits',
+  },
+  {
+    id: 'lucid_memory',
+    name: 'Lucid Memory',
+    icon: '\u{1F4AD}',
+    description: '+200 offline progress ticks per level',
+    baseCost: 3, costGrowth: 1.5, maxLevel: 10,
     effectPerLevel: 200,
     effectUnit: ' ticks',
   },
+  {
+    id: 'umbral_veil',
+    name: 'Umbral Veil',
+    icon: '\u{1F311}',
+    description: 'Entities give up 3s sooner per level',
+    baseCost: 5, costGrowth: 1.7, maxLevel: 10,
+    effectPerLevel: 3,
+    effectUnit: 's sooner',
+  },
+  {
+    id: 'void_conduit',
+    name: 'Void Conduit',
+    icon: '\u{1F4A0}',
+    description: 'Every Rewind also grants +1 Void Shard per level',
+    baseCost: 10, costGrowth: 2.0, maxLevel: 5,
+    effectPerLevel: 1,
+    effectUnit: ' shard/rewind',
+  },
 ];
 
-/* ------------------------------------------------------------------ */
-/*  Prestige Tier Unlocks                                              */
-/* ------------------------------------------------------------------ */
+/**
+ * Fragments a retired void upgrade cost per level (the old flat costPerLevel).
+ * Saves that bought them get those fragments refunded on load, so no spent
+ * fragment is ever lost to the redesign.
+ */
+export const LEGACY_VOID_REFUND: Record<string, number> = {
+  hardened_soul: 3, iron_psyche: 3, speed_runner: 4, keen_senses: 4,
+  thick_hide: 5, inner_peace: 5, pack_rat: 8, deep_memory: 6,
+};
 
-export interface PrestigeTier {
-  prestigeRequired: number;
-  unlocksLevelId: number | null;
-  description: string;
+/* ------------------------------------------------------------------ */
+/*  Rewind payout                                                      */
+/* ------------------------------------------------------------------ */
+//
+// Fragments earned by a Rewind: each floor from REWIND_MIN_FLOOR down to the
+// deepest floor unlocked THIS RUN pays round(REWIND_GROWTH^(floor − min)).
+// Exponential so a deeper push always beats re-farming a shallow one —
+// matching the ×1.5 node-HP curve the player is fighting.
+
+export const REWIND_MIN_FLOOR = 4;     // also the rewind unlock gate
+export const REWIND_GROWTH = 1.18;
+
+export function rewindFragmentsFor(deepestFloor: number): number {
+  let total = 0;
+  for (let i = REWIND_MIN_FLOOR; i <= deepestFloor; i++) {
+    total += Math.round(Math.pow(REWIND_GROWTH, i - REWIND_MIN_FLOOR));
+  }
+  return total;
 }
-
-export const PRESTIGE_TIERS: PrestigeTier[] = [
-  { prestigeRequired: 1, unlocksLevelId: null, description: 'Unlocks the VOID tab' },
-  { prestigeRequired: 3, unlocksLevelId: 6, description: 'Unlocks The Crimson Halls' },
-  { prestigeRequired: 5, unlocksLevelId: 7, description: 'Unlocks The Library' },
-  { prestigeRequired: 10, unlocksLevelId: 8, description: 'Unlocks The Frozen Sublevel' },
-];
 
 /* ------------------------------------------------------------------ */
 /*  Abilities (Phase 3)                                                */
@@ -744,112 +920,129 @@ export function getLevel(id: number): LevelDef {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Equipment System (Phase 4A)                                        */
+/*  Gear — craftable scavenger loadout                                 */
 /* ------------------------------------------------------------------ */
+//
+// Four slots, one equipped item each. Gear is CRAFTED from floor resources
+// (making every floor's ore useful beyond its upgrade), unlocks progressively
+// as floors are reached (same ??????-reveal as upgrades), and its bonuses feed
+// the LIVE systems: tap/auto power (%, multiplicative — the run-level half of
+// the multiplicative-power plan), crit, quality/mint, yield, hype, moths.
+// Gear resets on Rewind like run upgrades — Deep Pockets / Void Resonance make
+// re-gearing fast, so the two menus interlock.
 
-export type EquipSlot = 'head' | 'body' | 'feet' | 'accessory';
-export type GearTier = 'common' | 'uncommon' | 'rare' | 'legendary';
+export type GearSlot = 'tool' | 'light' | 'pack' | 'charm';
 
-export const EQUIP_SLOTS: EquipSlot[] = ['head', 'body', 'feet', 'accessory'];
-export const EQUIP_SLOT_ICONS: Record<EquipSlot, string> = {
-  head: '\u{26D1}\u{FE0F}', body: '\u{1F9E5}', feet: '\u{1F45F}', accessory: '\u{1F4FF}',
+export const GEAR_SLOTS: GearSlot[] = ['tool', 'light', 'pack', 'charm'];
+export const GEAR_SLOT_ICONS: Record<GearSlot, string> = {
+  tool: '\u{1F527}', light: '\u{1F526}', pack: '\u{1F392}', charm: '\u{1F340}',
+};
+export const GEAR_SLOT_LABELS: Record<GearSlot, string> = {
+  tool: 'TOOL', light: 'LIGHT', pack: 'PACK', charm: 'CHARM',
 };
 
-export const GEAR_TIER_VALUE: Record<GearTier, number> = { common: 0, uncommon: 1, rare: 2, legendary: 3 };
-export const GEAR_TIER_COLORS: Record<GearTier, string> = {
-  common: '#CCCCCC', uncommon: '#66CC66', rare: '#6688FF', legendary: '#FFD700',
-};
+/**
+ * Bonuses gear can grant. Percent values are whole numbers (25 = +25%);
+ * critDamage/yield are flat adds. All are summed across the equipped loadout.
+ *   tapMult    — % more tap power (multiplies the summed flat power)
+ *   autoMult   — % more auto-search power (drone + Explorers)
+ *   critChance — +% Lucky Find chance
+ *   critDamage — +x crit damage multiplier
+ *   quality    — +% quality-find chance
+ *   mint       — +% mint-find chance
+ *   yield      — +N resources on every node break
+ *   hypeDur    — % longer hype bursts
+ *   respawn    — % faster node respawn
+ *   mothCatch  — +% moth auto-capture
+ *   easyAccess — +% Easy Access (½-HP) node chance
+ *   quiet      — % less Noise from searching (danger layer)
+ *   repel      — +% damage against entities (danger layer)
+ */
+export type GearEffect = 'tapMult' | 'autoMult' | 'critChance' | 'critDamage' | 'quality' | 'mint' | 'yield' | 'hypeDur' | 'respawn' | 'mothCatch' | 'easyAccess' | 'quiet' | 'repel';
 
 export interface GearDef {
   id: string;
   name: string;
-  icon: string;
-  slot: EquipSlot;
-  tier: GearTier;
-  minLevelId: number;
-  effects: Record<string, number>;
+  icon: string;          // emoji fallback
+  iconTexture?: string;  // loaded PNG icon id (preferred when set)
+  slot: GearSlot;
+  unlockFloor: number;   // hidden as ?????? until this floor is unlocked
+  cost: { resourceId: string; amount: number }[];
+  effects: Partial<Record<GearEffect, number>>;
   description: string;
 }
 
-export const GEAR_POOL: GearDef[] = [
-  // HEAD
-  { id: 'hard_hat', name: 'Hard Hat', icon: '\u{26D1}\u{FE0F}', slot: 'head', tier: 'common', minLevelId: 0,
-    effects: { damageReduction: 5 }, description: '-5% dmg taken' },
-  { id: 'gas_mask', name: 'Gas Mask', icon: '\u{1F637}', slot: 'head', tier: 'uncommon', minLevelId: 2,
-    effects: { sanityReduction: 20 }, description: '-20% sanity drain' },
-  { id: 'night_vision', name: 'Night Vision', icon: '\u{1F97D}', slot: 'head', tier: 'rare', minLevelId: 4,
-    effects: { findRate: 20 }, description: '+20% find rate' },
-  { id: 'wardens_helm', name: "Warden's Helm", icon: '\u{1F451}', slot: 'head', tier: 'legendary', minLevelId: 6,
-    effects: { damageReduction: 15, entityAvoidance: 10 }, description: '-15% dmg, +10% avoid' },
+// Three items per slot, unlock floors staggered 2–26 so something new to
+// build shows up every couple of floors. Costs are paid in the resources of
+// the floors around the unlock (deeper item → pricier, in deeper ore).
+export const GEAR: GearDef[] = [
+  // TOOL — tap power (the active half)
+  { id: 'crowbar', name: 'Crowbar', icon: '\u{1F527}', iconTexture: 'crowbar', slot: 'tool', unlockFloor: 6,
+    cost: [{ resourceId: 'scrap_wood', amount: 45 }, { resourceId: 'cloth_scraps', amount: 25 }],
+    effects: { tapMult: 25 }, description: 'Pry it open instead of clawing at it.' },
+  { id: 'combat_knife', name: 'Combat Knife', icon: '\u{1F5E1}\u{FE0F}', iconTexture: 'combat_knife', slot: 'tool', unlockFloor: 10,
+    cost: [{ resourceId: 'glass_shard', amount: 60 }, { resourceId: 'scrap_metal', amount: 40 }],
+    effects: { tapMult: 50, critDamage: 0.5 }, description: 'Someone dropped it. They ran.' },
+  { id: 'firesalt_chisel', name: 'Firesalt Chisel', icon: '\u{26CF}\u{FE0F}', iconTexture: 'firesalt', slot: 'tool', unlockFloor: 26,
+    cost: [{ resourceId: 'charcoal', amount: 70 }, { resourceId: 'bone_fragments', amount: 50 }],
+    effects: { tapMult: 120, critChance: 2 }, description: 'A chisel packed with burning salt.' },
 
-  // BODY
-  { id: 'leather_jacket', name: 'Leather Jacket', icon: '\u{1F9E5}', slot: 'body', tier: 'common', minLevelId: 1,
-    effects: { damageReduction: 8 }, description: '-8% dmg taken' },
-  { id: 'kevlar_vest', name: 'Kevlar Vest', icon: '\u{1F9BA}', slot: 'body', tier: 'rare', minLevelId: 4,
-    effects: { damageReduction: 20 }, description: '-20% dmg taken' },
-  { id: 'hazmat_suit', name: 'Hazmat Suit', icon: '\u{2623}\u{FE0F}', slot: 'body', tier: 'legendary', minLevelId: 5,
-    effects: { sanityReduction: 30, damageReduction: 10 }, description: '-30% sanity, -10% dmg' },
+  // LIGHT — auto-search power (the idle half)
+  { id: 'worn_flashlight', name: 'Worn Flashlight', icon: '\u{1F526}', iconTexture: 'worn_flashlight', slot: 'light', unlockFloor: 2,
+    cost: [{ resourceId: 'wallpaper_strip', amount: 30 }, { resourceId: 'carpet_swatch', amount: 20 }],
+    effects: { autoMult: 15 }, description: 'The dark searches back a little less.' },
+  { id: 'lamp_rig', name: 'Lamp Rig', icon: '\u{1FA94}', iconTexture: 'lamp', slot: 'light', unlockFloor: 12,
+    cost: [{ resourceId: 'lamp', amount: 45 }, { resourceId: 'copper_wire', amount: 60 }],
+    effects: { autoMult: 40 }, description: 'Showroom lamps, wired into a floodlight.' },
+  { id: 'vhs_camera', name: 'VHS Camera', icon: '\u{1F4F9}', iconTexture: 'vhs_camera', slot: 'light', unlockFloor: 16,
+    cost: [{ resourceId: 'vhs_tape', amount: 50 }, { resourceId: 'batteries', amount: 45 }],
+    effects: { autoMult: 70, critChance: 2 }, description: 'The viewfinder sees things you miss.' },
 
-  // FEET
-  { id: 'running_shoes', name: 'Running Shoes', icon: '\u{1F45F}', slot: 'feet', tier: 'common', minLevelId: 0,
-    effects: { exploreSpeed: 8 }, description: '+8% speed' },
-  { id: 'steel_toe_boots', name: 'Steel-Toe Boots', icon: '\u{1F97E}', slot: 'feet', tier: 'uncommon', minLevelId: 1,
-    effects: { damageReduction: 15 }, description: '-15% dmg taken' },
-  { id: 'sprint_boots', name: 'Sprint Boots', icon: '\u{26A1}', slot: 'feet', tier: 'rare', minLevelId: 4,
-    effects: { exploreSpeed: 20, entityAvoidance: 5 }, description: '+20% speed, +5% avoid' },
+  // PACK — yield (big-number fuel)
+  { id: 'firesalt_pouch', name: 'Firesalt Pouch', icon: '\u{1F392}', iconTexture: 'firesalt_pouch', slot: 'pack', unlockFloor: 3,
+    cost: [{ resourceId: 'ceiling_tile', amount: 35 }, { resourceId: 'almond_water', amount: 20 }],
+    effects: { yield: 1 }, description: 'Room for one more of everything.' },
+  { id: 'duct_duffel', name: 'Duct-Taped Duffel', icon: '\u{1F9F3}', iconTexture: 'duct_tape', slot: 'pack', unlockFloor: 9,
+    cost: [{ resourceId: 'duct_tape', amount: 55 }, { resourceId: 'scrap_metal', amount: 35 }],
+    effects: { yield: 2 }, description: 'Held together by tape and prayer.' },
+  { id: 'ration_crate', name: 'Ration Crate', icon: '\u{1F371}', iconTexture: 'mre', slot: 'pack', unlockFloor: 20,
+    cost: [{ resourceId: 'mre', amount: 60 }, { resourceId: 'canned_food', amount: 50 }],
+    effects: { yield: 3, quality: 5 }, description: 'Military-grade storage. Sealed from the inside.' },
 
-  // ACCESSORY
-  { id: 'worn_flashlight', name: 'Worn Flashlight', icon: '\u{1F526}', slot: 'accessory', tier: 'common', minLevelId: 0,
-    effects: { exploreSpeed: 10 }, description: '+10% speed' },
-  { id: 'firesalt_pouch', name: 'Firesalt Pouch', icon: '\u{1F392}', slot: 'accessory', tier: 'uncommon', minLevelId: 3,
-    effects: { findRate: 10, damageReduction: 5 }, description: '+10% find, -5% dmg' },
-  { id: 'lucky_foot', name: "Rabbit's Foot", icon: '\u{1F407}', slot: 'accessory', tier: 'rare', minLevelId: 3,
-    effects: { findRate: 15 }, description: '+15% find rate' },
-  { id: 'void_amulet', name: 'Void Amulet', icon: '\u{1F52E}', slot: 'accessory', tier: 'legendary', minLevelId: 7,
-    effects: { damageReduction: 10, sanityReduction: 10, findRate: 10 }, description: '-10% dmg/san, +10% find' },
+  // CHARM — luck and time
+  { id: 'lucky_foot', name: "Rabbit's Foot", icon: '\u{1F407}', iconTexture: 'lucky_foot', slot: 'charm', unlockFloor: 4,
+    cost: [{ resourceId: 'fluorescent_tube', amount: 30 }, { resourceId: 'ceiling_tile', amount: 25 }],
+    effects: { critChance: 3 }, description: 'Not lucky for the rabbit.' },
+  { id: 'watch', name: 'Stopped Watch', icon: '\u{231A}', iconTexture: 'watch', slot: 'charm', unlockFloor: 8,
+    cost: [{ resourceId: 'copper_wire', amount: 45 }, { resourceId: 'scrap_metal', amount: 30 }],
+    effects: { hypeDur: 30, respawn: 10 }, description: 'Right twice a day. Time slips around it.' },
+  { id: 'gas_mask', name: 'Gas Mask', icon: '\u{1F637}', iconTexture: 'gas_mask', slot: 'charm', unlockFloor: 14,
+    cost: [{ resourceId: 'CCTV_camera', amount: 40 }, { resourceId: 'radio', amount: 35 }],
+    effects: { quality: 4, mint: 1 }, description: 'Breathe easy. Notice everything.' },
+  { id: 'noise_radio', name: 'White-Noise Radio', icon: '\u{1F4FB}', iconTexture: 'radio', slot: 'charm', unlockFloor: 13,
+    cost: [{ resourceId: 'radio', amount: 45 }, { resourceId: 'lamp', amount: 30 }],
+    effects: { quiet: 25, repel: 10 }, description: 'Static drowns out the sound of your searching.' },
 ];
 
-/* ------------------------------------------------------------------ */
-/*  Crafting Recipes (Phase 4C)                                        */
-/* ------------------------------------------------------------------ */
-
-export interface RecipeDef {
-  id: string;
-  name: string;
-  icon: string;
-  description: string;
-  ingredients: { resourceId: string; amount: number }[];
-  effectType: 'healHP' | 'healSanity' | 'fullHP' | 'fullSanity' | 'buff';
-  effectValue: number;
-  buffId?: string;
+/** Short human line for a gear item's effects ("+25% tap power · +1 yield"). */
+export function gearEffectSummary(gear: GearDef): string {
+  const parts: string[] = [];
+  const e = gear.effects;
+  if (e.tapMult) parts.push(`+${e.tapMult}% tap power`);
+  if (e.autoMult) parts.push(`+${e.autoMult}% auto search`);
+  if (e.critChance) parts.push(`+${e.critChance}% crit`);
+  if (e.critDamage) parts.push(`+${e.critDamage}x crit dmg`);
+  if (e.quality) parts.push(`+${e.quality}% quality`);
+  if (e.mint) parts.push(`+${e.mint}% mint`);
+  if (e.yield) parts.push(`+${e.yield} yield`);
+  if (e.hypeDur) parts.push(`+${e.hypeDur}% hype time`);
+  if (e.respawn) parts.push(`${e.respawn}% faster respawn`);
+  if (e.mothCatch) parts.push(`+${e.mothCatch}% moth catch`);
+  if (e.easyAccess) parts.push(`+${e.easyAccess}% easy access`);
+  if (e.quiet) parts.push(`-${e.quiet}% noise`);
+  if (e.repel) parts.push(`+${e.repel}% vs entities`);
+  return parts.join(' · ');
 }
-
-export const RECIPES: RecipeDef[] = [
-  { id: 'bandages', name: 'Bandages', icon: '\u{1FA79}',
-    description: 'Heal 10 HP',
-    ingredients: [{ resourceId: 'cloth_scraps', amount: 3 }],
-    effectType: 'healHP', effectValue: 10 },
-  { id: 'torch', name: 'Torch', icon: '\u{1F525}',
-    description: 'Fewer entities (37s)',
-    ingredients: [{ resourceId: 'batteries', amount: 2 }, { resourceId: 'cloth_scraps', amount: 1 }],
-    effectType: 'buff', effectValue: 25, buffId: 'torch' },
-  { id: 'barricade_kit', name: 'Barricade Kit', icon: '\u{1F9F1}',
-    description: 'Block damage (15s)',
-    ingredients: [{ resourceId: 'scrap_metal', amount: 4 }],
-    effectType: 'buff', effectValue: 10, buffId: 'barricade' },
-  { id: 'distilled_water', name: 'Distilled Water', icon: '\u{1F4A7}',
-    description: 'Full HP heal',
-    ingredients: [{ resourceId: 'almond_water', amount: 3 }],
-    effectType: 'fullHP', effectValue: 0 },
-  { id: 'nerve_tonic', name: 'Nerve Tonic', icon: '\u{1F9EA}',
-    description: 'Full Sanity heal',
-    ingredients: [{ resourceId: 'canned_food', amount: 2 }, { resourceId: 'almond_water', amount: 1 }],
-    effectType: 'fullSanity', effectValue: 0 },
-  { id: 'firesalt_bomb', name: 'Firesalt Bomb', icon: '\u{1F4A3}',
-    description: 'Auto-kill next entity',
-    ingredients: [{ resourceId: 'firesalt', amount: 3 }, { resourceId: 'scrap_metal', amount: 1 }],
-    effectType: 'buff', effectValue: 1, buffId: 'firesaltBomb' },
-];
 
 /* ------------------------------------------------------------------ */
 /*  Void Shard Shop                                                     */
@@ -913,6 +1106,12 @@ export const SHOP_UPGRADES: ShopUpgradeDef[] = [
     baseCost: 350, costStep: 0, maxLevel: 1,
     effectPerLevel: 5, effectUnit: '% hyped power',
   },
+  {
+    id: 'pet_cat', name: 'Black Cat', icon: '\u{1F408}\u{200D}\u{2B1B}',
+    description: 'Even the entities fear it — helps drive them off while you idle, grows from every drive-off. Yours forever.',
+    baseCost: 75, costStep: 0, maxLevel: 1,
+    effectPerLevel: 4, effectUnit: '% auto vs entities',
+  },
   // Halves every floor-base construction roll (all four stages): 1/100 → 1/50,
   // 1/250 → 1/125, 1/500 → 1/250, 1/750 → 1/375.
   {
@@ -926,6 +1125,14 @@ export const SHOP_UPGRADES: ShopUpgradeDef[] = [
     description: 'Every resource node has 25% less Integrity — on every floor.',
     baseCost: 250, costStep: 0, maxLevel: 1,
     effectPerLevel: 25, effectUnit: '% less Integrity',
+  },
+  // More Explorers — every per-Explorer bonus (Heavy Sweep, Splinters, Battery
+  // Pack, Pet Bear...) counts once per Explorer, so each is a big multiplier.
+  {
+    id: 'second_explorer', name: 'Another Explorer', icon: '\u{1F3C3}',
+    description: 'Another Explorer joins every run — all per-Explorer power stacks again.',
+    baseCost: 200, costStep: 300, maxLevel: 2,
+    effectPerLevel: 1, effectUnit: ' Explorer',
   },
 ];
 
@@ -1032,6 +1239,27 @@ export const PETS: PetDef[] = [
       { level: 20, desc: '+15% resource gathering speed' },
     ],
   },
+  // The entity specialist: while a monster has you cornered, the cat lends
+  // +4%/lvl of your auto power against it (stacking with Escape Plan) — the
+  // idle counterplay pet. Grows on every drive-off; encounters are minutes
+  // apart, so its roll is generous (1-in-3, steepening ×1.25/level).
+  {
+    id: 'pet_cat',
+    name: 'Black Cat',
+    iconKey: 'pet_cat',
+    icon: '\u{1F408}\u{200D}\u{2B1B}',
+    maxLevel: 20,
+    levelChance: 3,
+    levelChanceGrowth: 1.25,
+    bonusPerLevel: 4,
+    bonusLabel: 'auto power vs entities',
+    growsOn: 'entity driven off',
+    description: 'It walked out of the dark and decided you were its person. The dark disapproves.',
+    milestones: [
+      { level: 10, desc: 'Entities give up 25% sooner' },
+      { level: 20, desc: 'x2 drive-off rewards' },
+    ],
+  },
 ];
 
 /* ------------------------------------------------------------------ */
@@ -1043,7 +1271,7 @@ export const PETS: PetDef[] = [
 // can claim `reward` shards and advance to the next tier. Renders with the same
 // card layout as the upgrade/shop panels.
 
-export type AchievementStat = 'resourcesCollected' | 'critsLanded' | 'creaturesCaught' | 'hypeTriggered' | 'structuresBuilt' | 'petLevelsGained' | 'superCritsLanded';
+export type AchievementStat = 'resourcesCollected' | 'critsLanded' | 'creaturesCaught' | 'hypeTriggered' | 'structuresBuilt' | 'petLevelsGained' | 'superCritsLanded' | 'depthReached' | 'rewindsDone' | 'gearCrafted' | 'entitiesRepelled' | 'phantomsCaught';
 
 export interface AchievementDef {
   id: string;
@@ -1115,6 +1343,53 @@ export const ACHIEVEMENTS: AchievementDef[] = [
     description: 'Super Crit Hits Landed',
     stat: 'superCritsLanded',
     thresholds: [10, 50, 150, 500, 1500, 5000, 15000, 50000, 150000, 500000],
+    reward: 3,
+  },
+  // Lifetime floors descended (totalDepth — never reset by Rewind). 31/62 land
+  // on full laps of the floor list; deeper tiers are the long game.
+  {
+    id: 'deep_diver',
+    name: 'Deep Diver',
+    description: 'Total Floors Descended',
+    stat: 'depthReached',
+    thresholds: [5, 15, 31, 62, 124, 250, 500, 1000, 2000],
+    reward: 3,
+  },
+  // Rewinds performed — pays extra (reward step 5) since each one is a full reset.
+  {
+    id: 'tape_rewinder',
+    name: 'Tape Rewinder',
+    description: 'Total Rewinds Performed',
+    stat: 'rewindsDone',
+    thresholds: [1, 2, 3, 5, 8, 12, 20],
+    reward: 5,
+  },
+  // Lifetime gear crafted. Gear resets on Rewind, so re-crafting a loadout each
+  // run keeps feeding this past the item roster.
+  {
+    id: 'gear_head',
+    name: 'Gear Head',
+    description: 'Total Gear Crafted',
+    stat: 'gearCrafted',
+    thresholds: [1, 4, 8, 12, 20, 35, 60],
+    reward: 3,
+  },
+  // Entities driven off (the danger layer's active-play reward loop).
+  {
+    id: 'night_watch',
+    name: 'Night Watch',
+    description: 'Entities Driven Off',
+    stat: 'entitiesRepelled',
+    thresholds: [1, 5, 15, 40, 100, 250, 600],
+    reward: 3,
+  },
+  // Phantoms clicked during dark phases (the lighting layer's bonus loop).
+  {
+    id: 'eyes_dark',
+    name: 'Eyes in the Dark',
+    description: 'Phantoms Stared Down',
+    stat: 'phantomsCaught',
+    thresholds: [3, 10, 30, 75, 150, 300, 600],
     reward: 3,
   },
 ];

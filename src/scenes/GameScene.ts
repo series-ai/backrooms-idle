@@ -61,12 +61,17 @@ export default class GameScene extends Phaser.Scene {
     this.load.image('icon_regeneration', 'icons/upgrades/regeneration.png');
     this.load.image('icon_meditation', 'icons/upgrades/meditation.png');
 
-    // Entities (5)
+    // Entities (the danger layer's encounter art)
     this.load.image('icon_smiler', 'icons/entities/smiler.png');
     this.load.image('icon_hound', 'icons/entities/hound.png');
     this.load.image('icon_skin_stealer', 'icons/entities/skin_stealer.png');
     this.load.image('icon_partygoer', 'icons/entities/partygoer.png');
     this.load.image('icon_wretched', 'icons/entities/the_wretched.png');
+    this.load.image('icon_clump', 'icons/entities/clump.png');
+    this.load.image('icon_doll_face', 'icons/entities/doll_face.png');
+    this.load.image('icon_scrambles', 'icons/entities/scrambles.png');
+    this.load.image('icon_corpus_vitis', 'icons/entities/corpus_vitis.png');
+    this.load.image('icon_lucky_crane', 'icons/entities/lucky_crane.png');
     this.load.image('icon_moth', 'icons/entities/moth.png');   // flying collectible + Moth resource
 
     // Abilities (3)
@@ -74,13 +79,17 @@ export default class GameScene extends Phaser.Scene {
     this.load.image('icon_barricade', 'icons/abilities/barricade.png');
     this.load.image('icon_signal_flare', 'icons/abilities/signal_flare.png');
 
-    // Equipment (6)
+    // Equipment / gear (the craftable loadout in the GEAR menu)
     this.load.image('icon_gas_mask', 'icons/equipment/gas_mask.png');
     this.load.image('icon_hazmat_suit', 'icons/equipment/hazmat_suit.png');
     this.load.image('icon_steel_toe_boots', 'icons/equipment/steel_toe_boots.png');
     this.load.image('icon_worn_flashlight', 'icons/equipment/worn_flashlight.png');
     this.load.image('icon_firesalt_pouch', 'icons/equipment/firesalt_pouch.png');
     this.load.image('icon_lucky_foot', 'icons/equipment/lucky_rabbits_foot.png');
+    this.load.image('icon_crowbar', 'icons/equipment/crowbar.png');
+    this.load.image('icon_combat_knife', 'icons/equipment/combat_knife.png');
+    this.load.image('icon_vhs_camera', 'icons/equipment/vhs_camera.png');
+    this.load.image('icon_watch', 'icons/equipment/watch.png');
 
     // Prestige (5)
     this.load.image('icon_void_fragment', 'icons/prestige/void_fragment.png');
@@ -159,6 +168,7 @@ export default class GameScene extends Phaser.Scene {
       onEat: () => this.handleEat(),
       onSearch: () => this.handleSearch(),
       onCollectMoth: () => this.handleCollectMoth(),
+      onCollectPhantom: () => this.handleCollectPhantom(),
       onActivateHype: () => this.handleActivateHype(),
       onBuyUpgrade: (id) => this.handleBuyUpgrade(id),
       onEscape: () => this.handleEscape(),
@@ -169,7 +179,8 @@ export default class GameScene extends Phaser.Scene {
       onUseAbility: (id) => this.handleUseAbility(id),
       onToggleAutoEscape: () => this.handleToggleAutoEscape(),
       onToggleHideMaxed: () => this.handleToggleHideMaxed(),
-      onCraft: (id) => this.handleCraft(id),
+      onCraftGear: (id) => this.handleCraftGear(id),
+      onEquipGear: (id) => this.handleEquipGear(id),
       onBuyShopUpgrade: (id) => this.handleBuyShopUpgrade(id),
       onClaimAchievement: (id) => this.handleClaimAchievement(id),
       onResetProgress: () => this.handleResetProgress(),
@@ -203,6 +214,24 @@ export default class GameScene extends Phaser.Scene {
 
     // Count down node respawn (real-time, finer than the 1.5s tick).
     this.state.advanceRespawn(delta);
+
+    // Entity give-up timer: if the encounter times out, it wanders off unrewarded.
+    for (const evt of this.state.advanceEntity(delta)) {
+      this.ui.addLogMessage(evt);
+    }
+
+    // Lighting phases: cross-fade the mood and announce the shift.
+    const light = this.state.advanceLighting(delta);
+    if (light.changed) {
+      this.ui.applyLighting(light.lighting);
+      const line = light.lighting === 'bright'
+        ? { msg: 'The fluorescents surge. Moths gather to the light.', color: '#FFE9A8' }
+        : light.lighting === 'dark'
+          ? { msg: 'The lights gutter out. Your searching sounds louder.', color: '#8888AA' }
+          : { msg: 'The lights settle back into their tired hum.', color: '#AAAAAA' };
+      this.ui.addLogMessage({ type: 'ambient', message: line.msg, color: line.color });
+      RundotGameAPI.analytics.recordCustomEvent('lighting_changed', { lighting: light.lighting });
+    }
 
     // Hype timers (cooldown → available → active). React to the transitions.
     const hype = this.state.advanceHype(delta);
@@ -262,6 +291,11 @@ export default class GameScene extends Phaser.Scene {
           RundotGameAPI.analytics.recordCustomEvent('first_entity_encounter');
           RundotGameAPI.analytics.trackFunnelStep(3, 'first_entity', 'session', 1);
         }
+        RundotGameAPI.analytics.recordCustomEvent('entity_encounter', {
+          level: this.state.currentLevel,
+          entity: this.state.activeEntityId ?? 'unknown',
+        });
+        RundotGameAPI.triggerHapticAsync('warning' as never);
       }
 
       if (evt.type === 'damage') {
@@ -377,6 +411,19 @@ export default class GameScene extends Phaser.Scene {
     return gain;
   }
 
+  /** Staring down a phantom (dark phases): bank the burst, calm the noise. */
+  private handleCollectPhantom(): number {
+    const { gain, events } = this.state.collectPhantom();
+    for (const evt of events) this.ui.addLogMessage(evt);
+    this.ui.updateResourceBar();
+    RundotGameAPI.analytics.recordCustomEvent('phantom_caught', {
+      level: this.state.currentLevel,
+      lifetime: this.state.lifetimePhantomsCaught,
+    });
+    RundotGameAPI.triggerHapticAsync('medium' as never);
+    return gain;
+  }
+
   /**
    * React to pet level-up events ('pet' type): refresh the explore-page pet row
    * and save immediately — level-ups are rare and permanent. (The events have
@@ -462,7 +509,7 @@ export default class GameScene extends Phaser.Scene {
     const earned = this.state.rewind();
 
     // Play VHS effect, then rebuild the scene
-    this.ui.playRewindEffect(earned, () => {
+    this.ui.playRewindEffect(earned, earned > 0 ? this.state.rewindShardBonus : 0, () => {
       // Restart the scene to fully rebuild UI (tab bar may change)
       this.saveGame();
       this.scene.restart();
@@ -508,19 +555,35 @@ export default class GameScene extends Phaser.Scene {
     }
   }
 
-  private handleCraft(recipeId: string): void {
-    const events = this.state.craft(recipeId);
-    if (events.length > 0) {
-      for (const evt of events) {
-        this.ui.addLogMessage(evt);
-      }
+  private handleCraftGear(id: string): void {
+    if (this.state.craftGear(id)) {
+      this.ui.addLogMessage({
+        type: 'event',
+        message: `Crafted & equipped: ${id.replace(/_/g, ' ')}!`,
+        color: '#FFD24A',
+      });
       this.ui.updateResourceBar();
       this.ui.refreshGearPanel();
-      RundotGameAPI.analytics.recordCustomEvent('item_crafted', {
-        recipe: recipeId,
+      RundotGameAPI.analytics.recordCustomEvent('gear_crafted', {
+        gear: id,
         level: this.state.currentLevel,
+        lifetime_crafted: this.state.lifetimeGearCrafted,
       });
       RundotGameAPI.triggerHapticAsync('success' as never);
+      this.saveGame();
+    }
+  }
+
+  private handleEquipGear(id: string): void {
+    if (this.state.equipGear(id)) {
+      this.ui.addLogMessage({
+        type: 'system',
+        message: `Equipped: ${id.replace(/_/g, ' ')}`,
+        color: '#CCCCCC',
+      });
+      this.ui.refreshGearPanel();
+      RundotGameAPI.analytics.recordCustomEvent('gear_equipped', { gear: id });
+      RundotGameAPI.triggerHapticAsync('light' as never);
       this.saveGame();
     }
   }

@@ -1,9 +1,9 @@
 import Phaser from 'phaser';
 import RundotGameAPI from '@series-inc/rundot-game-sdk/api';
 import { LAYOUT } from '../config';
-import { UPGRADES, RESOURCES, RESOURCE_ORDER, VOID_UPGRADES, PRESTIGE_TIERS, ABILITIES, EQUIP_SLOTS, EQUIP_SLOT_ICONS, GEAR_POOL, GEAR_TIER_COLORS, RECIPES, SHOP_UPGRADES, ACHIEVEMENTS, FLOOR_BASE_STAGES, PETS, getTierColor, tierSuffix, getFloorOre, type UpgradeDef, type ShopUpgradeDef, type AchievementDef } from '../data/GameData';
+import { UPGRADES, RESOURCES, RESOURCE_ORDER, VOID_UPGRADES, REWIND_MIN_FLOOR, ABILITIES, GEAR, GEAR_SLOTS, GEAR_SLOT_ICONS, GEAR_SLOT_LABELS, gearEffectSummary, ENTITIES, SHOP_UPGRADES, ACHIEVEMENTS, FLOOR_BASE_STAGES, PETS, getTierColor, tierSuffix, getFloorOre, type UpgradeDef, type ShopUpgradeDef, type AchievementDef, type VoidUpgradeDef, type GearDef } from '../data/GameData';
 import { fmt, D, type Big } from '../num';
-import type { GameEvent, OfflineSummary } from '../GameState';
+import type { GameEvent, OfflineSummary, LightingState } from '../GameState';
 import { GameState } from '../GameState';
 
 const FONT_FAMILY = 'monospace';
@@ -71,6 +71,7 @@ export interface UICallbacks {
   onEat: () => void;
   onSearch: () => void;
   onCollectMoth: () => number;   // returns Moths banked (Lamp Trap Lv10+ doubles a catch)
+  onCollectPhantom: () => number;   // returns the resource burst from staring one down
   onActivateHype: () => void;
   onBuyUpgrade: (id: string) => void;
   onEscape: () => void;
@@ -81,7 +82,8 @@ export interface UICallbacks {
   onUseAbility: (id: string) => void;
   onToggleAutoEscape: () => void;
   onToggleHideMaxed: () => void;
-  onCraft: (recipeId: string) => void;
+  onCraftGear: (id: string) => void;
+  onEquipGear: (id: string) => void;
   onBuyShopUpgrade: (id: string) => void;
   onClaimAchievement: (id: string) => void;
   onResetProgress: () => void;
@@ -129,6 +131,14 @@ export class UIManager {
   // Wandering moth collectible: at most one in flight; self-rescheduling spawner.
   private mothTimer?: Phaser.Time.TimerEvent;
   private activeMoth?: Phaser.GameObjects.Image;
+  // Lighting overlays (light wash from above / vignette + pall for the dark)
+  private lightOverlay?: Phaser.GameObjects.Image;
+  private vignetteOverlay?: Phaser.GameObjects.Image;
+  private dimOverlay?: Phaser.GameObjects.Rectangle;
+  private dustEmitter?: Phaser.GameObjects.Particles.ParticleEmitter;   // bright-phase dust motes
+  // Phantom collectible: a faint entity that drifts in during DARK phases only.
+  private phantomTimer?: Phaser.Time.TimerEvent;
+  private activePhantom?: Phaser.GameObjects.Image;
   private durFill?: Phaser.GameObjects.Rectangle;
   private durLabel?: Phaser.GameObjects.Text;   // "N to collect" readout on the durability bar
   private qualityLabel?: Phaser.GameObjects.Text;   // "QUALITY"/"MINT" tag above a pre-rolled node
@@ -137,6 +147,15 @@ export class UIManager {
   private baseDescLabel?: Phaser.GameObjects.Text;   // its bonus readout (what the base GIVES you)
   private lastBaseLoc = -1;     // floor location the base line last showed...
   private lastBaseStage = -1;   // ...and its stage — so a stage-up on THIS floor pops the line
+  // Danger layer (explore screen): noise meter + the active-entity takeover
+  private noiseFill?: Phaser.GameObjects.Rectangle;
+  private noiseLabel?: Phaser.GameObjects.Text;
+  private entityImg?: Phaser.GameObjects.Image;      // entity art over the node (blocks it)
+  private entityEmoji?: Phaser.GameObjects.Text;     // emoji fallback when no PNG exists
+  private entityBarBg?: Phaser.GameObjects.Rectangle;
+  private entityFill?: Phaser.GameObjects.Rectangle;
+  private entityLabel?: Phaser.GameObjects.Text;
+  private entityShownId: string | null = null;       // drives the show/hide transitions
 
   // Resource bar
   private resTexts: Map<string, Phaser.GameObjects.Text> = new Map();
@@ -174,21 +193,45 @@ export class UIManager {
   private upgDragStartPointer = 0;
   private upgDragStartScroll = 0;
 
-  // Void panel refs
+  // Void panel refs (card grid + rewind block; mirrors the shop panel)
   private voidFragLabel!: Phaser.GameObjects.Text;
-  private voidCostLabels: Map<string, Phaser.GameObjects.Text> = new Map();
+  private voidFragIcon?: Phaser.GameObjects.Image;
+  private voidStatsLine?: Phaser.GameObjects.Text;
   private voidLvlLabels: Map<string, Phaser.GameObjects.Text> = new Map();
-  private voidBuyBtns: Map<string, Phaser.GameObjects.Container> = new Map();
+  private voidCostLabels: Map<string, Phaser.GameObjects.Text> = new Map();
+  private voidCostIcons: Map<string, Phaser.GameObjects.Image> = new Map();
+  private voidBuyBg: Map<string, Phaser.GameObjects.Image> = new Map();
+  private voidCards: Map<string, Phaser.GameObjects.Rectangle> = new Map();
+  private voidScroll?: Phaser.GameObjects.Container;
+  private voidMinScroll = 0;
+  private voidDragActive = false;
+  private voidDragMoved = false;
+  private voidDragStartPointer = 0;
+  private voidDragStartScroll = 0;
   private rewindBtn!: Phaser.GameObjects.Container;
   private rewindBtnBg!: Phaser.GameObjects.Rectangle;
   private rewindPreviewText!: Phaser.GameObjects.Text;
 
-  // Gear panel refs
-  private gearSlotTexts: Map<string, Phaser.GameObjects.Text> = new Map();
+  // Gear panel refs (slot summary + card grid; mirrors the shop panel)
   private gearSlotIcons: Map<string, Phaser.GameObjects.Image> = new Map();
+  private gearSlotEmpty: Map<string, Phaser.GameObjects.Text> = new Map();
+  private gearSlotNames: Map<string, Phaser.GameObjects.Text> = new Map();
   private gearBonusText!: Phaser.GameObjects.Text;
-  private craftBtns: Map<string, Phaser.GameObjects.Container> = new Map();
-  private craftCostTexts: Map<string, Phaser.GameObjects.Text> = new Map();
+  private gearNameLabels: Map<string, Phaser.GameObjects.Text> = new Map();
+  private gearDescLabels: Map<string, Phaser.GameObjects.Text> = new Map();
+  private gearFlavorLabels: Map<string, Phaser.GameObjects.Text> = new Map();
+  private gearSlotBadges: Map<string, Phaser.GameObjects.Text> = new Map();
+  private gearNameIcons: Map<string, Phaser.GameObjects.Image> = new Map();
+  private gearBtnBg: Map<string, Phaser.GameObjects.Image> = new Map();
+  private gearBtnLabels: Map<string, Phaser.GameObjects.Text> = new Map();
+  private gearCostIcons: Map<string, Phaser.GameObjects.Image> = new Map();
+  private gearCards: Map<string, Phaser.GameObjects.Rectangle> = new Map();
+  private gearScroll?: Phaser.GameObjects.Container;
+  private gearMinScroll = 0;
+  private gearDragActive = false;
+  private gearDragMoved = false;
+  private gearDragStartPointer = 0;
+  private gearDragStartScroll = 0;
 
   // Shop panel refs (mirrors the upgrade panel: scrollable cards + cost buttons)
   private shopShardLabel!: Phaser.GameObjects.Text;
@@ -410,6 +453,7 @@ export class UIManager {
 
   createAll(): void {
     this.createBackground();
+    this.createLightingOverlays();
     this.createHeader();
     this.createStatusBars();
     this.createResourceBar();
@@ -423,6 +467,7 @@ export class UIManager {
     this.createAchievementsPanel();
     this.showTab('explore');
     this.scheduleMoth();
+    this.schedulePhantom();
   }
 
   /* ---- Wandering moth collectible ---- *
@@ -432,8 +477,9 @@ export class UIManager {
 
   private scheduleMoth(): void {
     this.mothTimer?.remove();
-    // ~40s, jittered, so it isn't perfectly periodic.
-    const delay = Phaser.Math.Between(35_000, 45_000);
+    // ~40s, jittered, so it isn't perfectly periodic. Moth Lure (void) divides
+    // the wait, so moths visit up to 2× as often when maxed.
+    const delay = Phaser.Math.Between(35_000, 45_000) / this.state.mothRateMult;
     this.mothTimer = this.scene.time.delayedCall(delay, () => {
       this.trySpawnMoth();
       this.scheduleMoth();
@@ -505,6 +551,212 @@ export class UIManager {
     this.scene.tweens.killTweensOf(this.activeMoth);
     this.activeMoth.destroy();
     this.activeMoth = undefined;
+  }
+
+  /* ---- Lighting overlays ---- *
+   * The halls drift bright / normal / dark (GameState.advanceLighting). Bright
+   * washes warm fluorescent light down from the ceiling; dark closes a heavy
+   * vignette + dim pall over everything. Both are canvas-baked gradients
+   * (Graphics.fillGradientStyle is WebGL-only — same trap as the buy buttons)
+   * cross-faded by alpha, and they only show on the explore tab. */
+
+  private ensureLightingTextures(): void {
+    if (!this.scene.textures.exists('light_gradient')) {
+      const w = LAYOUT.GAME_WIDTH;
+      const h = 560;
+      const tex = this.scene.textures.createCanvas('light_gradient', w, h);
+      if (tex) {
+        const ctx = tex.getContext();
+        const grad = ctx.createLinearGradient(0, 0, 0, h);
+        grad.addColorStop(0, 'rgba(255, 238, 180, 0.85)');
+        grad.addColorStop(0.45, 'rgba(255, 238, 180, 0.30)');
+        grad.addColorStop(1, 'rgba(255, 238, 180, 0)');
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, w, h);
+        tex.refresh();
+      }
+    }
+    if (!this.scene.textures.exists('dark_vignette')) {
+      const w = LAYOUT.GAME_WIDTH;
+      const h = LAYOUT.GAME_HEIGHT;
+      const tex = this.scene.textures.createCanvas('dark_vignette', w, h);
+      if (tex) {
+        const ctx = tex.getContext();
+        const r = Math.hypot(w, h) / 2;
+        const grad = ctx.createRadialGradient(w / 2, h / 2, r * 0.22, w / 2, h / 2, r);
+        grad.addColorStop(0, 'rgba(2, 2, 8, 0)');
+        grad.addColorStop(0.55, 'rgba(2, 2, 8, 0.35)');
+        grad.addColorStop(1, 'rgba(2, 2, 8, 0.88)');
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, w, h);
+        tex.refresh();
+      }
+    }
+    // A single soft dot — the only texture the bright-phase dust needs.
+    if (!this.scene.textures.exists('dust_mote')) {
+      const size = 16;
+      const tex = this.scene.textures.createCanvas('dust_mote', size, size);
+      if (tex) {
+        const ctx = tex.getContext();
+        const grad = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+        grad.addColorStop(0, 'rgba(255, 255, 255, 1)');
+        grad.addColorStop(0.5, 'rgba(255, 255, 255, 0.35)');
+        grad.addColorStop(1, 'rgba(255, 255, 255, 0)');
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, size, size);
+        tex.refresh();
+      }
+    }
+  }
+
+  private createLightingOverlays(): void {
+    this.ensureLightingTextures();
+    const { GAME_WIDTH, GAME_HEIGHT, CENTER_X } = LAYOUT;
+    // Depth 23-24: above the content panels (15-20) so the mood covers the whole
+    // hall, below the tab bar (30). None are interactive — input passes through.
+    this.dimOverlay = this.scene.add.rectangle(CENTER_X, GAME_HEIGHT / 2, GAME_WIDTH, GAME_HEIGHT, 0x020208, 1)
+      .setDepth(23).setAlpha(0);
+    if (this.scene.textures.exists('light_gradient')) {
+      this.lightOverlay = this.scene.add.image(CENTER_X, 0, 'light_gradient')
+        .setOrigin(0.5, 0).setDepth(24).setAlpha(0);
+    }
+    if (this.scene.textures.exists('dark_vignette')) {
+      this.vignetteOverlay = this.scene.add.image(CENTER_X, GAME_HEIGHT / 2, 'dark_vignette')
+        .setDepth(24).setAlpha(0);
+    }
+
+    // Dust motes for BRIGHT phases — one emitter, one tiny texture, ~25 alive
+    // (8s lifespan / 320ms cadence), additive so they read as catching the
+    // light. Starts silent; applyLighting() starts/stops it, and a stop lets
+    // the airborne motes live out their drift as the light fades — free exit
+    // animation. Cost is negligible: a single batched draw.
+    if (this.scene.textures.exists('dust_mote')) {
+      this.dustEmitter = this.scene.add.particles(0, 0, 'dust_mote', {
+        emitZone: {
+          type: 'random',
+          // The lit upper halls (a plain callback — the typed RandomZoneSource shape).
+          source: {
+            getRandomPoint: (point) => {
+              point.x = Phaser.Math.Between(20, GAME_WIDTH - 20);
+              point.y = Phaser.Math.Between(20, 980);
+            },
+          },
+        },
+        lifespan: { min: 5_000, max: 9_000 },
+        speed: { min: 4, max: 16 },        // barely-moving drift
+        angle: { min: 0, max: 360 },
+        gravityY: 4,                        // the slowest possible settle
+        scale: { min: 0.3, max: 1 },
+        alpha: { start: 0.5, end: 0 },      // each mote slowly twinkles out
+        tint: 0xfff2c0,                     // the same warm fluorescent tone as the wash
+        blendMode: Phaser.BlendModes.ADD,
+        frequency: 320,
+        emitting: false,
+      }).setDepth(25);
+    }
+  }
+
+  /** Cross-fade the overlays to a lighting state (called on every phase shift). */
+  applyLighting(state: LightingState, instant = false): void {
+    const targets: [Phaser.GameObjects.GameObject | undefined, number][] = [
+      [this.lightOverlay, state === 'bright' ? 0.9 : 0],
+      [this.vignetteOverlay, state === 'dark' ? 0.9 : 0],
+      [this.dimOverlay, state === 'dark' ? 0.22 : 0],
+    ];
+    for (const [obj, alpha] of targets) {
+      if (!obj) continue;
+      this.scene.tweens.killTweensOf(obj);
+      if (instant) (obj as Phaser.GameObjects.Image).setAlpha(alpha);
+      else this.scene.tweens.add({ targets: obj, alpha, duration: 1600, ease: 'Sine.easeInOut' });
+    }
+    // Dust hangs in the light: emit only while bright (a stop lets the motes
+    // already in the air finish their drift as the wash fades).
+    if (this.dustEmitter) {
+      if (state === 'bright') this.dustEmitter.start();
+      else this.dustEmitter.stop();
+    }
+    // Leaving the dark takes any phantom with it.
+    if (state !== 'dark') this.removePhantom(true);
+  }
+
+  /* ---- Phantom collectible (dark phases only) ---- *
+   * A faint, ghost-tinted entity fades into the halls for a few seconds. Click
+   * it to stare it down: a resource burst + −20 Noise (collectPhantom). Same
+   * lifecycle discipline as the moth: at most one, always cleaned up. */
+
+  private schedulePhantom(): void {
+    this.phantomTimer?.remove();
+    const delay = Phaser.Math.Between(8_000, 15_000);
+    this.phantomTimer = this.scene.time.delayedCall(delay, () => {
+      this.trySpawnPhantom();
+      this.schedulePhantom();
+    });
+  }
+
+  private trySpawnPhantom(): void {
+    if (this.activePhantom || this.activeTab !== 'explore') return;
+    if (this.state.lighting !== 'dark' || this.state.entityActive) return;
+    // A phantom of something that ACTUALLY hunts this floor (needs loaded art).
+    const roster = this.state.level.entityIds
+      .map((id) => ENTITIES[id])
+      .filter((e) => e?.iconKey && this.scene.textures.exists(`icon_${e.iconKey}`));
+    const pick = roster.length > 0 ? roster[Math.floor(Math.random() * roster.length)] : ENTITIES['smiler'];
+    const key = `icon_${pick.iconKey}`;
+    if (!this.scene.textures.exists(key)) return;
+
+    const x = Phaser.Math.Between(90, LAYOUT.GAME_WIDTH - 90);
+    const y = Phaser.Math.Between(LAYOUT.CONTENT_TOP + 130, LAYOUT.CONTENT_BOTTOM - 280);
+    const img = this.scene.add.image(x, y, key)
+      .setDepth(26).setScale(140 / ICON_NATIVE).setAlpha(0).setTint(0x7788bb);
+    img.setInteractive({ useHandCursor: true });
+    img.once('pointerdown', () => this.catchPhantom());
+    this.activePhantom = img;
+
+    // Fade in, drift upward, gone in ~7s if ignored.
+    this.scene.tweens.add({ targets: img, alpha: 0.3, duration: 1400, ease: 'Sine.easeOut' });
+    this.scene.tweens.add({ targets: img, y: y - 34, duration: 7_000, ease: 'Sine.easeInOut' });
+    this.scene.time.delayedCall(7_000, () => {
+      if (this.activePhantom === img) this.removePhantom(true);
+    });
+  }
+
+  private catchPhantom(): void {
+    const img = this.activePhantom;
+    if (!img) return;
+    this.activePhantom = undefined;
+    const gain = this.cb.onCollectPhantom();
+
+    // Stare-down flash: it brightens, swells, and is gone.
+    this.scene.tweens.killTweensOf(img);
+    img.disableInteractive();
+    this.scene.tweens.add({
+      targets: img, alpha: 0, scale: img.scale * 1.6, duration: 420, ease: 'Sine.easeIn',
+      onComplete: () => img.destroy(),
+    });
+
+    const resName = RESOURCES[this.state.floorOre.resource]?.name ?? '';
+    const mote = makeText(this.scene, img.x, img.y - 40, `+${gain} ${resName}  ·  −20 Noise`, 17, '#9FB4FF', {
+      fontStyle: 'bold', stroke: '#000000', strokeThickness: 3,
+    }).setOrigin(0.5).setDepth(27).setAlpha(0);
+    this.scene.tweens.add({
+      targets: mote, alpha: 1, y: img.y - 74, duration: 260, ease: 'Back.easeOut',
+      onComplete: () => this.scene.tweens.add({
+        targets: mote, alpha: 0, delay: 700, duration: 300,
+        onComplete: () => mote.destroy(),
+      }),
+    });
+  }
+
+  private removePhantom(fade: boolean): void {
+    const img = this.activePhantom;
+    if (!img) return;
+    this.activePhantom = undefined;
+    this.scene.tweens.killTweensOf(img);
+    if (fade) {
+      this.scene.tweens.add({ targets: img, alpha: 0, duration: 600, onComplete: () => img.destroy() });
+    } else {
+      img.destroy();
+    }
   }
 
   /* ---- Background ---- */
@@ -703,8 +955,8 @@ export class UIManager {
       { id: 'explore', label: 'EXPLORE' }, { id: 'items', label: 'ITEMS' }, { id: 'upgrades', label: 'UPGRADES' },
     ];
     const row2: { id: string; label: string }[] = showVoid
-      ? [{ id: 'void', label: 'VOID (wip)' }, { id: 'gear', label: 'GEAR (wip)' }, { id: 'shop', label: 'SHOP' }]
-      : [{ id: 'gear', label: 'GEAR (wip)' }, { id: 'shop', label: 'SHOP' }];
+      ? [{ id: 'void', label: 'VOID' }, { id: 'gear', label: 'GEAR' }, { id: 'shop', label: 'SHOP' }]
+      : [{ id: 'gear', label: 'GEAR' }, { id: 'shop', label: 'SHOP' }];
     // 3rd row — Achievements lives here on its own for now.
     const row3: { id: string; label: string }[] = [
       { id: 'achievements', label: 'ACHIEVEMENTS' },
@@ -762,7 +1014,7 @@ export class UIManager {
 
         // Alert dot (red circle + "!") in the tab's top-right corner — shown when
         // that tab has something waiting and you're on a DIFFERENT tab.
-        if (tabId === 'upgrades' || tabId === 'explore' || tabId === 'achievements') {
+        if (tabId === 'upgrades' || tabId === 'explore' || tabId === 'achievements' || tabId === 'gear' || tabId === 'void') {
           const dot = this.scene.add.container(x + tabW / 2 - 6, centerY - rowH / 2 + 4).setDepth(32);
           const circle = this.scene.add.circle(0, 0, 11, 0xff3030).setStrokeStyle(2, 0x000000);
           const bang = makeText(this.scene, 0, 0, '!', 15, '#FFFFFF', { fontStyle: 'bold' }).setOrigin(0.5);
@@ -786,6 +1038,10 @@ export class UIManager {
     if (ex) ex.setVisible(this.activeTab !== 'explore' && this.state.canDescendToNew());
     const ach = this.tabNotifDots.get('achievements');
     if (ach) ach.setVisible(this.activeTab !== 'achievements' && this.state.hasClaimableAchievement());
+    const gear = this.tabNotifDots.get('gear');
+    if (gear) gear.setVisible(this.activeTab !== 'gear' && this.state.hasCraftableGear());
+    const vd = this.tabNotifDots.get('void');
+    if (vd) vd.setVisible(this.activeTab !== 'void' && this.state.hasAffordableVoidUpgrade());
   }
 
   /* ---- Explore panel (log + action buttons) ---- */
@@ -866,6 +1122,37 @@ export class UIManager {
     this.baseDescLabel = makeText(this.scene, cx, iconCy + 252, '', 14, '#666666')
       .setOrigin(0.5).setDepth(16);
     panel.add([this.baseLabel, this.baseDescLabel]);
+
+    // Noise meter — searching is loud. Fills green → amber → red; at 100% an
+    // entity from this floor's roster finds you (see the encounter display).
+    const noiseW = 200;
+    const noiseH = 16;
+    const noiseY = iconCy + 286;
+    const noiseBg = this.scene.add.rectangle(cx, noiseY, noiseW, noiseH, 0x141414, 1)
+      .setDepth(16).setStrokeStyle(1, 0x3a3a3a);
+    this.noiseFill = this.scene.add.rectangle(cx - noiseW / 2, noiseY, 0, noiseH, 0x66aa66)
+      .setOrigin(0, 0.5).setDepth(17);
+    this.noiseLabel = makeText(this.scene, cx, noiseY, 'Noise 0%', 11, '#CCCCCC', {
+      fontStyle: 'bold', stroke: '#000000', strokeThickness: 3,
+    }).setOrigin(0.5).setDepth(18);
+    panel.add([noiseBg, this.noiseFill, this.noiseLabel]);
+
+    // Encounter display — the entity takes over the node area (art above the
+    // dimmed showcase; taps hit IT). Its presence bar sits where the grade tags
+    // usually pulse (those hide during an encounter).
+    this.entityImg = this.scene.add.image(cx, iconCy, 'icon_smiler')
+      .setDepth(18).setVisible(false);
+    this.entityEmoji = makeText(this.scene, cx, iconCy, '', 110, '#FFFFFF')
+      .setOrigin(0.5).setDepth(18).setVisible(false);
+    const ebW = 240;
+    this.entityBarBg = this.scene.add.rectangle(cx, iconCy - 140, ebW, 20, 0x1a0a1a, 1)
+      .setDepth(17).setStrokeStyle(1, 0x663366).setVisible(false);
+    this.entityFill = this.scene.add.rectangle(cx - ebW / 2, iconCy - 140, ebW, 20, 0xcc4466)
+      .setOrigin(0, 0.5).setDepth(18).setVisible(false);
+    this.entityLabel = makeText(this.scene, cx, iconCy - 140, '', 12, '#FFFFFF', {
+      fontStyle: 'bold', stroke: '#000000', strokeThickness: 3,
+    }).setOrigin(0.5).setDepth(19).setVisible(false);
+    panel.add([this.entityImg, this.entityEmoji, this.entityBarBg, this.entityFill, this.entityLabel]);
 
     // The player avatar — you, running endlessly through the backrooms. Sits
     // up top, above the entity/ambient flavor line (flavor is at iconCy - 200),
@@ -1320,116 +1607,43 @@ export class UIManager {
     (this.hideMaxedBtn.getAt(1) as Phaser.GameObjects.Text).setText(on ? 'SHOW MAXED' : 'HIDE MAXED');
   }
 
-  /* ---- Void panel (prestige upgrades + rewind) ---- */
+  /* ---- Void panel (Rewind + permanent fragment upgrades) ---- */
 
   private createVoidPanel(): void {
     const panel = this.scene.add.container(0, 0).setDepth(15);
-    const startY = LAYOUT.CONTENT_TOP_WIDE + 10;
+    const contentH = LAYOUT.CONTENT_BOTTOM_WIDE - LAYOUT.CONTENT_TOP_WIDE - 10;
     const cx = LAYOUT.CENTER_X;
 
-    // Title
-    const title = makeText(this.scene, cx, startY, 'THE VOID', 28, '#AA88FF', {
-      fontStyle: 'bold',
-    }).setOrigin(0.5, 0);
-    panel.add(title);
-
-    // Prestige info
-    const prestigeStr = `Rewinds: ${this.state.prestigeCount}  |  Depth: ${this.state.totalDepth}`;
-    const prestigeInfo = makeText(this.scene, cx, startY + 38, prestigeStr, 16, '#8888AA')
-      .setOrigin(0.5, 0);
-    panel.add(prestigeInfo);
-    this.voidCostLabels.set('_prestige_info', prestigeInfo);
-
-    // Void fragments display with icon
-    const vfIcon = this.createIcon(cx - 130, startY + 74, 'void_fragment', 80);
-    if (vfIcon) {
-      panel.add(vfIcon);
-      this.voidFragLabel = makeText(this.scene, cx - 108, startY + 62, `Void Fragments: ${this.state.voidFragments}`, 20, '#CC88FF', {
-        fontStyle: 'bold',
-      }).setOrigin(0, 0);
-    } else {
-      this.voidFragLabel = makeText(this.scene, cx, startY + 62, `Void Fragments: ${this.state.voidFragments}`, 20, '#CC88FF', {
-        fontStyle: 'bold',
-      }).setOrigin(0.5, 0);
-    }
-    panel.add(this.voidFragLabel);
-
-    // Scrollable container for void upgrades
     const scrollContainer = this.scene.add.container(0, 0);
-    const upgStartY = startY + 100;
-    const rowH = 85;
+    this.voidScroll = scrollContainer;
 
-    for (let i = 0; i < VOID_UPGRADES.length; i++) {
-      const vup = VOID_UPGRADES[i];
-      const y = upgStartY + i * rowH;
-      const row = this.scene.add.container(0, 0);
+    this.ensureUpgradeBtnTexture();
+    const LX = UIManager.UPG_LEFT;
+    const BW = UIManager.UPG_BTN_W;
+    const BCY = UIManager.UPG_BTN_CY;
+    const rowH = UIManager.UPG_ROW_H;
 
-      const lvl = this.state.getVoidLevel(vup.id);
-      const nameTxt = makeText(this.scene, 40, y, `${vup.icon}  ${vup.name}`, 18, '#DDDDFF', {
-        fontStyle: 'bold',
-      });
-      const lvlTxt = makeText(this.scene, 640, y, `Lv.${lvl}/${vup.maxLevel}`, 14, '#8888AA')
-        .setOrigin(1, 0);
-      this.voidLvlLabels.set(vup.id, lvlTxt);
+    // Header (scrolls with the list): fragment balance + how the economy works.
+    const headerY = LAYOUT.CONTENT_TOP_WIDE + 10;
+    const vfIcon = this.createIcon(0, headerY + 14, 'void_fragment', 60) ?? undefined;
+    this.voidFragIcon = vfIcon;
+    this.voidFragLabel = makeText(this.scene, 0, headerY,
+      `Void Fragments: ${this.state.voidFragments}`, 22, '#CC88FF', { fontStyle: 'bold' }).setOrigin(0, 0);
+    if (vfIcon) scrollContainer.add(vfIcon);
+    scrollContainer.add(this.voidFragLabel);
+    this.centerShardHeader(vfIcon, this.voidFragLabel, cx);
+    const earnInfo = makeText(this.scene, cx, headerY + 36,
+      'Rewind to earn Fragments — deeper runs pay exponentially more.',
+      13, '#8888AA').setOrigin(0.5, 0);
+    scrollContainer.add(earnInfo);
 
-      const currentEffect = lvl * vup.effectPerLevel;
-      const descStr = `${vup.description}  |  +${currentEffect}${vup.effectUnit}`;
-      const descTxt = makeText(this.scene, 60, y + 22, descStr, 13, '#9999BB');
-      this.voidCostLabels.set(`desc_${vup.id}`, descTxt);
-
-      const costStr = lvl >= vup.maxLevel ? 'MAXED' : `Cost: ${vup.costPerLevel} fragments`;
-      const costTxt = makeText(this.scene, 60, y + 42, costStr, 14, '#AAAACC');
-      this.voidCostLabels.set(vup.id, costTxt);
-
-      const canBuy = this.state.canAffordVoidUpgrade(vup.id);
-      const buyBtn = makeBtn(this.scene, 600, y + 48, canBuy ? 'BUY' : '---', 100, 28, canBuy ? 0x443366 : 0x222233, () => {
-        this.cb.onBuyVoidUpgrade(vup.id);
-      });
-      this.voidBuyBtns.set(vup.id, buyBtn);
-
-      row.add([nameTxt, lvlTxt, descTxt, costTxt, buyBtn]);
-
-      const divider = this.scene.add.rectangle(cx, y + 74, 620, 1, 0x333355).setDepth(15);
-      row.add(divider);
-
-      scrollContainer.add(row);
-    }
-
-    // Rewind button — below upgrades
-    const rewindY = upgStartY + VOID_UPGRADES.length * rowH + 20;
-    const rewindDivider = this.scene.add.rectangle(cx, rewindY - 10, 620, 2, 0x553388).setDepth(15);
-    scrollContainer.add(rewindDivider);
-
-    const rewindLabel = makeText(this.scene, cx, rewindY, 'REWIND THE TAPE', 22, '#CC88FF', {
-      fontStyle: 'bold',
-    }).setOrigin(0.5, 0);
-    scrollContainer.add(rewindLabel);
-
+    // Rewind block: the big button, its payout preview, and lifetime stats.
     const canRewind = this.state.canRewind();
-    const previewFrags = canRewind ? this.state.calculateRewindFragments() : 0;
-    this.rewindPreviewText = makeText(this.scene, cx, rewindY + 30,
-      canRewind ? `Reset everything. Earn ${previewFrags} void fragments.` : 'Reach Level 4 to unlock.',
-      16, '#9999BB',
-    ).setOrigin(0.5, 0);
-    scrollContainer.add(this.rewindPreviewText);
-
-    // Prestige tier info
-    let tierY = rewindY + 55;
-    for (const tier of PRESTIGE_TIERS) {
-      const unlocked = this.state.prestigeCount >= tier.prestigeRequired;
-      const tierTxt = makeText(this.scene, cx, tierY,
-        `${unlocked ? '\u2713' : '\u25CB'} Rewind ${tier.prestigeRequired}x: ${tier.description}`,
-        14, unlocked ? '#88FF88' : '#666688',
-      ).setOrigin(0.5, 0);
-      scrollContainer.add(tierTxt);
-      tierY += 22;
-    }
-
-    const rewindBtnY = tierY + 20;
+    const rewindBtnY = headerY + 96;
     const rewindBtnBg = this.scene.add.rectangle(0, 0, 420, 56, canRewind ? 0x553388 : 0x222233)
       .setOrigin(0.5).setStrokeStyle(2, canRewind ? 0x8855CC : 0x333344);
     const rwIcon = this.createIcon(-120, 0, 'rewind_button', 80);
-    const rewindBtnTxt = this.scene.add.text(rwIcon ? 10 : 0, 0, rwIcon ? 'REWIND' : '\u23EA REWIND', {
+    const rewindBtnTxt = this.scene.add.text(rwIcon ? 10 : 0, 0, rwIcon ? 'REWIND' : '⏪ REWIND', {
       fontFamily: FONT_FAMILY,
       fontSize: '24px',
       color: canRewind ? '#FFFFFF' : '#555566',
@@ -1440,89 +1654,152 @@ export class UIManager {
     this.rewindBtn = this.scene.add.container(cx, rewindBtnY, rewindChildren);
     this.rewindBtn.setSize(420, 56);
     this.rewindBtn.setInteractive({ useHandCursor: true });
-    this.rewindBtn.on('pointerdown', () => {
-      if (this.state.canRewind()) this.cb.onRewind();
+    // Rewind on RELEASE with the same drag/area guard as the buy buttons — a
+    // scroll gesture must never trigger a full prestige reset.
+    this.rewindBtn.on('pointerup', (p: Phaser.Input.Pointer) => {
+      if (!this.voidDragMoved && this.inWideContent(p) && this.state.canRewind()) this.cb.onRewind();
     });
     this.rewindBtnBg = rewindBtnBg;
     scrollContainer.add(this.rewindBtn);
 
+    this.rewindPreviewText = makeText(this.scene, cx, rewindBtnY + 38, '', 15, '#9999BB')
+      .setOrigin(0.5, 0);
+    scrollContainer.add(this.rewindPreviewText);
+    this.voidStatsLine = makeText(this.scene, cx, rewindBtnY + 62, '', 13, '#666688')
+      .setOrigin(0.5, 0);
+    scrollContainer.add(this.voidStatsLine);
+
+    const divider = this.scene.add.rectangle(cx, rewindBtnY + 92, 660, 2, 0x553388);
+    scrollContainer.add(divider);
+
+    // Card grid of permanent void upgrades — same geometry as the shop cards.
+    const firstCardY = rewindBtnY + 106;
+    for (let i = 0; i < VOID_UPGRADES.length; i++) {
+      const vup = VOID_UPGRADES[i];
+      const row = this.scene.add.container(
+        UIManager.UPG_GRID_X + (i % 2) * UIManager.UPG_COL_W,
+        firstCardY + Math.floor(i / 2) * rowH,
+      );
+
+      const nameTxt = makeText(this.scene, LX, 4, `${vup.icon} ${vup.name}`, 17, '#DDDDFF', { fontStyle: 'bold' });
+      const descTxt = makeText(this.scene, LX, 30, vup.description, 13, '#D8D8D8', {
+        wordWrap: { width: UIManager.UPG_CARD_W - 38 }, maxLines: 3,
+      });
+      const lvlTxt = makeText(this.scene, LX + BW, 6, `Lv ${this.state.getVoidLevel(vup.id)}/${vup.maxLevel}`, 13, '#c8a8ff')
+        .setOrigin(1, 0);
+      this.voidLvlLabels.set(vup.id, lvlTxt);
+
+      const btnBg = this.scene.add.image(LX + BW / 2, BCY, 'upg_btn_grad')
+        .setInteractive({ useHandCursor: true });
+      btnBg.on('pointerdown', () => btnBg.setScale(0.96));
+      btnBg.on('pointerout', () => btnBg.setScale(1));
+      btnBg.on('pointerup', (p: Phaser.Input.Pointer) => {
+        btnBg.setScale(1);
+        if (!this.voidDragMoved && this.inWideContent(p)) this.cb.onBuyVoidUpgrade(vup.id);
+      });
+      // Oversized on purpose — overhangs the button top/bottom for pop.
+      const costIcon = this.createIcon(LX + 38, BCY, 'void_fragment', 76);
+      if (costIcon) this.voidCostIcons.set(vup.id, costIcon);
+      const costLabel = makeText(this.scene, LX + BW / 2, BCY, '', 13, '#FFFFFF', { fontStyle: 'bold' })
+        .setOrigin(0.5, 0.5);
+
+      // Void cards get a faint purple cast to set the menu apart.
+      const card = this.scene.add.rectangle(UIManager.UPG_CARD_CX, 69, UIManager.UPG_CARD_W, 158, 0x1e1e2e, 1)
+        .setStrokeStyle(1, 0x3a3a55);
+      this.voidCards.set(vup.id, card);
+
+      row.add(card);
+      row.add([nameTxt, descTxt, lvlTxt, btnBg]);
+      if (costIcon) row.add(costIcon);
+      row.add(costLabel);
+
+      scrollContainer.add(row);
+      this.voidBuyBg.set(vup.id, btnBg);
+      this.voidCostLabels.set(vup.id, costLabel);
+    }
+
     panel.add(scrollContainer);
 
-    // Mask and scroll
-    const contentH = LAYOUT.CONTENT_BOTTOM_WIDE - LAYOUT.CONTENT_TOP_WIDE - 10;
+    // Clip to the content area.
     const maskGfx = this.scene.add.graphics();
     maskGfx.setVisible(false);
     maskGfx.fillRect(0, LAYOUT.CONTENT_TOP_WIDE, LAYOUT.GAME_WIDTH, contentH);
     panel.setMask(maskGfx.createGeometryMask());
 
-    const totalH = rewindBtnY + 60 - startY;
-    if (totalH > contentH) {
-      const dragZone = this.scene.add.rectangle(
-        cx, LAYOUT.CONTENT_TOP_WIDE + contentH / 2,
-        LAYOUT.GAME_WIDTH, contentH, 0x000000, 0,
-      ).setDepth(16).setInteractive();
+    const gridRows = Math.ceil(VOID_UPGRADES.length / 2);
+    const totalH = (firstCardY + gridRows * rowH) - (LAYOUT.CONTENT_TOP_WIDE + 10);
+    this.voidMinScroll = Math.min(0, contentH - totalH);
 
-      let dragging = false;
-      let lastPointerY = 0;
-      const minScroll = -(totalH - contentH);
-
-      dragZone.on('pointerdown', (_p: Phaser.Input.Pointer) => {
-        dragging = true;
-        lastPointerY = _p.y;
-      });
-      this.scene.input.on('pointermove', (_p: Phaser.Input.Pointer) => {
-        if (!dragging || !this.panels.get('void')?.visible) return;
-        const dy = _p.y - lastPointerY;
-        lastPointerY = _p.y;
-        scrollContainer.y = Phaser.Math.Clamp(scrollContainer.y + dy, minScroll, 0);
-      });
-      this.scene.input.on('pointerup', () => { dragging = false; });
-
-      panel.add(dragZone);
-    }
+    // Drag-to-scroll (same gesture model as the shop, gated to this tab).
+    this.scene.input.on('pointerdown', (p: Phaser.Input.Pointer) => {
+      if (this.activeTab !== 'void') return;
+      if (p.y < LAYOUT.CONTENT_TOP_WIDE || p.y > LAYOUT.CONTENT_BOTTOM_WIDE) return;
+      this.voidDragActive = true;
+      this.voidDragMoved = false;
+      this.voidDragStartPointer = p.y;
+      this.voidDragStartScroll = scrollContainer.y;
+    });
+    this.scene.input.on('pointermove', (p: Phaser.Input.Pointer) => {
+      if (!this.voidDragActive) return;
+      const dy = p.y - this.voidDragStartPointer;
+      if (Math.abs(dy) > 6) this.voidDragMoved = true;
+      scrollContainer.y = Phaser.Math.Clamp(this.voidDragStartScroll + dy, this.voidMinScroll, 0);
+    });
+    this.scene.input.on('pointerup', () => { this.voidDragActive = false; });
+    this.scene.input.on('wheel', (_p: Phaser.Input.Pointer, _o: unknown, _dx: number, dy: number) => {
+      if (this.activeTab !== 'void' || !this.voidScroll) return;
+      this.voidScroll.y = Phaser.Math.Clamp(this.voidScroll.y - dy, this.voidMinScroll, 0);
+    });
 
     this.panels.set('void', panel);
+    this.refreshVoidPanel();
+  }
+
+  /** Refresh one void-upgrade card: level and cost button (MAXED hides the icon). */
+  private renderVoidRow(vup: VoidUpgradeDef): void {
+    const lvl = this.state.getVoidLevel(vup.id);
+    const maxed = lvl >= vup.maxLevel;
+    const canBuy = this.state.canAffordVoidUpgrade(vup.id);
+    const cost = this.state.getVoidUpgradeCost(vup.id);
+
+    this.voidLvlLabels.get(vup.id)?.setText(`Lv ${lvl}/${vup.maxLevel}`);
+
+    // Same treatment as the shop: maxed hides the button and fades the card;
+    // affordability reads as opacity on the gradient.
+    this.voidCards.get(vup.id)?.setAlpha(maxed ? 0.5 : 1);
+    const bg = this.voidBuyBg.get(vup.id);
+    if (bg) {
+      bg.setVisible(!maxed);
+      if (bg.input) bg.input.enabled = !maxed;
+      if (!maxed) bg.setAlpha(canBuy ? 1 : 0.35);
+    }
+    this.voidCostIcons.get(vup.id)?.setVisible(!maxed).setAlpha(canBuy ? 1 : 0.6);
+    const label = this.voidCostLabels.get(vup.id);
+    if (label) {
+      if (maxed) label.setText('MAXED').setColor('#c8a8ff').setAlpha(1);
+      else label.setText(`${cost} Fragments`).setColor('#FFFFFF').setAlpha(canBuy ? 1 : 0.7);
+    }
   }
 
   refreshVoidPanel(): void {
     this.voidFragLabel.setText(`Void Fragments: ${this.state.voidFragments}`);
+    this.centerShardHeader(this.voidFragIcon, this.voidFragLabel, LAYOUT.CENTER_X);
 
-    const prestigeInfo = this.voidCostLabels.get('_prestige_info');
-    if (prestigeInfo) {
-      prestigeInfo.setText(`Rewinds: ${this.state.prestigeCount}  |  Depth: ${this.state.totalDepth}`);
-    }
+    for (const vup of VOID_UPGRADES) this.renderVoidRow(vup);
 
-    for (const vup of VOID_UPGRADES) {
-      const lvl = this.state.getVoidLevel(vup.id);
-      const lvlTxt = this.voidLvlLabels.get(vup.id);
-      if (lvlTxt) lvlTxt.setText(`Lv.${lvl}/${vup.maxLevel}`);
-
-      const descTxt = this.voidCostLabels.get(`desc_${vup.id}`);
-      if (descTxt) {
-        const currentEffect = lvl * vup.effectPerLevel;
-        descTxt.setText(`${vup.description}  |  +${currentEffect}${vup.effectUnit}`);
-      }
-
-      const costTxt = this.voidCostLabels.get(vup.id);
-      if (costTxt) {
-        costTxt.setText(lvl >= vup.maxLevel ? 'MAXED' : `Cost: ${vup.costPerLevel} fragments`);
-      }
-
-      const btn = this.voidBuyBtns.get(vup.id);
-      if (btn) {
-        const canBuy = this.state.canAffordVoidUpgrade(vup.id);
-        const bg = btn.getAt(0) as Phaser.GameObjects.Rectangle;
-        const txt = btn.getAt(1) as Phaser.GameObjects.Text;
-        bg.setFillStyle(canBuy ? 0x443366 : 0x222233);
-        txt.setText(lvl >= vup.maxLevel ? 'MAX' : canBuy ? 'BUY' : '---');
-      }
-    }
-
-    // Update rewind button
+    // Rewind block: payout preview + lifetime stats + button state.
     const canRewind = this.state.canRewind();
-    const previewFrags = canRewind ? this.state.calculateRewindFragments() : 0;
-    this.rewindPreviewText.setText(
-      canRewind ? `Reset everything. Earn ${previewFrags} void fragments.` : 'Reach Level 4 to unlock.',
+    if (canRewind) {
+      const frags = this.state.calculateRewindFragments();
+      const shards = frags > 0 ? this.state.rewindShardBonus : 0;   // Conduit pays only on a productive rewind
+      this.rewindPreviewText.setText(frags > 0
+        ? `Reset the run for +${frags} Fragments${shards > 0 ? ` and +${shards} Shard${shards === 1 ? '' : 's'}` : ''}.`
+        : `Descend past Floor ${this.state.rewindHeadStart} (your head start) to earn Fragments.`);
+    } else {
+      this.rewindPreviewText.setText(`Reach Floor ${REWIND_MIN_FLOOR} to unlock the Rewind.`);
+    }
+    this.voidStatsLine?.setText(
+      `Rewinds: ${this.state.prestigeCount}  ·  Lifetime depth: ${this.state.totalDepth}  ·  Deepest this run: ${this.state.deepestFloorThisRun}`,
     );
     this.rewindBtnBg.setFillStyle(canRewind ? 0x553388 : 0x222233);
     this.rewindBtnBg.setStrokeStyle(2, canRewind ? 0x8855CC : 0x333344);
@@ -1530,219 +1807,274 @@ export class UIManager {
     rewindTxt.setColor(canRewind ? '#FFFFFF' : '#555566');
   }
 
-  /* ---- Gear panel (equipment + crafting) ---- */
+  /* ---- Gear panel (craftable scavenger loadout) ---- */
+
+  // Gear card internals: standard card frame plus an effects line (green) and a
+  // flavor line, with the item's SLOT as a badge where upgrade cards show Lv.
+  private static readonly GEAR_SLOT_BOX = 132;   // slot summary box size
 
   private createGearPanel(): void {
     const panel = this.scene.add.container(0, 0).setDepth(15);
-    const scrollContainer = this.scene.add.container(0, 0);
+    const contentH = LAYOUT.CONTENT_BOTTOM_WIDE - LAYOUT.CONTENT_TOP_WIDE - 10;
     const cx = LAYOUT.CENTER_X;
-    let curY = LAYOUT.CONTENT_TOP_WIDE + 10;
 
-    // Equipment title
-    const eqTitle = makeText(this.scene, cx, curY, 'EQUIPMENT', 22, '#AAAAAA', {
-      fontStyle: 'bold',
-    }).setOrigin(0.5, 0);
-    scrollContainer.add(eqTitle);
-    curY += 34;
+    const scrollContainer = this.scene.add.container(0, 0);
+    this.gearScroll = scrollContainer;
 
-    // Equipment slots (4 rows)
-    for (const slot of EQUIP_SLOTS) {
-      const slotIcon = EQUIP_SLOT_ICONS[slot];
-      const gearId = this.state.equipment[slot];
-      const gear = gearId ? GEAR_POOL.find(g => g.id === gearId) : null;
+    this.ensureUpgradeBtnTexture();
+    const LX = UIManager.UPG_LEFT;
+    const BW = UIManager.UPG_BTN_W;
+    const BCY = UIManager.UPG_BTN_CY;
+    const rowH = UIManager.UPG_ROW_H;
 
-      let label: string;
-      let color: string;
-      const textX = 40;
-      if (gear) {
-        const hasGearIcon = this.scene.textures.exists(`icon_${gear.id}`);
-        if (hasGearIcon) {
-          label = `${slotIcon} ${slot.toUpperCase()}: ${gear.name} (${gear.tier}) \u2014 ${gear.description}`;
-          const gIcon = this.createIcon(textX + 16, curY + 12, gear.id, 80);
-          if (gIcon) {
-            scrollContainer.add(gIcon);
-            this.gearSlotIcons.set(slot, gIcon);
-          }
-        } else {
-          label = `${slotIcon} ${slot.toUpperCase()}: ${gear.icon} ${gear.name} (${gear.tier}) \u2014 ${gear.description}`;
-        }
-        color = GEAR_TIER_COLORS[gear.tier];
-      } else {
-        label = `${slotIcon} ${slot.toUpperCase()}: -- empty --`;
-        color = '#555555';
-      }
-
-      const slotTxt = makeText(this.scene, textX, curY, label, 17, color, {
-        wordWrap: { width: 640 },
-      });
-      scrollContainer.add(slotTxt);
-      this.gearSlotTexts.set(slot, slotTxt);
-      curY += 36;
+    // Loadout summary: one box per slot (equipped item icon + name, or empty).
+    const headerY = LAYOUT.CONTENT_TOP_WIDE + 10;
+    const box = UIManager.GEAR_SLOT_BOX;
+    const boxCY = headerY + 26 + box / 2;
+    for (let i = 0; i < GEAR_SLOTS.length; i++) {
+      const slot = GEAR_SLOTS[i];
+      const sx = 90 + i * 180;
+      scrollContainer.add(makeText(this.scene, sx, headerY, `${GEAR_SLOT_ICONS[slot]} ${GEAR_SLOT_LABELS[slot]}`, 14, '#AAAAAA', { fontStyle: 'bold' }).setOrigin(0.5, 0));
+      const slotBox = this.scene.add.rectangle(sx, boxCY, box, box, 0x1e1e1e, 1)
+        .setStrokeStyle(1, 0x3a3a3a);
+      scrollContainer.add(slotBox);
+      // "--" placeholder while the slot is empty; refreshGearPanel swaps in the icon.
+      const emptyTxt = makeText(this.scene, sx, boxCY, '--', 22, '#555555').setOrigin(0.5);
+      scrollContainer.add(emptyTxt);
+      this.gearSlotEmpty.set(slot, emptyTxt);
+      const nameTxt = makeText(this.scene, sx, boxCY + box / 2 + 6, '', 12, '#CCCCCC', {
+        align: 'center', wordWrap: { width: 170 }, maxLines: 2,
+      }).setOrigin(0.5, 0);
+      scrollContainer.add(nameTxt);
+      this.gearSlotNames.set(slot, nameTxt);
     }
 
-    // Gear bonuses summary
-    curY += 4;
-    this.gearBonusText = makeText(this.scene, 40, curY, '', 14, '#88FF88', {
-      wordWrap: { width: 640 },
-    });
-    this.updateGearBonusText();
-    scrollContainer.add(this.gearBonusText);
-    curY += this.gearBonusText.height + 16;
-
-    // Divider
-    const divider = this.scene.add.rectangle(cx, curY, 620, 2, 0x444444).setDepth(15);
-    scrollContainer.add(divider);
-    curY += 16;
-
-    // Crafting title
-    const craftTitle = makeText(this.scene, cx, curY, 'CRAFTING', 22, '#AAAAAA', {
-      fontStyle: 'bold',
+    // Total loadout bonus line under the boxes.
+    this.gearBonusText = makeText(this.scene, cx, boxCY + box / 2 + 48, '', 14, '#9fd0a0', {
+      align: 'center', wordWrap: { width: 660 }, maxLines: 2,
     }).setOrigin(0.5, 0);
-    scrollContainer.add(craftTitle);
-    curY += 34;
+    scrollContainer.add(this.gearBonusText);
 
-    // Crafting recipes
-    for (const recipe of RECIPES) {
-      const row = this.scene.add.container(0, 0);
+    const dividerY = boxCY + box / 2 + 106;
+    const divider = this.scene.add.rectangle(cx, dividerY, 660, 2, 0x444444);
+    scrollContainer.add(divider);
 
-      // Recipe name + description
-      const nameTxt = makeText(this.scene, 40, curY, `${recipe.icon}  ${recipe.name}`, 18, '#EEEEEE', {
-        fontStyle: 'bold',
+    // Card grid of every gear item (craft → equip), same geometry as upgrades.
+    const firstCardY = dividerY + 14;
+    for (let i = 0; i < GEAR.length; i++) {
+      const gear = GEAR[i];
+      const row = this.scene.add.container(
+        UIManager.UPG_GRID_X + (i % 2) * UIManager.UPG_COL_W,
+        firstCardY + Math.floor(i / 2) * rowH,
+      );
+
+      const nameIcon = gear.iconTexture ? this.createIcon(LX + 16, 14, gear.iconTexture, 40) : null;
+      if (nameIcon) this.gearNameIcons.set(gear.id, nameIcon);
+      const nameTxt = makeText(this.scene, nameIcon ? LX + 42 : LX, 4, gear.name, 17, '#EEEEEE', { fontStyle: 'bold' });
+      this.gearNameLabels.set(gear.id, nameTxt);
+      // Effects line (what it actually gives you) + one flavor line under it.
+      const descTxt = makeText(this.scene, LX, 34, gearEffectSummary(gear), 13, '#9fd0a0', {
+        wordWrap: { width: UIManager.UPG_CARD_W - 38 }, maxLines: 2,
       });
-      row.add(nameTxt);
+      this.gearDescLabels.set(gear.id, descTxt);
+      const flavorTxt = makeText(this.scene, LX, 66, gear.description, 12, '#888888', {
+        wordWrap: { width: UIManager.UPG_CARD_W - 38 }, maxLines: 1, fontStyle: 'italic',
+      });
+      this.gearFlavorLabels.set(gear.id, flavorTxt);
+      // Slot badge where upgrade cards show the Lv counter.
+      const slotTxt = makeText(this.scene, LX + BW, 6, GEAR_SLOT_LABELS[gear.slot], 12, '#c8a8ff')
+        .setOrigin(1, 0);
+      this.gearSlotBadges.set(gear.id, slotTxt);
 
-      const descTxt = makeText(this.scene, 40, curY + 24, recipe.description, 14, '#AAAAAA');
-      row.add(descTxt);
+      const btnBg = this.scene.add.image(LX + BW / 2, BCY, 'upg_btn_grad')
+        .setInteractive({ useHandCursor: true });
+      btnBg.on('pointerdown', () => btnBg.setScale(0.96));
+      btnBg.on('pointerout', () => btnBg.setScale(1));
+      btnBg.on('pointerup', (p: Phaser.Input.Pointer) => {
+        btnBg.setScale(1);
+        if (this.gearDragMoved || !this.inWideContent(p)) return;
+        if (this.state.gearIsOwned(gear.id)) this.cb.onEquipGear(gear.id);
+        else this.cb.onCraftGear(gear.id);
+      });
+      // Cost icon (first cost resource) — swapped/hidden by state in renderGearRow.
+      const costIcon = this.createIcon(LX + 38, BCY, gear.cost[0].resourceId, 76);
+      if (costIcon) this.gearCostIcons.set(gear.id, costIcon);
+      const costLabel = makeText(this.scene, LX + BW / 2, BCY, '', 12, '#FFFFFF', {
+        fontStyle: 'bold', align: 'center',
+      }).setOrigin(0.5, 0.5);
 
-      // Ingredients
-      const ingStr = recipe.ingredients
-        .map(ing => `${ing.amount} ${RESOURCES[ing.resourceId].icon}`)
-        .join(' + ');
-      const costTxt = makeText(this.scene, 40, curY + 44, `Cost: ${ingStr}`, 14, '#CCCCCC');
-      row.add(costTxt);
-      this.craftCostTexts.set(recipe.id, costTxt);
+      const card = this.scene.add.rectangle(UIManager.UPG_CARD_CX, 69, UIManager.UPG_CARD_W, 158, 0x1e1e1e, 1)
+        .setStrokeStyle(1, 0x3a3a3a);
+      this.gearCards.set(gear.id, card);
 
-      // Craft button
-      const canCraft = this.state.canCraft(recipe.id);
-      const craftBtn = makeBtn(this.scene, 600, curY + 36, canCraft ? 'CRAFT' : '---', 110, 32,
-        canCraft ? 0x336633 : 0x333333, () => this.cb.onCraft(recipe.id));
-      row.add(craftBtn);
-      this.craftBtns.set(recipe.id, craftBtn);
+      row.add(card);
+      if (nameIcon) row.add(nameIcon);
+      row.add([nameTxt, descTxt, flavorTxt, slotTxt, btnBg]);
+      if (costIcon) row.add(costIcon);
+      row.add(costLabel);
 
       scrollContainer.add(row);
-
-      // Divider
-      const recipeDivider = this.scene.add.rectangle(cx, curY + 70, 620, 1, 0x333333).setDepth(15);
-      scrollContainer.add(recipeDivider);
-      curY += 80;
+      this.gearBtnBg.set(gear.id, btnBg);
+      this.gearBtnLabels.set(gear.id, costLabel);
     }
 
     panel.add(scrollContainer);
 
-    // Mask and scroll
-    const contentH = LAYOUT.CONTENT_BOTTOM_WIDE - LAYOUT.CONTENT_TOP_WIDE - 10;
+    // Clip to the content area.
     const maskGfx = this.scene.add.graphics();
     maskGfx.setVisible(false);
     maskGfx.fillRect(0, LAYOUT.CONTENT_TOP_WIDE, LAYOUT.GAME_WIDTH, contentH);
     panel.setMask(maskGfx.createGeometryMask());
 
-    const totalH = curY - LAYOUT.CONTENT_TOP_WIDE;
-    if (totalH > contentH) {
-      const dragZone = this.scene.add.rectangle(
-        cx, LAYOUT.CONTENT_TOP_WIDE + contentH / 2,
-        LAYOUT.GAME_WIDTH, contentH, 0x000000, 0,
-      ).setDepth(16).setInteractive();
+    const gridRows = Math.ceil(GEAR.length / 2);
+    const totalH = (firstCardY + gridRows * rowH) - (LAYOUT.CONTENT_TOP_WIDE + 10);
+    this.gearMinScroll = Math.min(0, contentH - totalH);
 
-      let dragging = false;
-      let lastPointerY = 0;
-      const minScroll = -(totalH - contentH);
-
-      dragZone.on('pointerdown', (_p: Phaser.Input.Pointer) => {
-        dragging = true;
-        lastPointerY = _p.y;
-      });
-      this.scene.input.on('pointermove', (_p: Phaser.Input.Pointer) => {
-        if (!dragging || !this.panels.get('gear')?.visible) return;
-        const dy = _p.y - lastPointerY;
-        lastPointerY = _p.y;
-        scrollContainer.y = Phaser.Math.Clamp(scrollContainer.y + dy, minScroll, 0);
-      });
-      this.scene.input.on('pointerup', () => { dragging = false; });
-
-      panel.add(dragZone);
-    }
+    // Drag-to-scroll (same gesture model as the shop, gated to this tab).
+    this.scene.input.on('pointerdown', (p: Phaser.Input.Pointer) => {
+      if (this.activeTab !== 'gear') return;
+      if (p.y < LAYOUT.CONTENT_TOP_WIDE || p.y > LAYOUT.CONTENT_BOTTOM_WIDE) return;
+      this.gearDragActive = true;
+      this.gearDragMoved = false;
+      this.gearDragStartPointer = p.y;
+      this.gearDragStartScroll = scrollContainer.y;
+    });
+    this.scene.input.on('pointermove', (p: Phaser.Input.Pointer) => {
+      if (!this.gearDragActive) return;
+      const dy = p.y - this.gearDragStartPointer;
+      if (Math.abs(dy) > 6) this.gearDragMoved = true;
+      scrollContainer.y = Phaser.Math.Clamp(this.gearDragStartScroll + dy, this.gearMinScroll, 0);
+    });
+    this.scene.input.on('pointerup', () => { this.gearDragActive = false; });
+    this.scene.input.on('wheel', (_p: Phaser.Input.Pointer, _o: unknown, _dx: number, dy: number) => {
+      if (this.activeTab !== 'gear' || !this.gearScroll) return;
+      this.gearScroll.y = Phaser.Math.Clamp(this.gearScroll.y - dy, this.gearMinScroll, 0);
+    });
 
     this.panels.set('gear', panel);
+    this.refreshGearPanel();
   }
 
-  private updateGearBonusText(): void {
-    const bonuses: string[] = [];
-    const keys: [string, string][] = [
-      ['exploreSpeed', 'speed'], ['findRate', 'find'], ['damageReduction', 'dmg red'],
-      ['sanityReduction', 'san red'], ['entityAvoidance', 'avoid'],
-    ];
-    for (const [key, label] of keys) {
-      const val = this.state.getGearBonus(key);
-      if (val > 0) bonuses.push(`+${val}% ${label}`);
+  /**
+   * Refresh one gear card through its states:
+   *   locked (?????? until its floor) → CRAFT (cost per resource, owned/cost)
+   *   → EQUIP (owned, other item in slot) → EQUIPPED (gold-framed).
+   */
+  private renderGearRow(gear: GearDef): void {
+    const name = this.gearNameLabels.get(gear.id);
+    const desc = this.gearDescLabels.get(gear.id);
+    const flavor = this.gearFlavorLabels.get(gear.id);
+    const badge = this.gearSlotBadges.get(gear.id);
+    const card = this.gearCards.get(gear.id);
+    const bg = this.gearBtnBg.get(gear.id);
+    const icon = this.gearCostIcons.get(gear.id);
+    const label = this.gearBtnLabels.get(gear.id);
+    const nameIcon = this.gearNameIcons.get(gear.id);
+
+    if (!this.state.isGearUnlocked(gear.id)) {
+      name?.setText('??????').setColor('#888888');
+      desc?.setText('(Locked)').setColor('#666666');
+      flavor?.setText(`Reach Floor ${gear.unlockFloor} to reveal.`).setColor('#555555');
+      badge?.setVisible(false);
+      nameIcon?.setVisible(false);
+      card?.setAlpha(1).setStrokeStyle(1, 0x3a3a3a);
+      // Locked: the gradient goes ghostly — desaturated tint + heavy fade.
+      bg?.setVisible(true).setTint(0x666677).setAlpha(0.25);
+      if (bg?.input) bg.input.enabled = false;
+      icon?.setVisible(false);
+      label?.setText('\u{1F512} LOCKED').setColor('#777777').setAlpha(1);
+      return;
     }
-    this.gearBonusText.setText(bonuses.length > 0 ? `Gear bonuses: ${bonuses.join(', ')}` : 'No gear equipped');
+
+    name?.setText(gear.name).setColor('#EEEEEE');
+    desc?.setText(gearEffectSummary(gear)).setColor('#9fd0a0');
+    flavor?.setText(gear.description).setColor('#888888');
+    badge?.setVisible(true);
+    nameIcon?.setVisible(true);
+
+    const owned = this.state.gearIsOwned(gear.id);
+    const equipped = this.state.gearIsEquipped(gear.id);
+
+    if (equipped) {
+      // In the slot right now: gold-framed card, no button needed.
+      card?.setAlpha(1).setStrokeStyle(2, 0xFFD24A);
+      bg?.setVisible(false);
+      if (bg?.input) bg.input.enabled = false;
+      icon?.setVisible(false);
+      label?.setText('EQUIPPED ✓').setColor('#FFD24A').setAlpha(1);
+      return;
+    }
+
+    card?.setAlpha(1).setStrokeStyle(1, 0x3a3a3a);
+    if (owned) {
+      // Crafted but benched — one tap swaps it into its slot.
+      bg?.setVisible(true).clearTint().setAlpha(1);
+      if (bg?.input) bg.input.enabled = true;
+      icon?.setVisible(false);
+      label?.setText('EQUIP').setColor('#FFFFFF').setAlpha(1);
+      return;
+    }
+
+    // Craftable: per-resource "owned/cost Name" lines, faded until affordable.
+    const canCraft = this.state.canAffordGear(gear.id);
+    bg?.setVisible(true).clearTint().setAlpha(canCraft ? 1 : 0.35);
+    if (bg?.input) bg.input.enabled = true;
+    icon?.setVisible(true).setAlpha(canCraft ? 1 : 0.6);
+    const costLines = gear.cost.map((c) =>
+      `${fmt(this.state.resources[c.resourceId] ?? D(0))}/${c.amount} ${RESOURCES[c.resourceId]?.name ?? c.resourceId}`,
+    );
+    label?.setText(`CRAFT\n${costLines.join('  +  ')}`).setColor('#FFFFFF').setAlpha(canCraft ? 1 : 0.7);
   }
 
   refreshGearPanel(): void {
-    // Update equipment slots
-    for (const slot of EQUIP_SLOTS) {
-      const txt = this.gearSlotTexts.get(slot);
-      if (!txt) continue;
-      const slotIcon = EQUIP_SLOT_ICONS[slot];
-      const gearId = this.state.equipment[slot];
-      const gear = gearId ? GEAR_POOL.find(g => g.id === gearId) : null;
+    // Slot summary: equipped item icon + name per slot (icons recreated on the
+    // fly — items swap rarely and this keeps the texture handling simple).
+    const gearPanel = this.panels.get('gear');
+    const scrollCont = gearPanel?.getAt(0) as Phaser.GameObjects.Container | undefined;
+    for (let i = 0; i < GEAR_SLOTS.length; i++) {
+      const slot = GEAR_SLOTS[i];
+      const sx = 90 + i * 180;
+      const boxCY = LAYOUT.CONTENT_TOP_WIDE + 36 + UIManager.GEAR_SLOT_BOX / 2;
 
-      // Remove old gear icon image if any
       const oldIcon = this.gearSlotIcons.get(slot);
-      if (oldIcon) {
-        oldIcon.destroy();
-        this.gearSlotIcons.delete(slot);
-      }
+      if (oldIcon) { oldIcon.destroy(); this.gearSlotIcons.delete(slot); }
 
-      if (gear) {
-        const hasGearIcon = this.scene.textures.exists(`icon_${gear.id}`);
-        if (hasGearIcon) {
-          txt.setText(`${slotIcon} ${slot.toUpperCase()}: ${gear.name} (${gear.tier}) \u2014 ${gear.description}`);
-          // Recreate the gear icon image at the text's position
-          const gIcon = this.createIcon(txt.x + 16, txt.y + 12, gear.id, 80);
-          if (gIcon) {
-            // Add to the gear panel's scroll container
-            const gearPanel = this.panels.get('gear');
-            if (gearPanel) {
-              const scrollCont = gearPanel.getAt(0) as Phaser.GameObjects.Container;
-              scrollCont.add(gIcon);
-            }
-            this.gearSlotIcons.set(slot, gIcon);
-          }
+      const id = this.state.gearEquipped[slot];
+      const def = id ? GEAR.find((g) => g.id === id) : null;
+      if (def) {
+        const gIcon = def.iconTexture ? this.createIcon(sx, boxCY, def.iconTexture, 96) : null;
+        if (gIcon && scrollCont) {
+          scrollCont.add(gIcon);
+          this.gearSlotIcons.set(slot, gIcon);
+          this.gearSlotEmpty.get(slot)?.setVisible(false);
         } else {
-          txt.setText(`${slotIcon} ${slot.toUpperCase()}: ${gear.icon} ${gear.name} (${gear.tier}) \u2014 ${gear.description}`);
+          // No texture: show the emoji in the box instead of the icon.
+          this.gearSlotEmpty.get(slot)?.setVisible(true).setText(def.icon).setColor('#EEEEEE');
         }
-        txt.setColor(GEAR_TIER_COLORS[gear.tier]);
+        this.gearSlotNames.get(slot)?.setText(def.name);
       } else {
-        txt.setText(`${slotIcon} ${slot.toUpperCase()}: -- empty --`);
-        txt.setColor('#555555');
+        this.gearSlotEmpty.get(slot)?.setVisible(true).setText('--').setColor('#555555');
+        this.gearSlotNames.get(slot)?.setText('');
       }
     }
 
-    // Update gear bonus summary
-    this.updateGearBonusText();
+    // Total loadout bonus line.
+    const parts: string[] = [];
+    const push = (val: number, text: string) => { if (val > 0) parts.push(text); };
+    push(this.state.gearEffect('tapMult'), `+${this.state.gearEffect('tapMult')}% tap`);
+    push(this.state.gearEffect('autoMult'), `+${this.state.gearEffect('autoMult')}% auto`);
+    push(this.state.gearEffect('critChance'), `+${this.state.gearEffect('critChance')}% crit`);
+    push(this.state.gearEffect('critDamage'), `+${this.state.gearEffect('critDamage')}x crit dmg`);
+    push(this.state.gearEffect('quality'), `+${this.state.gearEffect('quality')}% quality`);
+    push(this.state.gearEffect('mint'), `+${this.state.gearEffect('mint')}% mint`);
+    push(this.state.gearEffect('yield'), `+${this.state.gearEffect('yield')} yield`);
+    push(this.state.gearEffect('hypeDur'), `+${this.state.gearEffect('hypeDur')}% hype`);
+    push(this.state.gearEffect('respawn'), `${this.state.gearEffect('respawn')}% faster respawn`);
+    push(this.state.gearEffect('mothCatch'), `+${this.state.gearEffect('mothCatch')}% moth catch`);
+    push(this.state.gearEffect('easyAccess'), `+${this.state.gearEffect('easyAccess')}% easy access`);
+    this.gearBonusText.setText(parts.length > 0 ? `Loadout: ${parts.join(' · ')}` : 'Nothing equipped — craft gear from your resources below.');
 
-    // Update craft buttons
-    for (const recipe of RECIPES) {
-      const btn = this.craftBtns.get(recipe.id);
-      if (btn) {
-        const canCraft = this.state.canCraft(recipe.id);
-        const bg = btn.getAt(0) as Phaser.GameObjects.Rectangle;
-        const txt = btn.getAt(1) as Phaser.GameObjects.Text;
-        bg.setFillStyle(canCraft ? 0x336633 : 0x333333);
-        txt.setText(canCraft ? 'CRAFT' : '---');
-      }
-    }
+    for (const gear of GEAR) this.renderGearRow(gear);
   }
 
   /**
@@ -2129,6 +2461,14 @@ export class UIManager {
     if (this.showcaseBig) this.showcaseBig.setVisible(tab === 'explore');
     if (tab !== 'explore') this.stopHoldExplore();
 
+    // The lighting mood (and its phantoms/dust) belongs to the halls — explore only.
+    const showWorld = tab === 'explore';
+    this.lightOverlay?.setVisible(showWorld);
+    this.vignetteOverlay?.setVisible(showWorld);
+    this.dimOverlay?.setVisible(showWorld);
+    this.dustEmitter?.setVisible(showWorld);
+    if (!showWorld) this.removePhantom(false);
+
     // The bottom resource readout reflects the resource you're actively
     // collecting, so it only belongs on the explore page.
     const onExplore = tab === 'explore';
@@ -2300,7 +2640,7 @@ export class UIManager {
     // Grade tag above the icon: "MINT" (mint green) or "QUALITY" (orange), shown only
     // on a live pre-rolled node (hidden mid-respawn) so the player breaks it on purpose.
     if (this.qualityLabel) {
-      const live = !s.isRespawning;
+      const live = !s.isRespawning && !s.entityActive;
       const show = live && (s.nodeIsMint || s.nodeIsQuality);
       if (show) {
         this.qualityLabel.setText(s.nodeIsMint ? 'MINT' : 'QUALITY');
@@ -2346,7 +2686,7 @@ export class UIManager {
 
     // "EASY ACCESS" tag (independent of grade) — same live-only, pulsing treatment.
     if (this.easyAccessLabel) {
-      const show = !s.isRespawning && s.nodeIsEasyAccess;
+      const show = !s.isRespawning && !s.entityActive && s.nodeIsEasyAccess;
       if (show) {
         if (!this.easyAccessLabel.visible) {
           this.easyAccessLabel.setVisible(true);
@@ -2359,6 +2699,55 @@ export class UIManager {
         this.scene.tweens.killTweensOf(this.easyAccessLabel);
         this.easyAccessLabel.setScale(1).setVisible(false);
       }
+    }
+
+    // Noise meter — fills as you search, drains while quiet, slams red when
+    // something has already found you.
+    if (this.noiseFill && this.noiseLabel) {
+      const pct = s.entityActive ? 1 : s.noise / 100;
+      this.noiseFill.width = Phaser.Math.Linear(this.noiseFill.width, 200 * pct, 0.25);
+      this.noiseFill.setFillStyle(s.entityActive ? 0xff4444 : pct > 0.75 ? 0xff8844 : pct > 0.4 ? 0xd8c04a : 0x66aa66);
+      this.noiseLabel.setText(s.entityActive ? '!!! FOUND !!!'
+        : `Noise ${Math.floor(s.noise)}%${s.lighting === 'dark' ? ' ×1.5' : ''}`);
+    }
+
+    // Entity encounter: on spawn, the entity's art takes over the node (which
+    // dims behind it) and a presence bar appears; taps drain it. On resolution
+    // everything pops back to the ordinary search view.
+    const entity = s.activeEntity;
+    if (entity && this.entityShownId !== entity.id) {
+      this.entityShownId = entity.id;
+      const key = entity.iconKey ? `icon_${entity.iconKey}` : '';
+      if (key && this.scene.textures.exists(key) && this.entityImg) {
+        this.entityImg.setTexture(key).setScale((300 / ICON_NATIVE) * 0.6).setAlpha(0).setVisible(true);
+        this.scene.tweens.add({ targets: this.entityImg, scale: 300 / ICON_NATIVE, alpha: 1, duration: 300, ease: 'Back.easeOut' });
+        this.entityEmoji?.setVisible(false);
+      } else if (this.entityEmoji) {
+        this.entityEmoji.setText(entity.icon).setScale(0.6).setAlpha(0).setVisible(true);
+        this.scene.tweens.add({ targets: this.entityEmoji, scale: 1, alpha: 1, duration: 300, ease: 'Back.easeOut' });
+        this.entityImg?.setVisible(false);
+      }
+      this.entityBarBg?.setVisible(true);
+      this.entityFill?.setVisible(true);
+      this.entityLabel?.setVisible(true);
+      this.showcaseBig?.setAlpha(0.22);
+      this.hintText.setText('Tap to drive it off!').setColor('#FF8888');
+    } else if (!entity && this.entityShownId) {
+      this.entityShownId = null;
+      this.entityImg?.setVisible(false);
+      this.entityEmoji?.setVisible(false);
+      this.entityBarBg?.setVisible(false);
+      this.entityFill?.setVisible(false);
+      this.entityLabel?.setVisible(false);
+      this.showcaseBig?.setAlpha(1);
+      this.hintText.setText('Tap or hold to search').setColor('#FFFFFF');
+    }
+    if (entity && this.entityFill && this.entityLabel) {
+      const left = s.entityPresence;
+      const max = s.entityPresenceMax;
+      const ratio = Math.max(0, Math.min(1, left.div(max.max(1)).toNumber()));
+      this.entityFill.width = Phaser.Math.Linear(this.entityFill.width, 240 * ratio, 0.3);
+      this.entityLabel.setText(`${entity.name}  ${fmt(left)} / ${fmt(max)}`);
     }
 
     // Right arrow (go deeper): GREEN only when you can descend into NEW territory
@@ -2527,7 +2916,8 @@ export class UIManager {
       case 'upgrades': this.refreshUpgradePanel(); break;
       case 'shop': this.refreshShopPanel(); break;
       case 'achievements': this.refreshAchievementsPanel(); break;
-      // gear / void affordability hook in here as they're built out.
+      case 'gear': this.refreshGearPanel(); break;
+      case 'void': this.refreshVoidPanel(); break;
     }
   }
 
@@ -2600,7 +2990,7 @@ export class UIManager {
 
   /* ---- VHS Rewind effect ---- */
 
-  playRewindEffect(fragments: number, onComplete: () => void): void {
+  playRewindEffect(fragments: number, shards: number, onComplete: () => void): void {
     const { GAME_WIDTH, GAME_HEIGHT } = LAYOUT;
 
     // VHS static overlay
@@ -2623,7 +3013,8 @@ export class UIManager {
     ).setOrigin(0.5).setDepth(402).setAlpha(0);
 
     const fragTxt = makeText(this.scene, GAME_WIDTH / 2, GAME_HEIGHT / 2 + 30,
-      `+${fragments} Void Fragments`, 28, '#FFD700', { fontStyle: 'bold' },
+      `+${fragments} Void Fragments${shards > 0 ? `\n+${shards} Void Shard${shards === 1 ? '' : 's'}` : ''}`,
+      28, '#FFD700', { fontStyle: 'bold', align: 'center' },
     ).setOrigin(0.5).setDepth(402).setAlpha(0);
 
     // Phase 1: static fills screen
@@ -2826,6 +3217,11 @@ export class UIManager {
       ['Quality chance', `${+(s.qualityChance * 100).toFixed(2)}%  (+${s.qualityBonus})`],
       ['Mint chance', `${+(s.mintChance * 100).toFixed(2)}%  (+9)`],
       ['Easy Access chance', `${(s.easyAccessChance * 100).toFixed(1)}%  (½ HP)`],
+      ['Noise per tap', `${+s.noisePerTap.toFixed(3)}%`],
+      ['Entity damage', `×${+s.repelMult.toFixed(2)}`],
+      ['Auto vs entities', `${Math.round(s.autoRepelPct * 100)}%`],
+      ['Entities driven off', `${s.lifetimeEntitiesRepelled.toLocaleString()}`],
+      ['Phantoms stared down', `${s.lifetimePhantomsCaught.toLocaleString()}`],
       ['Resources found', `${s.stats.resourcesFound.toLocaleString()}`],
       ['Quality finds', `${s.stats.qualityFinds.toLocaleString()}`],
       ['Mint finds', `${s.stats.mintFinds.toLocaleString()}`],
@@ -2835,6 +3231,13 @@ export class UIManager {
     if (s.petLionLevel > 0) {
       const critIdx = rows.findIndex(([label]) => label.startsWith('Lucky Find'));
       rows.splice(critIdx + 1, 0, ['Super Crit (Pet Lion)', `${s.petLionLevel}%  ×${s.superCritMult}`]);
+    }
+    // Void Resonance's compounding power multiplier, once it exists.
+    if (s.voidPowerMult > 1) rows.splice(1, 0, ['Void Resonance', `×${+s.voidPowerMult.toFixed(2)} all power`]);
+    // Extra Explorers (shop) — each one re-counts the per-Explorer power.
+    if (s.explorerCount > 1) {
+      const exIdx = rows.findIndex(([label]) => label.startsWith('Explorer 1'));
+      rows.splice(exIdx + 1, 0, ['Explorers', `${s.explorerCount} (each +${s.explorerSharedAuto}/s)`]);
     }
 
     // Panel grows with the row count but is capped to the screen; if the content
@@ -2961,6 +3364,10 @@ export class UIManager {
     if (petId === 'pet_lion') rows.push(['Super Crit multiplier', `×${s.superCritMult}`]);
     if (petId === 'pet_magpie') rows.push(['Your total Mint chance', `${+(s.mintChance * 100).toFixed(2)}%`]);
     if (petId === 'pet_bear') rows.push(['Current hype duration', `${s.hypeDuration / 1000}s`]);
+    if (petId === 'pet_cat') {
+      rows.push(['Your total auto vs entities', `${Math.round(s.autoRepelPct * 100)}%`]);
+      rows.push(['Entity give-up time', `${Math.round(s.entityLeaveMs / 1000)}s`]);
+    }
     rows.push(['Grows', lvl >= pet.maxLevel ? 'MAX level reached' : `1-in-${s.petLevelUpOdds(petId)} per ${pet.growsOn}`]);
     for (const m of pet.milestones) {
       rows.push([`Lv ${m.level} bonus`, m.desc, lvl >= m.level ? '#7CFF7C' : '#777777']);

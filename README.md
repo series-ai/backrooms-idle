@@ -46,7 +46,10 @@ You're not mining — you're **searching**. Every floor has one resource hidden 
 4. Spend resources on **upgrades** (see below). Most are **hidden as `??????` until you descend deep enough to reveal them** — a gentle drip of new toys.
 5. Watch for the occasional **moth** that flutters across the screen — click it (or auto-catch it with *Trapper*) for a rare **Moth**. It's the one resource not tied to a floor.
 6. Every couple minutes your **Explorer** offers **HYPE!** — tap him to trigger a timed **×3 auto-search** burst (he literally sprints faster).
-7. Descend via the **▶** arrow once you've explored enough; hit a wall? **Rewind** (prestige) for permanent **Void** bonuses and climb again, stronger.
+7. **Searching is loud.** Every tap and drone tick fills the **Noise** meter (faster on high-danger floors); at 100% an **entity** from that floor's roster finds you. It blocks the node — the drone hides — and your taps hit *it* instead. Drive it off (same power/crit pipeline, boosted by *Camera Flash* and repel gear) for a **resource burst**, or wait ~45s for it to lose interest and get nothing. *Soft Soles* and the *White-Noise Radio* keep you quieter.
+   **Idle counterplay is buildable in every system:** *Escape Plan* (floor 17) lets Explorers keep working through encounters (+7% auto power vs entities per level), the **Black Cat** pet adds +4%/level more (Lv 10: entities give up 25% sooner; Lv 20: ×2 drive-off rewards), *Umbral Veil* (void) cuts the give-up timer 3s per level, and a floor's fifth base stage — the **Watchtower** — makes that floor's entities permanently 25% weaker and more skittish. Un-upgraded, an encounter is still tap-or-wait.
+8. **The lights have moods.** Every 40–90s the halls drift between **bright** (warm fluorescent wash from the ceiling, dust motes glittering in the light — moths visit **2×** as often), **normal**, and **dark** (a heavy vignette closes in — noise builds **×1.5**, and the meter says so). Deeper floors roll dark more often. While it's dark, **phantoms** — faint, ghost-tinted entities from the floor's roster — drift through for a few seconds; click one to *stare it down* for a resource burst **and −20 Noise** (the *Eyes in the Dark* achievement tracks these).
+9. Descend via the **▶** arrow once you've explored enough; hit a wall? **Rewind** (prestige) for permanent **Void** bonuses and climb again, stronger.
 
 ### How node HP scales
 
@@ -87,8 +90,27 @@ Each upgrade is a small data entry in `UPGRADES` (`src/data/GameData.ts`); costs
 Power comes in channels that stack and are summed generically (so a new upgrade just declares its `effect`): **tap-only** (`power`), **tap + auto** (`flatPower`), **tap + per-Explorer** (`tapExplorer`), **per-Explorer auto** (`explorerAuto`), plus standalone systems — **crit** (`critChance` + `critDamage` ×mult), **quality** (`quality` chance / `qualityYield`), **Easy Access** (`easyAccess`, ½-HP brittle nodes), **auto-capture**, and **hype** (duration). All damage resolves to **whole integers**. The **Stats** menu (top-left) surfaces the live totals.
 
 **Two meta-currency menus** sit alongside the resource upgrades, both spending/earning **Void Shards** (earned by maxing an upgrade or reaching a new floor):
-- **Shop** — permanent Void-Shard upgrades (flat `base + step×level` cost): *Search Upgrade*, *Hype Train*.
+- **Shop** — permanent Void-Shard upgrades (flat `base + step×level` cost): *Search Upgrade*, *Hype Train*, pets, and **Another Explorer** (each extra Explorer re-counts every per-Explorer bonus).
 - **Achievements** — tiered goals that pay scaling Void Shards on claim (e.g. *Pack Rat*: total resources), and grant a global **+0.5% auto-search per claimed tier** across all achievements.
+
+### Gear — the craftable loadout
+
+The **GEAR** menu is a four-slot loadout — **Tool / Light / Pack / Charm** — crafted from floor resources (so every floor's ore is useful beyond its upgrade). Items reveal as `??????` until their floor is reached, auto-equip on craft, and swap freely within a slot. Their bonuses feed the live systems: Tools boost **tap power %**, Lights boost **auto-search %**, Packs add flat **yield** per node break, Charms bend luck and time (crit, quality/mint, hype duration, respawn). Twelve items, unlocking from floor 2 (*Worn Flashlight*) to floor 26 (*Firesalt Chisel*). **Gear resets on Rewind** like run upgrades — re-gearing each run is part of the loop the Void accelerates.
+
+### The Void — prestige
+
+Reaching **Floor 4** unlocks the **VOID** tab and its **Rewind**: reset the run (floor, resources, run upgrades, gear) for **Void Fragments** — each floor past the gate pays `~1.18^depth`, so a deeper push always beats re-farming a shallow one. Fragments buy **permanent** upgrades (costs grow `×1.5–2.0` per level):
+
+| Upgrade | Effect |
+|---|---|
+| **Void Resonance** | ×1.25 **ALL** search power per level (compounds) — the multiplicative "other half" of balance vs the ×1.5 HP curve |
+| **Deep Pockets** | +1 resource per node break per level |
+| **Familiar Halls** | start every run 2 floors deep per level (pre-explored; those floors stop paying rewind fragments) |
+| **Fragment Sight** | +0.25× crit damage per level |
+| **Void Hunger** | +0.5× Hype multiplier per level |
+| **Moth Lure** | moths visit 10% more often per level |
+| **Lucid Memory** | +200 offline ticks per level |
+| **Void Conduit** | each *productive* rewind (one that earned fragments) also pays +1 Void Shard per level |
 
 There are **31 hand-authored floors** that cycle forever — every full lap bumps the *tier* (a new color-grade + tougher danger), so the world re-skins itself endlessly with the same beloved locations.
 
@@ -152,7 +174,7 @@ src/
   num.ts             # ⭐ big-number wrapper (D / fmt / Big) — see above
   GameState.ts       # ALL game logic: economy, upgrades, prestige, save/load, tick
   data/
-    GameData.ts      # static data: 31 floors, resources, upgrades, gear, recipes, shop, abilities
+    GameData.ts      # static data: 31 floors, resources, upgrades, gear, void upgrades, shop, achievements
   scenes/
     GameScene.ts     # the Phaser scene: update loop, input → state, analytics, persistence
   ui/
@@ -192,18 +214,22 @@ Saves live in the SDK's `appStorage` under the key **`backrooms_save`** (offline
 - ✅ **Crit** system (tap + auto, upgrade-gated, with upgradable crit *damage*), **Hype** burst, the **moth** collectible + auto-capture, **Stats** menu, per-tab alert dots, the running **Explorer** sprite.
 - ✅ **Quality / Mint / Easy-Access** node grades (yield + brittle-HP rolls), all-integer damage rounding.
 - ✅ **Void Shard** economy: a **Shop** of permanent upgrades and an **Achievements** menu (tiered, scaling rewards + a global auto-search bonus), earned by maxing upgrades / reaching new floors.
+- ✅ **The Void (prestige)** — Rewind for depth-scaled **Void Fragments** buying permanent, compounding upgrades. **Void Resonance** (×1.25 power/level) is the *multiplicative* "other half of balance" vs the ×1.5 HP curve; **Deep Pockets** starts the scaling-yield climb; **Familiar Halls** head-starts runs (with an anti-farm payout deduction); legacy void saves auto-refund their fragments.
+- ✅ **Gear** — a craftable four-slot loadout (Tool/Light/Pack/Charm, 12 items) paid in floor resources, feeding tap %, auto %, crit, quality/mint, yield, hype & respawn. Resets on Rewind, so the two systems interlock.
+- ✅ Upgrade ladder extended through floor 14 (*Prism Sight*, *Battery Pack*, *Bright Idea*, *Dead Air*, *Watchful Eye*), **Another Explorer** in the shop, and three new achievements (*Deep Diver*, *Tape Rewinder*, *Gear Head*).
+- ✅ **Danger layer** — the **Noise** meter and **entity encounters** (see the core loop). Five staged-art entities join the rosters (*The Clump*, *Doll Face*, *Scrambles*, *Corpus Vitis*, *Lucky Crane*), floors 15-16 add the counters (*Soft Soles* −noise, *Camera Flash* +entity damage), the *White-Noise Radio* charm dampens noise, and *Night Watch* pays shards for drive-offs. Encounters never persist across a reload, and travel/rewind clears them.
+- ✅ **Idle counterplay** (one layer per system): *Escape Plan* upgrade (floor 17, auto power keeps fighting), **Black Cat** pet (stacks with it + give-up/reward milestones), *Umbral Veil* void upgrade (shorter encounters), and the **Watchtower** 5th floor-base stage (per-floor entity nerf).
+- ✅ **Lighting layer** — bright/normal/dark phases with canvas-baked gradient overlays (top light wash / vignette + pall), cross-faded and explore-tab-only. Dark ×1.5 noise + clickable **phantoms**; bright ×2 moths. *Eyes in the Dark* achievement; phases are never saved (sessions open calm).
 
 **Near-term**
-- [ ] **The "other half" of balance** — *multiplicative* power upgrades (e.g. +%/level or ×per-tier) and/or prestige multipliers so power keeps pace with the ×1.5 HP curve (constant time-per-floor = no wall). The flat `+N` upgrades are early boosters only.
-- [ ] **Scaling resource yield** — make a node break grant *more than +1* via upgrades, so inventories climb into big-number territory (`gain` in `resolveNode()`).
-- [ ] **Monsters / danger layer** — a *noise* meter that fills as you search loudly; max it and an **entity** interrupts you. Threat art is staged (`clump`, `doll_face`, `moth`, `scrambles`, `corpus_vitis`, `lucky_crane`, `elevator`).
+- [ ] **Scaling resource yield, phase 2** — multiplicative yield (×N per node break) so inventories climb into true big-number territory (`gain` in `resolveNode()`).
 - [ ] **Node modifiers** — *Buried* / *Shrouded* armor on deeper floors, giving upgrades a counter-target.
-- [ ] **Boss monsters** guarding milestone floors — a gate you must out-power.
+- [ ] **Boss monsters** guarding milestone floors — a gate you must out-power (the `elevator` art is staged for the milestone gate).
+- [ ] **Danger layer phase 2** — entities that steal resources if ignored, Barricade/Flare abilities as encounter counters, entity-specific rewards.
 
 **Later**
-- [ ] Weapon-tier visuals for the Explorer (pistol → gun → shotgun → AR run cycles tied to tap-damage) and hired companions; new equipment (`combat_knife`, `crowbar`, `vhs_camera`, `watch` art staged).
-- [ ] Deeper prestige / void tree tuned around big-number pacing.
-- [ ] Settings polish, achievements, leaderboard (RUN.game SDK), monetization pass.
+- [ ] Weapon-tier visuals for the Explorer (pistol → gun → shotgun → AR run cycles tied to tap-damage) and hired companions; more gear tiers per slot.
+- [ ] Settings polish, leaderboard (RUN.game SDK), monetization pass.
 - [ ] UI/button cleanup; repo hygiene (rename package, drop unused template deps).
 
 > **Design principles:** focused, shippable slices over big rewrites. Keep `taps-to-break` balanced when scaling magnitudes. Theme is **searching / scavenging / sneaking**, *not* attacking — combat arrives with the monster layer.
