@@ -2070,8 +2070,10 @@ export class UIManager {
         wordWrap: { width: UIManager.UPG_CARD_W - 38 }, maxLines: 2,
       });
       this.gearDescLabels.set(gear.id, descTxt);
-      const flavorTxt = makeText(this.scene, LX, 66, gear.description, 12, '#888888', {
-        wordWrap: { width: UIManager.UPG_CARD_W - 38 }, maxLines: 1, fontStyle: 'italic',
+      // Equip-status line (the old flavor blurb slot): "Equipped" in green
+      // when the piece is in its slot, blank otherwise.
+      const flavorTxt = makeText(this.scene, LX, 66, '', 12, '#7CFF7C', {
+        wordWrap: { width: UIManager.UPG_CARD_W - 38 }, maxLines: 1, fontStyle: 'bold',
       });
       this.gearFlavorLabels.set(gear.id, flavorTxt);
       // Slot badge where upgrade cards show the Lv counter.
@@ -2225,7 +2227,7 @@ export class UIManager {
     const lvl = this.state.getGearLevel(gear.id);
     name?.setText(gear.name).setColor('#EEEEEE');
     desc?.setText(gearEffectSummary(gear) + (lvl > 0 ? `  (+${lvl * 10}%)` : '')).setColor('#9fd0a0');
-    flavor?.setText(gear.description).setColor('#888888');
+    flavor?.setText(this.state.gearIsEquipped(gear.id) ? 'Equipped' : '').setColor('#7CFF7C');
     badge?.setVisible(true);
     nameIcon?.setVisible(true);
 
