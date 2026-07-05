@@ -996,9 +996,11 @@ export class UIManager {
 
     // Two UNIFORM rows: every button the same size no matter how full its row
     // is (short rows just center) — no more one-tab-spans-the-screen banners.
+    // Items sits LAST — it's the least-used tab and kept getting fat-fingered
+    // when it lived next to Explore.
     const row1: { id: string; label: string }[] = [
-      { id: 'explore', label: 'EXPLORE' }, { id: 'items', label: 'ITEMS' },
-      { id: 'upgrades', label: 'UPGRADES' }, { id: 'gear', label: 'GEAR' },
+      { id: 'explore', label: 'EXPLORE' }, { id: 'upgrades', label: 'UPGRADES' },
+      { id: 'gear', label: 'GEAR' }, { id: 'items', label: 'ITEMS' },
     ];
     const row2: { id: string; label: string }[] = showVoid
       ? [{ id: 'shop', label: 'SHOP' }, { id: 'void', label: 'VOID' }, { id: 'achievements', label: 'ACHIEVEMENTS' }]
@@ -1064,7 +1066,7 @@ export class UIManager {
 
         // Alert dot (red circle + "!") in the tab's top-right corner — shown when
         // that tab has something waiting and you're on a DIFFERENT tab.
-        if (tabId === 'upgrades' || tabId === 'explore' || tabId === 'achievements' || tabId === 'gear' || tabId === 'void') {
+        if (tabId === 'upgrades' || tabId === 'explore' || tabId === 'achievements' || tabId === 'gear' || tabId === 'void' || tabId === 'shop') {
           const dot = this.scene.add.container(x + tabW / 2 - 6, centerY - rowH / 2 + 4).setDepth(33);
           const circle = this.scene.add.circle(0, 0, 11, 0xff3030).setStrokeStyle(2, 0x000000);
           const bang = makeText(this.scene, 0, 0, '!', 15, '#FFFFFF', { fontStyle: 'bold' }).setOrigin(0.5);
@@ -1091,6 +1093,8 @@ export class UIManager {
     if (gear) gear.setVisible(this.activeTab !== 'gear' && this.state.hasCraftableGear());
     const vd = this.tabNotifDots.get('void');
     if (vd) vd.setVisible(this.activeTab !== 'void' && this.state.hasAffordableVoidUpgrade());
+    const shop = this.tabNotifDots.get('shop');
+    if (shop) shop.setVisible(this.activeTab !== 'shop' && this.state.hasAffordableShopUpgrade());
   }
 
   /* ---- Explore panel (log + action buttons) ---- */
@@ -1252,7 +1256,7 @@ export class UIManager {
       bg.setInteractive({ useHandCursor: true });
       bg.on('pointerdown', () => this.showPetPopup(pet.id));
       btn.add(bg);
-      // PNG art when loaded; the pet's emoji stands in until art exists (Pet Lion).
+      // PNG art when loaded; the pet's emoji stands in until art exists.
       const petIcon = this.createIcon(0, -6, pet.iconKey, 46);
       if (petIcon) btn.add(petIcon);
       else btn.add(makeText(this.scene, 0, -6, pet.icon, 30, '#FFFFFF').setOrigin(0.5));
@@ -1365,7 +1369,7 @@ export class UIManager {
   /**
    * Floating damage number on each search tap — the "big number" juice. A normal
    * hit is a small white number; a lucky find (crit) is a large gold number that
-   * pops bigger and drifts higher; a SUPER crit (Pet Lion) is bigger still,
+   * pops bigger and drifts higher; a SUPER crit (Static) is bigger still,
    * burning orange with a double bang.
    */
   showSearchHit(damage: Big, crit: boolean, superCrit = false): void {
@@ -1568,66 +1572,7 @@ export class UIManager {
     const scrollContainer = this.scene.add.container(0, 0);
     this.upgScroll = scrollContainer;
 
-    const LX = UIManager.UPG_LEFT;
-    const BW = UIManager.UPG_BTN_W;
-    const BCY = UIManager.UPG_BTN_CY;
-
-    for (const upg of UPGRADES) {
-      // Card container; relayoutUpgrades() assigns its grid slot (x = column,
-      // y = row). Children use fixed LOCAL offsets — name / desc / level
-      // stacked, then the gradient buy button.
-      const row = this.scene.add.container(0, 0);
-
-      const nameTxt = makeText(this.scene, LX, 4, upg.name, 17, '#EEEEEE', { fontStyle: 'bold' });
-      // Description is HARD-CAPPED at 3 wrapped lines (maxLines) and the Lv
-      // counter lives top-right, so no description length can ever collide.
-      const descTxt = makeText(this.scene, LX, 30, upg.description, 13, '#D8D8D8', {
-        wordWrap: { width: UIManager.UPG_CARD_W - 38 }, maxLines: 3,
-      });
-      const lvl = this.state.getUpgradeLevel(upg.id);
-      const lvlTxt = makeText(this.scene, LX + BW, 6, `Lv ${lvl}/${upg.maxLevel}`, 13, '#9fd0a0')
-        .setOrigin(1, 0);
-      this.upgNameLabels.set(upg.id, nameTxt);
-      this.upgDescLabels.set(upg.id, descTxt);
-      this.upgLvlLabels.set(upg.id, lvlTxt);
-
-      // Cost line = the buy button: "[icon] owned/cost ResourceName".
-      const btnBg = this.scene.add.image(LX + BW / 2, BCY, 'upg_btn_grad')
-        .setInteractive({ useHandCursor: true });
-      // Press feedback: a quick squeeze while held.
-      btnBg.on('pointerdown', () => btnBg.setScale(0.96));
-      btnBg.on('pointerout', () => btnBg.setScale(1));
-      // Buy on RELEASE, only if the gesture wasn't a scroll-drag AND the pointer is
-      // inside the content area — masked overflow rows still hit-test over the
-      // header/tab strips, where a buy must never trigger.
-      btnBg.on('pointerup', (p: Phaser.Input.Pointer) => {
-        btnBg.setScale(1);
-        if (!this.upgDragMoved && this.inWideContent(p)) this.cb.onBuyUpgrade(upg.id);
-      });
-      // Oversized on purpose — the icon overhangs the button top/bottom for pop.
-      const costIcon = this.createIcon(LX + 38, BCY, upg.costResource, 76);
-      if (costIcon) this.upgCostIcons.set(upg.id, costIcon);
-      const costLabel = makeText(this.scene, LX + BW / 2, BCY, '', 13, '#FFFFFF', { fontStyle: 'bold' })
-        .setOrigin(0.5, 0.5);
-
-      // Each upgrade gets its own card (added first so it sits behind the content).
-      // Spans local y -10..148 — ~15px clear under the button (which ends at 133);
-      // full opacity until maxed (updateCostButton dims it).
-      const card = this.scene.add.rectangle(UIManager.UPG_CARD_CX, 69, UIManager.UPG_CARD_W, 158, 0x1e1e1e, 1)
-        .setStrokeStyle(1, 0x3a3a3a);
-      this.upgCards.set(upg.id, card);
-
-      row.add(card);
-      row.add([nameTxt, descTxt, lvlTxt, btnBg]);
-      if (costIcon) row.add(costIcon);
-      row.add(costLabel);
-
-      scrollContainer.add(row);
-      this.upgRows.set(upg.id, row);
-      this.upgBuyBg.set(upg.id, btnBg);
-      this.upgCostLabels.set(upg.id, costLabel);
-      this.renderUpgradeRow(upg);
-    }
+    for (const upg of UPGRADES) this.buildUpgradeRow(upg);
 
     panel.add(scrollContainer);
 
@@ -1662,6 +1607,88 @@ export class UIManager {
 
     this.panels.set('upgrades', panel);
     this.relayoutUpgrades();
+  }
+
+  /**
+   * Build one upgrade card and register it in the id→widget maps. Called for
+   * the whole roster at panel creation, and again by syncUpgradeRows() when
+   * the endless ladder generates new tiers mid-session.
+   */
+  private buildUpgradeRow(upg: UpgradeDef): void {
+    const scrollContainer = this.upgScroll;
+    if (!scrollContainer) return;
+    const LX = UIManager.UPG_LEFT;
+    const BW = UIManager.UPG_BTN_W;
+    const BCY = UIManager.UPG_BTN_CY;
+
+    // Card container; relayoutUpgrades() assigns its grid slot (x = column,
+    // y = row). Children use fixed LOCAL offsets — name / desc / level
+    // stacked, then the gradient buy button.
+    const row = this.scene.add.container(0, 0);
+
+    const nameTxt = makeText(this.scene, LX, 4, upg.name, 17, '#EEEEEE', { fontStyle: 'bold' });
+    // Description is HARD-CAPPED at 3 wrapped lines (maxLines) and the Lv
+    // counter lives top-right, so no description length can ever collide.
+    const descTxt = makeText(this.scene, LX, 30, upg.description, 13, '#D8D8D8', {
+      wordWrap: { width: UIManager.UPG_CARD_W - 38 }, maxLines: 3,
+    });
+    const lvl = this.state.getUpgradeLevel(upg.id);
+    const lvlTxt = makeText(this.scene, LX + BW, 6, `Lv ${lvl}/${upg.maxLevel}`, 13, '#9fd0a0')
+      .setOrigin(1, 0);
+    this.upgNameLabels.set(upg.id, nameTxt);
+    this.upgDescLabels.set(upg.id, descTxt);
+    this.upgLvlLabels.set(upg.id, lvlTxt);
+
+    // Cost line = the buy button: "[icon] owned/cost ResourceName".
+    const btnBg = this.scene.add.image(LX + BW / 2, BCY, 'upg_btn_grad')
+      .setInteractive({ useHandCursor: true });
+    // Press feedback: a quick squeeze while held.
+    btnBg.on('pointerdown', () => btnBg.setScale(0.96));
+    btnBg.on('pointerout', () => btnBg.setScale(1));
+    // Buy on RELEASE, only if the gesture wasn't a scroll-drag AND the pointer is
+    // inside the content area — masked overflow rows still hit-test over the
+    // header/tab strips, where a buy must never trigger.
+    btnBg.on('pointerup', (p: Phaser.Input.Pointer) => {
+      btnBg.setScale(1);
+      if (!this.upgDragMoved && this.inWideContent(p)) this.cb.onBuyUpgrade(upg.id);
+    });
+    // Oversized on purpose — the icon overhangs the button top/bottom for pop.
+    const costIcon = this.createIcon(LX + 38, BCY, upg.costResource, 76);
+    if (costIcon) this.upgCostIcons.set(upg.id, costIcon);
+    const costLabel = makeText(this.scene, LX + BW / 2, BCY, '', 13, '#FFFFFF', { fontStyle: 'bold' })
+      .setOrigin(0.5, 0.5);
+
+    // Each upgrade gets its own card (added first so it sits behind the content).
+    // Spans local y -10..148 — ~15px clear under the button (which ends at 133);
+    // full opacity until maxed (updateCostButton dims it).
+    const card = this.scene.add.rectangle(UIManager.UPG_CARD_CX, 69, UIManager.UPG_CARD_W, 158, 0x1e1e1e, 1)
+      .setStrokeStyle(1, 0x3a3a3a);
+    this.upgCards.set(upg.id, card);
+
+    row.add(card);
+    row.add([nameTxt, descTxt, lvlTxt, btnBg]);
+    if (costIcon) row.add(costIcon);
+    row.add(costLabel);
+
+    scrollContainer.add(row);
+    this.upgRows.set(upg.id, row);
+    this.upgBuyBg.set(upg.id, btnBg);
+    this.upgCostLabels.set(upg.id, costLabel);
+    this.renderUpgradeRow(upg);
+  }
+
+  /**
+   * Create cards for any UPGRADES entries added since the panel was built —
+   * the endless ladder pushes new tier defs when a floor is first reached.
+   * Cheap no-op when nothing is new.
+   */
+  syncUpgradeRows(): void {
+    if (!this.upgScroll) return;
+    let added = false;
+    for (const upg of UPGRADES) {
+      if (!this.upgRows.has(upg.id)) { this.buildUpgradeRow(upg); added = true; }
+    }
+    if (added) this.relayoutUpgrades();
   }
 
   /**
@@ -3477,7 +3504,7 @@ export class UIManager {
       // excludes the drone). More Explorers will each get their own line here later.
       ['Explorer 1', `${s.explorerAuto(0)}/s auto`],
       ['Lucky Find (Crit %)', `${Math.round(s.critChance * 100)}%  ×${+s.critMult.toFixed(2)}`],
-      // (Super Crit row spliced in below when the Pet Lion is owned.)
+      // (Super Crit row spliced in below when Static is owned.)
       ['Node respawn', `${s.nodeRespawnTime} ms`],
       ['Hype boost', `×${s.hypeMultiplier} auto for ${s.hypeDuration / 1000}s`],
       ['Hype cooldown', `${Math.round(s.hypeCooldown / 60000)} min`],
@@ -3497,9 +3524,9 @@ export class UIManager {
       ['Easy Access finds', `${s.stats.easyAccessFinds.toLocaleString()}`],
       ['Moths caught', fmt(s.resources['moth'] ?? D(0))],
     ];
-    if (s.petLionLevel > 0) {
+    if (s.petStaticLevel > 0) {
       const critIdx = rows.findIndex(([label]) => label.startsWith('Lucky Find'));
-      rows.splice(critIdx + 1, 0, ['Super Crit (Pet Lion)', `${s.petLionLevel}%  ×${s.superCritMult}`]);
+      rows.splice(critIdx + 1, 0, ['Super Crit (Static)', `${s.petStaticLevel}%  ×${s.superCritMult}`]);
     }
     // Void Resonance's compounding power multiplier, once it exists.
     if (s.voidPowerMult > 1) rows.splice(1, 0, ['Void Resonance', `×${+s.voidPowerMult.toFixed(2)} all power`]);
@@ -3630,9 +3657,9 @@ export class UIManager {
       [pet.bonusLabel, `+${+(lvl * pet.bonusPerLevel).toFixed(2)}%`],
     ];
     if (petId === 'lamp_trap') rows.push(['Your total auto-catch', `${Math.round(s.autoCaptureChance * 100)}%`]);
-    if (petId === 'pet_lion') rows.push(['Super Crit multiplier', `×${s.superCritMult}`]);
-    if (petId === 'pet_magpie') rows.push(['Your total Mint chance', `${+(s.mintChance * 100).toFixed(2)}%`]);
-    if (petId === 'pet_bear') rows.push(['Current hype duration', `${s.hypeDuration / 1000}s`]);
+    if (petId === 'pet_static') rows.push(['Super Crit multiplier', `×${s.superCritMult}`]);
+    if (petId === 'pet_snapshot') rows.push(['Your total Mint chance', `${+(s.mintChance * 100).toFixed(2)}%`]);
+    if (petId === 'pet_balloon') rows.push(['Current hype duration', `${s.hypeDuration / 1000}s`]);
     if (petId === 'pet_cat') {
       rows.push(['Your total auto vs entities', `${Math.round(s.autoRepelPct * 100)}%`]);
       rows.push(['Entity give-up time', `${Math.round(s.entityLeaveMs / 1000)}s`]);
@@ -3661,6 +3688,9 @@ export class UIManager {
   /* ---- Level change ---- */
 
   refreshForNewLevel(): void {
+    // The endless ladder may have generated new upgrade tiers for this floor —
+    // give them cards before anything tries to render them.
+    this.syncUpgradeRows();
     // (Overlay stays a fixed readable alpha — the old danger-based darkening
     //  pushed deep floors to near-black.)
     this.levelText.setText(this.state.level.name);

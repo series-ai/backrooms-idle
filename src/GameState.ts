@@ -24,6 +24,7 @@ import {
   getLevel,
   getFloorOre,
   tierSuffix,
+  ensureUpgradesForFloor,
   type LevelDef,
   type GearSlot,
   type GearEffect,
@@ -84,7 +85,7 @@ export interface SaveData {
   lifetimeHypeTriggered: number;
   lifetimeStructuresBuilt: number;             // floor-base stages constructed (Base Builder)
   lifetimePetLevelsGained: number;             // pet level-ups, excluding unlocks (Pet Trainer)
-  lifetimeSuperCritsLanded: number;            // Pet Lion crit-on-crit hits (Super Crits)
+  lifetimeSuperCritsLanded: number;            // Static crit-on-crit hits (Super Crits)
   lifetimeGearCrafted: number;                 // gear items ever crafted (Gear Head)
   lifetimeEntitiesRepelled: number;            // entities driven off (Night Watch)
   lifetimePhantomsCaught: number;              // phantoms clicked in the dark (Eyes in the Dark)
@@ -125,7 +126,7 @@ export interface TickResult {
   events: GameEvent[];
   autoDamage?: Big;         // auto-search damage dealt this tick (for a floating number)
   autoCrit?: boolean;       // whether that auto-search was a lucky find (crit)
-  autoSuperCrit?: boolean;  // whether that crit rolled into a SUPER crit (Pet Lion)
+  autoSuperCrit?: boolean;  // whether that crit rolled into a SUPER crit (Static)
 }
 
 /** Result of one active tap on the node: damage dealt + whether it was a lucky find (crit). */
@@ -133,7 +134,7 @@ export interface SearchHit {
   events: GameEvent[];
   damage: Big;
   crit: boolean;
-  superCrit: boolean;   // crit that rolled into a SUPER crit (Pet Lion)
+  superCrit: boolean;   // crit that rolled into a SUPER crit (Static)
   struck: boolean;      // false if there was no node to hit (mid-respawn)
 }
 
@@ -403,28 +404,28 @@ export class GameState {
     });
   }
 
-  /** Pet Lion level — Super Crit chance is +1% per level. */
-  get petLionLevel(): number { return this.getPetLevel('pet_lion'); }
+  /** Static level — Super Crit chance is +1% per level. */
+  get petStaticLevel(): number { return this.getPetLevel('pet_static'); }
 
-  /** Pet Magpie level — Mint chance is +0.25% per level (+milestone bumps). */
-  get petMagpieLevel(): number { return this.getPetLevel('pet_magpie'); }
+  /** Snapshot level — Mint chance is +0.25% per level (+milestone bumps). */
+  get petSnapshotLevel(): number { return this.getPetLevel('pet_snapshot'); }
 
-  /** Pet Bear level — +5% Explorer power per level while hyped (+milestone bumps). */
-  get petBearLevel(): number { return this.getPetLevel('pet_bear'); }
+  /** Party Balloon level — +5% Explorer power per level while hyped (+milestone bumps). */
+  get petBalloonLevel(): number { return this.getPetLevel('pet_balloon'); }
 
   /** Black Cat level — +4% auto power vs entities per level (+milestone bumps). */
   get petCatLevel(): number { return this.getPetLevel('pet_cat'); }
 
-  /** Chance a LANDED crit rolls again into a Super Crit (Pet Lion: +1%/lvl). */
-  get superCritChance(): number { return Math.min(1, this.petLionLevel / 100); }
+  /** Chance a LANDED crit rolls again into a Super Crit (Static: +1%/lvl). */
+  get superCritChance(): number { return Math.min(1, this.petStaticLevel / 100); }
 
   /**
    * Extra damage multiplier a Super Crit applies ON TOP of the crit multiplier:
-   * ×2 base, +1× at Lion Lv 10, +1× more (Ultra) at Lv 20. ×1 while no Lion.
+   * ×2 base, +1× at Static Lv 10, +1× more (Ultra) at Lv 20. ×1 while no Static.
    */
   get superCritMult(): number {
-    if (this.petLionLevel <= 0) return 1;
-    return 2 + (this.petLionLevel >= 10 ? 1 : 0) + (this.petLionLevel >= 20 ? 1 : 0);
+    if (this.petStaticLevel <= 0) return 1;
+    return 2 + (this.petStaticLevel >= 10 ? 1 : 0) + (this.petStaticLevel >= 20 ? 1 : 0);
   }
 
   /** Chance (0–1) a passing moth is auto-captured without a click — Trapper + Lamp Trap + gear. */
@@ -842,11 +843,11 @@ export class GameState {
   get hypeActive(): boolean { return this.hypeActiveMsLeft > 0; }
   /** Hype auto-search multiplier: ×3 base, +0.5× per Void Hunger level. */
   get hypeMultiplier(): number { return 3 + this.getVoidLevel('void_hunger') * 0.5; }
-  /** Buff length: (15s + 0.5s/Rally Cry) × gear hypeDur %; ×1.5 at Pet Bear Lv 10. */
+  /** Buff length: (15s + 0.5s/Rally Cry) × gear hypeDur %; ×1.5 at Party Balloon Lv 10. */
   get hypeDuration(): number {
     let base = GameState.HYPE_DURATION_MS + this.sumEffect('hypeDuration') * 1000;
     base *= 1 + this.gearEffect('hypeDur') / 100;
-    return this.petBearLevel >= 10 ? base * 1.5 : base;
+    return this.petBalloonLevel >= 10 ? base * 1.5 : base;
   }
   get hypeCooldown(): number { return GameState.HYPE_COOLDOWN_MS; }   // upgradable later
 
@@ -1075,10 +1076,10 @@ export class GameState {
   get autoPerSecond(): number {
     let explorers = 0;
     for (let i = 0; i < this.explorerCount; i++) explorers += this.explorerAuto(i);
-    // Pet Bear: Explorers hit harder WHILE HYPED (+5%/lvl, on top of the hype ×).
-    if (this.hypeActive) explorers *= 1 + this.petBearLevel * 0.05;
+    // Party Balloon: Explorers hit harder WHILE HYPED (+5%/lvl, on top of the hype ×).
+    if (this.hypeActive) explorers *= 1 + this.petBalloonLevel * 0.05;
     let total = (this.droneAuto + explorers) * this.achievementAutoBonus;
-    if (this.petBearLevel >= 20) total *= 1.15;   // Bear Lv 20: +15% gathering speed, always on
+    if (this.petBalloonLevel >= 20) total *= 1.15;   // Balloon Lv 20: +15% gathering speed, always on
     // Multiplicative layers: gear autoMult % and Void Resonance (×1.25/lvl).
     total *= (1 + this.gearEffect('autoMult') / 100) * this.voidPowerMult;
     // The multipliers make this fractional — auto search is always a whole
@@ -1115,7 +1116,7 @@ export class GameState {
     for (const u of UPGRADES) {
       if (u.effect === 'quality' || u.effect === 'bonusOre') c += (u.effectPerLevel / 100) * this.getUpgradeLevel(u.id);
     }
-    if (this.petMagpieLevel >= 10) c += 0.03;   // Magpie Lv 10 milestone
+    if (this.petSnapshotLevel >= 10) c += 0.03;   // Snapshot Lv 10 milestone
     return Math.min(0.9, c);
   }
 
@@ -1137,8 +1138,8 @@ export class GameState {
     for (const u of UPGRADES) {
       if (u.effect === 'mint') c += (u.effectPerLevel / 100) * this.getUpgradeLevel(u.id);
     }
-    c += this.petMagpieLevel * 0.0025;          // Pet Magpie: +0.25%/lvl...
-    if (this.petMagpieLevel >= 20) c += 0.03;   // ...and +3% at its Lv 20 milestone
+    c += this.petSnapshotLevel * 0.0025;          // Snapshot: +0.25%/lvl...
+    if (this.petSnapshotLevel >= 20) c += 0.03;   // ...and +3% at its Lv 20 milestone
     return Math.min(0.9, c);
   }
 
@@ -1194,9 +1195,9 @@ export class GameState {
     let superCrit = false;
     if (crit) {
       this.lifetimeCritsLanded += 1;   // Crit Master achievement
-      superCrit = Math.random() < this.superCritChance;   // Pet Lion: crit on top of the crit
+      superCrit = Math.random() < this.superCritChance;   // Static: crit on top of the crit
       if (superCrit) this.lifetimeSuperCritsLanded += 1;  // Super Crits achievement
-      this.tryPetLevelUp('pet_lion', events);             // the Lion grows on landed crits
+      this.tryPetLevelUp('pet_static', events);           // Static grows on landed crits
     }
     // critMult can be fractional (Metal Head +0.2x); round so damage is always an int.
     const damage = roundD(this.searchPower.mul(crit ? this.critMult : 1).mul(superCrit ? this.superCritMult : 1));
@@ -1214,7 +1215,7 @@ export class GameState {
       this.lifetimeCritsLanded += 1;
       superCrit = Math.random() < this.superCritChance;
       if (superCrit) this.lifetimeSuperCritsLanded += 1;
-      this.tryPetLevelUp('pet_lion', events);
+      this.tryPetLevelUp('pet_static', events);
     }
     const damage = roundD(this.searchPower.mul(crit ? this.critMult : 1)
       .mul(superCrit ? this.superCritMult : 1).mul(this.repelMult));
@@ -1260,7 +1261,7 @@ export class GameState {
     else if (quality) {
       gain += this.qualityBonus;
       this.stats.qualityFinds += 1;
-      this.tryPetLevelUp('pet_magpie', events);   // the Magpie grows on quality finds
+      this.tryPetLevelUp('pet_snapshot', events);   // Snapshot grows on quality finds
     }
     gain += this.flatYieldBonus;   // floor base + pack gear + Deep Pockets pay on EVERY break
     if (this.nodeIsEasyAccess) this.stats.easyAccessFinds += 1;   // brittle node mined (independent of grade)
@@ -1309,6 +1310,9 @@ export class GameState {
     if (!this.unlockedLevels.includes(this.currentLevel)) {
       this.unlockedLevels.push(this.currentLevel);
     }
+    // Endless ladder: make sure this floor's upgrade exists, +1 ahead so the
+    // next rung previews as ?????? like the hand-authored roster.
+    ensureUpgradesForFloor(this.currentLevel + 1);
     // New level starts at 0 (never visited)
     this.exploration = this.explorationPerLevel[this.currentLevel] ?? 0;
     this.respawnMsLeft = 0;
@@ -1392,14 +1396,14 @@ export class GameState {
     let autoSuperCrit = false;
     let autoDamage: Big | undefined;
 
-    // Pet Bear grows from hyped exploring: one roll per tick while hype runs
+    // Party Balloon grows from hyped exploring: one roll per tick while hype runs
     // (~10-15 rolls per burst, more with longer hype).
-    if (this.hypeActive) this.tryPetLevelUp('pet_bear', events);
+    if (this.hypeActive) this.tryPetLevelUp('pet_balloon', events);
 
     // 1. Idle auto-search (drone). Skipped while a node is respawning — and
     //    while an ENTITY is present (the drone hides; taps must drive it off or
     //    it leaves on its own). The batch can roll a lucky find (crit) just like
-    //    a manual tap — same chance/×, including the Pet Lion's super-crit roll.
+    //    a manual tap — same chance/×, including Static's super-crit roll.
     if (!this.isRespawning && !this.entityActive) {
       autoCrit = Math.random() < this.critChance;
       const superCrit = autoCrit && Math.random() < this.superCritChance;
@@ -1413,7 +1417,7 @@ export class GameState {
         if (autoCrit) {
           this.lifetimeCritsLanded += 1;          // Crit Master — only a real hit counts
           if (superCrit) this.lifetimeSuperCritsLanded += 1;   // Super Crits achievement
-          this.tryPetLevelUp('pet_lion', events); // the Lion grows on landed crits
+          this.tryPetLevelUp('pet_static', events); // Static grows on landed crits
         }
         this.addNoise(this.noisePerTick, events);   // the drone is loud too
       } else {
@@ -1796,6 +1800,9 @@ export class GameState {
   loadSaveData(data: SaveData): void {
     this.currentLevel = data.currentLevel;
     this.unlockedLevels = data.unlockedLevels;
+    // Regenerate the endless upgrade ladder for every floor this save has
+    // reached (defs are deterministic, so saved levels re-attach by id).
+    ensureUpgradesForFloor(Math.max(this.currentLevel, ...this.unlockedLevels) + 1);
     this.health = data.health;
     this.maxHealth = data.maxHealth;
     this.sanity = data.sanity;
@@ -1900,6 +1907,19 @@ export class GameState {
     // Pets (permanent — default empty for old saves). A save that bought the
     // lamp_trap shop unlock before pets serialized still gets its pet at Lv 1.
     this.petLevels = data.petLevels ?? {};
+    // The zoo pets were re-themed (Lion/Magpie/Bear → Static/Snapshot/Balloon):
+    // carry levels and shop purchases from saves made under the old ids.
+    const petRenames: Record<string, string> = {
+      pet_lion: 'pet_static', pet_magpie: 'pet_snapshot', pet_bear: 'pet_balloon',
+    };
+    for (const [oldId, newId] of Object.entries(petRenames)) {
+      if (this.petLevels[oldId] !== undefined) {
+        this.petLevels[newId] = Math.max(this.petLevels[newId] ?? 0, this.petLevels[oldId]);
+        delete this.petLevels[oldId];
+      }
+      if ((this.shopUpgrades[oldId] ?? 0) > 0) this.shopUpgrades[newId] = this.shopUpgrades[oldId];
+      delete this.shopUpgrades[oldId];
+    }
     for (const p of PETS) {
       if (this.getShopLevel(p.id) > 0 && this.getPetLevel(p.id) === 0) this.petLevels[p.id] = 1;
     }

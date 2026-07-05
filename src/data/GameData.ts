@@ -1,3 +1,5 @@
+import { fmt } from '../num';
+
 export interface LevelDef {
   id: number;
   name: string;
@@ -729,7 +731,198 @@ export const UPGRADES: UpgradeDef[] = [
     effectPerLevel: 7, effectUnit: '% auto vs entities', costResource: 'notebook_page', effect: 'autoRepel',
     unlockFloor: 17,
   },
+  // Floors 18-30 continue the ladder: base +5-9 per floor, growth stepping up
+  // 0.05 every 2 floors (1.7 → 1.75 → 1.8 → 1.85 → 1.9 → 1.95 → 2.0), each
+  // floor's resource feeding a second/third rung of an earlier lever at a
+  // bigger step. Per-Explorer auto, third rung (after +2 Heavy Sweep, +4
+  // Battery Pack). Cost = round(65 × 1.7^level) in Maps. Locked until floor 18.
+  {
+    id: 'charted_routes', name: 'Charted Routes', icon: '\u{1F5FA}\u{FE0F}',
+    description: '+6 auto search power per Explorer per level',
+    baseCost: 65, costMultiplier: 1.7, maxLevel: 15,
+    effectPerLevel: 6, effectUnit: '/s', costResource: 'maps', effect: 'explorerAuto',
+    unlockFloor: 18,
+  },
+  // Flat tap + auto power, fourth rung (after +2 Moth, +5 Master Scav, +6 Dead
+  // Air). Cost = round(70 × 1.75^level) in Canned Food. Locked until floor 19.
+  {
+    id: 'stockpile', name: 'Stockpile', icon: '\u{1F96B}',
+    description: '+8 auto search & tap power per level',
+    baseCost: 70, costMultiplier: 1.75, maxLevel: 15,
+    effectPerLevel: 8, effectUnit: ' power', costResource: 'canned_food', effect: 'flatPower',
+    unlockFloor: 19,
+  },
+  // Hype duration, third rung (after +0.5s Rally Cry, +1s Bright Idea).
+  // Cost = round(76 × 1.75^level) in MRE. Locked until floor 20.
+  {
+    id: 'field_rations', name: 'Field Rations', icon: '\u{1F371}',
+    description: '+1.5s Explorer hype duration per level',
+    baseCost: 76, costMultiplier: 1.75, maxLevel: 15,
+    effectPerLevel: 1.5, effectUnit: 's hype', costResource: 'mre', effect: 'hypeDuration',
+    unlockFloor: 20,
+  },
+  // Tap + per-Explorer power, second rung (after +3 Splinters).
+  // Cost = round(82 × 1.8^level) in Energy Bar. Locked until floor 21.
+  {
+    id: 'sugar_rush', name: 'Sugar Rush', icon: '\u{1F36B}',
+    description: '+5 Explorer and tap power per level',
+    baseCost: 82, costMultiplier: 1.8, maxLevel: 15,
+    effectPerLevel: 5, effectUnit: ' power', costResource: 'energy_bar', effect: 'tapExplorer',
+    unlockFloor: 21,
+  },
+  // Noise reduction, second rung (after -2% Soft Soles).
+  // Cost = round(88 × 1.8^level) in Bandage. Locked until floor 22.
+  {
+    id: 'wrapped_tight', name: 'Wrapped Tight', icon: '\u{1FA79}',
+    description: '-3% Noise from searching per level',
+    baseCost: 88, costMultiplier: 1.8, maxLevel: 15,
+    effectPerLevel: 3, effectUnit: '% quieter', costResource: 'bandage', effect: 'quiet',
+    unlockFloor: 22,
+  },
+  // Crit chance, third rung (after Lucky Find, Prism Sight).
+  // Cost = round(94 × 1.85^level) in Anti-Anxiety Pills. Locked until floor 23.
+  {
+    id: 'steady_hands', name: 'Steady Hands', icon: '\u{1F48A}',
+    description: '+1% Crit Chance per level',
+    baseCost: 94, costMultiplier: 1.85, maxLevel: 15,
+    effectPerLevel: 1, effectUnit: '% crit', costResource: 'anti_anxiety_pills', effect: 'critChance',
+    unlockFloor: 23,
+  },
+  // Entity tap damage, second rung (after +5% Camera Flash).
+  // Cost = round(100 × 1.85^level) in Anti-Radiation Pills. Locked until floor 24.
+  {
+    id: 'iodine_regimen', name: 'Iodine Regimen', icon: '☢\u{FE0F}',
+    description: '+7% damage against entities per level',
+    baseCost: 100, costMultiplier: 1.85, maxLevel: 15,
+    effectPerLevel: 7, effectUnit: '% entity damage', costResource: 'anti_radiation_pills', effect: 'repel',
+    unlockFloor: 24,
+  },
+  // Easy Access, third rung (after +0.5% Stocked Shelves, +1% Watchful Eye).
+  // Cost = round(108 × 1.9^level) in Charcoal. Locked until floor 25.
+  {
+    id: 'brittle_burn', name: 'Brittle Burn', icon: '⚫',
+    description: '+1.5% Easy Access chance for all resources per level',
+    baseCost: 108, costMultiplier: 1.9, maxLevel: 15,
+    effectPerLevel: 1.5, effectUnit: '% easy access', costResource: 'charcoal', effect: 'easyAccess',
+    unlockFloor: 25,
+  },
+  // Crit damage, second rung (after +0.2x Metal Head).
+  // Cost = round(116 × 1.9^level) in Bone Fragments. Locked until floor 26.
+  {
+    id: 'bone_deep', name: 'Bone Deep', icon: '\u{1F9B4}',
+    description: '+0.4x Crit Damage per level',
+    baseCost: 116, costMultiplier: 1.9, maxLevel: 15,
+    effectPerLevel: 0.4, effectUnit: 'x crit damage', costResource: 'bone_fragments', effect: 'critDamage',
+    unlockFloor: 26,
+  },
+  // Moth auto-capture, second rung (after +1% Trapper).
+  // Cost = round(124 × 1.95^level) in Mannequin. Locked until floor 27.
+  {
+    id: 'silent_decoys', name: 'Silent Decoys', icon: '\u{1F9CD}',
+    description: '+2% auto-capture chance per level',
+    baseCost: 124, costMultiplier: 1.95, maxLevel: 15,
+    effectPerLevel: 2, effectUnit: '% auto-capture', costResource: 'mannequin', effect: 'autoCapture',
+    unlockFloor: 27,
+  },
+  // Quality chance, third rung (after +0.25% Quality Sense, +1% Tape It).
+  // Cost = round(132 × 1.95^level) in Pool Water. Locked until floor 28.
+  {
+    id: 'still_waters', name: 'Still Waters', icon: '\u{1F4A7}',
+    description: '+1.5% quality resource chance per level',
+    baseCost: 132, costMultiplier: 1.95, maxLevel: 20,
+    effectPerLevel: 1.5, effectUnit: '% quality chance', costResource: 'pool_water', effect: 'quality',
+    unlockFloor: 28,
+  },
+  // Explorers-vs-entities auto power, second rung (after +7% Escape Plan).
+  // Cost = round(141 × 2^level) in Liquid Pain. Locked until floor 29.
+  {
+    id: 'pain_tolerance', name: 'Pain Tolerance', icon: '\u{1FA78}',
+    description: 'Explorers keep working in encounters: +10% auto power vs entities per level',
+    baseCost: 141, costMultiplier: 2, maxLevel: 15,
+    effectPerLevel: 10, effectUnit: '% auto vs entities', costResource: 'liquid_pain', effect: 'autoRepel',
+    unlockFloor: 29,
+  },
+  // The FIRST mint-chance upgrade (effect 'mint' — mint finds yield 10x; the
+  // getter already sums it, only bases/gear/pets fed it until now).
+  // Cost = round(150 × 2^level) in Lucky Coins. Locked until floor 30.
+  {
+    id: 'mint_condition', name: 'Mint Condition', icon: '\u{1FA99}',
+    description: '+0.5% Mint resource chance per level (10x yield)',
+    baseCost: 150, costMultiplier: 2, maxLevel: 15,
+    effectPerLevel: 0.5, effectUnit: '% mint chance', costResource: 'lucky_coins', effect: 'mint',
+    unlockFloor: 30,
+  },
 ];
+
+/* ------------------------------------------------------------------ */
+/*  Endless upgrade tiers (floors 31+)                                 */
+/* ------------------------------------------------------------------ */
+// Past floor 30 the resource list laps forever (tier II, III, … — same 31
+// resource ids, recolored) and so does the upgrade ladder: every floor N ≥ 31
+// generates the next-tier version of the upgrade its resource fed on lap 1
+// ("Trapper II", "Bone Deep III", …), appended to UPGRADES on demand. Ids are
+// deterministic ("<tier-1 id>_t<tier>") so saves, sumEffect() and the UI's
+// generic loops keep working unchanged.
+//   - Cost continues the authored trend (base grew ~×1.089/floor from 25@f9
+//     to 150@f30): base = round(150 × 1.09^(N−30)); growth stays at the 2.0
+//     ceiling the lap-1 ladder was stepping toward.
+//   - FLAT power effects scale with node HP (floorHp(N) / floorHp(tier-1
+//     floor)) so a tier-T rung lands as hard on its floor as tier 1 did on
+//     its own; the description's number is rewritten to match.
+//   - Percent / seconds effects keep their tier-1 step — extra copies stack
+//     across laps (caps like the 90% Easy Access ceiling still apply).
+
+const STATIC_UPGRADE_COUNT = UPGRADES.length;
+let upgradesGeneratedThrough = ORE_SEQUENCE.length - 1;   // floors 0-30 are hand-authored
+
+/** Effects whose per-level value is a flat power amount (must scale with depth). */
+const FLAT_POWER_EFFECTS: UpgradeEffect[] = ['flatPower', 'power', 'autoMine', 'explorerAuto', 'tapExplorer'];
+
+function genUpgradeForFloor(floorId: number): UpgradeDef | null {
+  const pos = floorId % ORE_SEQUENCE.length;
+  const tier = Math.floor(floorId / ORE_SEQUENCE.length) + 1;
+  const res = ORE_SEQUENCE[pos];
+  // Template = the last hand-authored upgrade paid in this floor's resource
+  // (skipping Master Scav's cycling cost). Every position 0-30 has one.
+  let template: UpgradeDef | null = null;
+  for (let i = STATIC_UPGRADE_COUNT - 1; i >= 0; i--) {
+    if (UPGRADES[i].costResource === res && !UPGRADES[i].costResourceCycle) { template = UPGRADES[i]; break; }
+  }
+  if (!template) return null;
+  const flat = FLAT_POWER_EFFECTS.includes(template.effect);
+  const perLevel = flat
+    ? Math.max(1, Math.round(template.effectPerLevel * (floorHp(floorId) / floorHp(template.unlockFloor ?? 0))))
+    : template.effectPerLevel;
+  return {
+    id: `${template.id}_t${tier}`,
+    name: `${template.name}${tierSuffix(tier)}`,
+    icon: template.icon,
+    // Flat effects: swap the first "+number" in the tier-1 blurb for the
+    // scaled value ("+6 auto search…" → "+2.61M auto search…").
+    description: flat ? template.description.replace(/\+[\d.]+/, `+${fmt(perLevel)}`) : template.description,
+    baseCost: Math.round(150 * Math.pow(1.09, floorId - 30)),
+    costMultiplier: 2, maxLevel: template.maxLevel,
+    effectPerLevel: perLevel, effectUnit: template.effectUnit,
+    costResource: res, effect: template.effect,
+    unlockFloor: floorId,
+  };
+}
+
+/**
+ * Make sure a generated upgrade def exists for every floor up to floorId
+ * (call with deepest-unlocked + 1 so the next rung previews as ?????? like
+ * the hand-authored ladder). Idempotent; returns true if anything was added
+ * so the UI knows to build rows for the newcomers.
+ */
+export function ensureUpgradesForFloor(floorId: number): boolean {
+  let added = false;
+  while (upgradesGeneratedThrough < floorId) {
+    upgradesGeneratedThrough++;
+    const def = genUpgradeForFloor(upgradesGeneratedThrough);
+    if (def) { UPGRADES.push(def); added = true; }
+  }
+  return added;
+}
 
 /* ------------------------------------------------------------------ */
 /*  Void (Prestige) Upgrades                                           */
@@ -1136,19 +1329,19 @@ export const SHOP_UPGRADES: ShopUpgradeDef[] = [
     effectPerLevel: 1, effectUnit: '% auto-catch',
   },
   {
-    id: 'pet_lion', name: 'Pet Lion', icon: '\u{1F981}',
+    id: 'pet_static', name: 'Static', icon: '\u{1F4FA}',
     description: 'Grants Super Crits — crits on top of crits. Grows from landing crits. Yours forever.',
     baseCost: 25, costStep: 0, maxLevel: 1,
     effectPerLevel: 1, effectUnit: '% super crit',
   },
   {
-    id: 'pet_magpie', name: 'Pet Magpie', icon: '\u{1F426}',
+    id: 'pet_snapshot', name: 'Snapshot', icon: '\u{1F4F7}',
     description: 'Boosts Mint chance and grows from collecting quality resources. Yours forever.',
     baseCost: 50, costStep: 0, maxLevel: 1,
     effectPerLevel: 0.25, effectUnit: '% mint',
   },
   {
-    id: 'pet_bear', name: 'Pet Bear', icon: '\u{1F43B}',
+    id: 'pet_balloon', name: 'Party Balloon', icon: '\u{1F388}',
     description: 'Boosts Explorer power while hyped and grows from hyped exploring. Yours forever.',
     baseCost: 350, costStep: 0, maxLevel: 1,
     effectPerLevel: 5, effectUnit: '% hyped power',
@@ -1174,7 +1367,7 @@ export const SHOP_UPGRADES: ShopUpgradeDef[] = [
     effectPerLevel: 25, effectUnit: '% less Integrity',
   },
   // More Explorers — every per-Explorer bonus (Heavy Sweep, Splinters, Battery
-  // Pack, Pet Bear...) counts once per Explorer, so each is a big multiplier.
+  // Pack, Party Balloon...) counts once per Explorer, so each is a big multiplier.
   {
     id: 'second_explorer', name: 'Another Explorer', icon: '\u{1F3C3}',
     description: 'Another Explorer joins every run — all per-Explorer power stacks again.',
@@ -1229,20 +1422,20 @@ export const PETS: PetDef[] = [
       { level: 20, desc: '×2 a future creature (TBD)' },
     ],
   },
-  // Super Crits: a landed crit (tap or auto) rolls the Lion's level as a % chance
+  // Super Crits: a landed crit (tap or auto) rolls Static's level as a % chance
   // to multiply AGAIN — ×2 base, +1× at Lv 10, +1× more (Ultra) at Lv 20.
   {
-    id: 'pet_lion',
-    name: 'Pet Lion',
-    iconKey: 'pet_lion',
-    icon: '\u{1F981}',
+    id: 'pet_static',
+    name: 'Static',
+    iconKey: 'pet_static',
+    icon: '\u{1F4FA}',
     maxLevel: 20,
     levelChance: 250,
     levelChanceGrowth: 1.2,
     bonusPerLevel: 1,
     bonusLabel: 'Super Crit chance',
     growsOn: 'crit landed',
-    description: 'A regal beast that sharpens your luckiest finds.',
+    description: 'A torn scrap of living TV static. It crackles when your luck spikes.',
     milestones: [
       { level: 10, desc: '+1× Super Crit multiplier' },
       { level: 20, desc: '+1× Ultra Crit multiplier' },
@@ -1251,17 +1444,17 @@ export const PETS: PetDef[] = [
   // Mint hunter: +0.25% Mint chance per level, growing whenever a QUALITY
   // resource is collected (mint finds are a separate grade and don't count).
   {
-    id: 'pet_magpie',
-    name: 'Pet Magpie',
-    iconKey: 'pet_magpie',
-    icon: '\u{1F426}',
+    id: 'pet_snapshot',
+    name: 'Snapshot',
+    iconKey: 'pet_snapshot',
+    icon: '\u{1F4F7}',
     maxLevel: 20,
     levelChance: 200,
     levelChanceGrowth: 1.2,
     bonusPerLevel: 0.25,
     bonusLabel: 'Mint chance',
     growsOn: 'quality find',
-    description: 'A glossy thief with an eye for the shiniest finds.',
+    description: 'A twitchy instant camera that files your best finds in mint condition.',
     milestones: [
       { level: 10, desc: '+3% Quality chance' },
       { level: 20, desc: '+3% Mint chance' },
@@ -1270,17 +1463,17 @@ export const PETS: PetDef[] = [
   // Hype specialist: +5% Explorer power per level WHILE HYPED, rolling its
   // level-up on every idle tick that hype is active (~10-15 rolls per burst).
   {
-    id: 'pet_bear',
-    name: 'Pet Bear',
-    iconKey: 'pet_bear',
-    icon: '\u{1F43B}',
+    id: 'pet_balloon',
+    name: 'Party Balloon',
+    iconKey: 'pet_balloon',
+    icon: '\u{1F388}',
     maxLevel: 20,
     levelChance: 200,
     levelChanceGrowth: 1.2,
     bonusPerLevel: 5,
     bonusLabel: 'Explorer power while hyped',
     growsOn: 'hyped search tick',
-    description: 'A heavy sleeper that wakes up for the rush.',
+    description: 'It drifted away from the Partygoers. It can still hear the music.',
     milestones: [
       { level: 10, desc: '+50% hype duration' },
       { level: 20, desc: '+15% resource gathering speed' },
@@ -1383,7 +1576,7 @@ export const ACHIEVEMENTS: AchievementDef[] = [
     thresholds: [2, 4, 7, 11, 16, 23, 33, 48, 70, 100],
     reward: 3,
   },
-  // Pet Lion's crit-on-crit hits — same threshold curve as Pack Rat / Crit Master.
+  // Static's crit-on-crit hits — same threshold curve as Pack Rat / Crit Master.
   {
     id: 'super_crits',
     name: 'Super Crits',

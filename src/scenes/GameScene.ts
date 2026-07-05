@@ -398,7 +398,7 @@ export default class GameScene extends Phaser.Scene {
     // Nothing to hit mid-respawn — no floating number, no haptic.
     if (!hit.struck) return;
     for (const evt of hit.events) this.ui.addLogMessage(evt);
-    this.notePetEvents(hit.events);   // a crit can level the Pet Lion
+    this.notePetEvents(hit.events);   // a crit can level Static
     this.ui.showSearchHit(hit.damage, hit.crit, hit.superCrit);
     this.ui.updateResourceBar();
     RundotGameAPI.triggerHapticAsync((hit.superCrit ? 'heavy' : hit.crit ? 'medium' : 'light') as never);
