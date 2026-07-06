@@ -1,0 +1,11 @@
+{
+  "hooks": {
+    "pre-command": [
+      {
+        "name": "check-sdk-version",
+        "command": "node -p \"'RUN.game SDK v' + require('./node_modules/@series-inc/rundot-game-sdk/package.json').version\"",
+        "blocking": false
+      }
+    ]
+  }
+}
