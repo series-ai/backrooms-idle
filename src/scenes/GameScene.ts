@@ -542,7 +542,7 @@ export default class GameScene extends Phaser.Scene {
     const earned = this.state.rewind();
 
     // Play VHS effect, then rebuild the scene
-    this.ui.playRewindEffect(earned, earned > 0 ? this.state.rewindShardBonus : 0, this.state.lastRewindScrap, () => {
+    this.ui.playRewindEffect(earned, earned > 0 ? this.state.rewindShardBonus : 0, () => {
       // Restart the scene to fully rebuild UI (tab bar may change)
       this.saveGame();
       this.scene.restart();

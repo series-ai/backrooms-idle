@@ -1,7 +1,7 @@
 import Phaser from 'phaser';
 import RundotGameAPI from '@series-inc/rundot-game-sdk/api';
 import { LAYOUT } from '../config';
-import { UPGRADES, RESOURCES, RESOURCE_ORDER, ORE_SEQUENCE, VOID_UPGRADES, REWIND_MIN_FLOOR, ABILITIES, GEAR, GEAR_SLOTS, GEAR_SLOT_ICONS, GEAR_SLOT_LABELS, gearEffectSummary, ENTITIES, SHOP_UPGRADES, ACHIEVEMENTS, FLOOR_BASE_STAGES, PETS, getTierColor, tierSuffix, getFloorOre, type UpgradeDef, type ShopUpgradeDef, type AchievementDef, type VoidUpgradeDef, type GearDef, type GearEffect } from '../data/GameData';
+import { UPGRADES, RESOURCES, RESOURCE_ORDER, ORE_SEQUENCE, VOID_UPGRADES, REWIND_MIN_FLOOR, ABILITIES, GEAR, GEAR_SLOTS, GEAR_SLOT_ICONS, GEAR_SLOT_LABELS, GEAR_LEVEL_MAX, gearEffectSummary, ENTITIES, SHOP_UPGRADES, ACHIEVEMENTS, FLOOR_BASE_STAGES, PETS, getTierColor, tierSuffix, getFloorOre, type UpgradeDef, type ShopUpgradeDef, type AchievementDef, type VoidUpgradeDef, type GearDef, type GearEffect } from '../data/GameData';
 import { fmt, D, type Big } from '../num';
 import type { GameEvent, OfflineSummary, LightingState } from '../GameState';
 import { GameState } from '../GameState';
@@ -115,6 +115,9 @@ export class UIManager {
   private showcaseTier = 1;
   /** The player avatar running across the explore screen (run01..run04 cycle). */
   private buddyRunner: Phaser.GameObjects.Sprite | null = null;
+  private buddyShadow: Phaser.GameObjects.Sprite | null = null;   // bright-phase contact shadow
+  private navLeft?: Phaser.GameObjects.Container;    // ◀ / ▶ floor arrows — scene-level so the
+  private navRight?: Phaser.GameObjects.Container;   // lighting overlays never wash them
   /** Which buddy "suit" is active (1..6) — follows the Gear Rating (state.buddySuit). */
   private buddySuit = 1;
   /** Weapon in the runner's hands ('pistol'|'shotgun'|'AR'|'gun', null = unarmed). */
@@ -245,10 +248,18 @@ export class UIManager {
   // Scrap economy: the balance line + per-card SCRAP button (with tap-again confirm).
   private gearScrapText!: Phaser.GameObjects.Text;
   private gearScrapIcon: Phaser.GameObjects.Image | null = null;
-  private gearScrapBtns: Map<string, Phaser.GameObjects.Image> = new Map();
-  private gearScrapLabels: Map<string, Phaser.GameObjects.Text> = new Map();
-  private gearScrapArmedAt: Map<string, number> = new Map();   // gear id → time of the first (arming) tap
   private gearRows: Map<string, Phaser.GameObjects.Container> = new Map();
+  // Bag row — one box per bag slot, indexed by position. Tap = inspect popup.
+  private gearBagLabel?: Phaser.GameObjects.Text;
+  private gearBagEmpty: Phaser.GameObjects.Text[] = [];
+  private gearBagNames: Phaser.GameObjects.Text[] = [];
+  private gearBagIcons: Map<number, Phaser.GameObjects.Image> = new Map();
+  private gearBagX0 = 0;      // first bag box center x (set in createGearPanel)
+  private gearBagBoxCY = 0;   // bag box center y (set in createGearPanel)
+  // Red "!" pip per loadout slot — lit while its piece can afford a LEVEL UP.
+  private gearSlotPips: Map<string, Phaser.GameObjects.Container> = new Map();
+  // Item inspect popup (tap a loadout or bag box; null while closed)
+  private gearItemModal: Phaser.GameObjects.Container | null = null;
   private gearFirstCardY = 0;   // grid top — relayoutGearRows packs visible cards from here
   private gearScroll?: Phaser.GameObjects.Container;
   private gearMinScroll = 0;
@@ -323,6 +334,9 @@ export class UIManager {
   private petBtns: Map<string, Phaser.GameObjects.Container> = new Map();
   private petLvlBadges: Map<string, Phaser.GameObjects.Text> = new Map();
   private petModal: Phaser.GameObjects.Container | null = null;
+
+  // "Bag full" craft prompt (built on demand; null while closed)
+  private bagFullModal: Phaser.GameObjects.Container | null = null;
 
   constructor(scene: Phaser.Scene, state: GameState, cb: UICallbacks) {
     this.scene = scene;
@@ -439,10 +453,28 @@ export class UIManager {
     this.buddySuit = suit;
     this.buddyWeapon = weapon;
     if (!this.buddyRunner) return;
-    if (suitChanged) this.buddyRunner.setTexture(`buddy${suit}`);
+    if (suitChanged) {
+      this.buddyRunner.setTexture(`buddy${suit}`);
+      this.buddyShadow?.setTexture(`buddy${suit}`, 0);
+    }
     if (this.buddyState === 'run') this.buddyRunner.play(this.buddyRunAnim());
     else if (this.buddyState === 'chat') this.buddyRunner.play(`buddy${suit}_chat`);
     else this.buddyRunner.setFrame(UIManager.BUDDY_STAND_FRAME);
+  }
+
+  /**
+   * Face the runner (and his contact shadow) left or right. The shadow frame
+   * is authored for a LEFT-facing pose (weapon shadow on the left of the body
+   * shadow), so the shadow's flip is the runner's inverse, and the graphic's
+   * off-center placement mirrors as a ∓57px offset that keeps the body
+   * ellipse under his body with the weapon shadow out front.
+   */
+  private setBuddyFacing(faceLeft: boolean): void {
+    this.buddyRunner?.setFlipX(faceLeft);
+    if (this.buddyShadow) {
+      this.buddyShadow.setFlipX(!faceLeft);
+      this.buddyShadow.x = LAYOUT.CENTER_X + (faceLeft ? 57 : -57);
+    }
   }
 
   /** Show the bouncing HYPE! prompt (hype just became available). */
@@ -498,7 +530,7 @@ export class UIManager {
     }
 
     // Tapped off him: aim toward the tap and (re)start running.
-    this.buddyRunner.setFlipX(pointer.x < LAYOUT.CENTER_X);
+    this.setBuddyFacing(pointer.x < LAYOUT.CENTER_X);
     if (this.buddyState !== 'run') {
       this.buddyState = 'run';
       this.buddyRunner.play(this.buddyRunAnim());
@@ -720,6 +752,8 @@ export class UIManager {
       [this.lightOverlay, state === 'bright' ? 0.9 : 0],
       [this.vignetteOverlay, state === 'dark' ? 0.9 : 0],
       [this.dimOverlay, state === 'dark' ? 0.22 : 0],
+      // The runner casts a contact shadow only while the fluorescents are on.
+      [this.buddyShadow ?? undefined, state === 'bright' ? 0.5 : 0],
     ];
     for (const [obj, alpha] of targets) {
       if (!obj) continue;
@@ -916,13 +950,16 @@ export class UIManager {
     // Header column (all CENTER-anchored so visual gaps match the y-deltas):
     // Title + Depth as one group; the explore bar + count follow in
     // createStatusBars. Centers at 42 / 76 / 120 / 154.
+    // Depth 27-29 (with the exploration bar below): above the lighting overlays
+    // (23-25) so the bright wash / dark pall never dim the floor readout, still
+    // under the header buttons and tab bar (30+).
     this.levelText = makeText(this.scene, cx, 42, this.state.level.name, 36, '#FFFFFF', {
       fontStyle: 'bold',
-    }).setOrigin(0.5, 0.5).setDepth(10);
+    }).setOrigin(0.5, 0.5).setDepth(27);
 
     this.depthText = makeText(this.scene, cx, 76, this.depthLabel(), 18, '#8888CC', {
       fontStyle: 'bold',
-    }).setOrigin(0.5, 0.5).setDepth(10);
+    }).setOrigin(0.5, 0.5).setDepth(27);
 
     // Header buttons sit at depth 30 — above the content panels (15) for the same
     // reason as the tab bar: masked scroll lists still hit-test over the header,
@@ -962,16 +999,18 @@ export class UIManager {
     // Green EXPLORATION bar — even 34px rhythm with the header above
     // (Title 42, Depth 76, Bar 110, count 144).
     const y = 110 - BAR_HEIGHT / 2; // bar top (center at 110)
+    // Depth 27-29: keeps the bar out of the lighting overlays' wash (see
+    // createHeader) — the floor readout stays legible in bright and dark.
     this.progBarBg = this.scene.add.rectangle(BAR_X + BAR_WIDTH / 2, y + BAR_HEIGHT / 2, BAR_WIDTH, BAR_HEIGHT, 0x16241a)
-      .setDepth(10).setStrokeStyle(1, 0x2e4a2e);
-    this.progFill = this.scene.add.rectangle(BAR_X, y, 0, BAR_HEIGHT, 0x4caf50).setOrigin(0, 0).setDepth(11);
+      .setDepth(27).setStrokeStyle(1, 0x2e4a2e);
+    this.progFill = this.scene.add.rectangle(BAR_X, y, 0, BAR_HEIGHT, 0x4caf50).setOrigin(0, 0).setDepth(28);
     this.progLabel = makeText(this.scene, LAYOUT.CENTER_X, y + BAR_HEIGHT / 2, 'EXPLORING 0%', 16, '#FFFFFF', { fontStyle: 'bold' })
-      .setOrigin(0.5, 0.5).setDepth(12);
+      .setOrigin(0.5, 0.5).setDepth(29);
 
     // Discrete count just under the bar (center at 144).
     this.roomsLabel = makeText(this.scene, LAYOUT.CENTER_X, 144, 'Rooms 0 / 10', 16, '#9fd0a0', {
       fontStyle: 'bold',
-    }).setOrigin(0.5, 0.5).setDepth(12);
+    }).setOrigin(0.5, 0.5).setDepth(29);
   }
 
   /* ---- Resource bar ---- */
@@ -1158,7 +1197,13 @@ export class UIManager {
     this.rightArrowIcon = this.scene.add.image(0, -26, `icon_${this.state.floorOre.resource}`).setScale(56 / ICON_NATIVE);
     right.add(this.rightArrowIcon);
 
-    panel.add([left, right]);
+    // The arrows stay scene-level (not in the panel) at depth 27 so the
+    // lighting overlays (23-25) never wash the buttons; showTab toggles them
+    // with the rest of the explore-only chrome.
+    left.setDepth(27);
+    right.setDepth(27);
+    this.navLeft = left;
+    this.navRight = right;
 
     // Integrity bar under the icon — the node's HP. Starts full and DRAINS as you
     // search it; when it empties you collect the resource and it refills (new node).
@@ -1241,6 +1286,16 @@ export class UIManager {
     // + equipped weapon), so a scene rebuild never flashes the default skin.
     this.buddySuit = Phaser.Math.Clamp(this.state.buddySuit, 1, 6);
     this.buddyWeapon = this.state.buddyWeaponStyle;
+    // Contact shadow under his feet — the sheet's dedicated 'shadow' frame
+    // (cell 0): a 23px weapon shadow on the LEFT of a larger body shadow, i.e.
+    // authored for a left-facing pose. The runner spawns facing right, so the
+    // shadow starts mirrored, with the body ellipse under his body and the
+    // weapon shadow leading in front (see setBuddyFacing for the ∓57 offset).
+    // Added to the panel before the runner so it renders beneath him. Starts
+    // invisible; applyLighting fades it in while the fluorescents are on.
+    this.buddyShadow = this.scene.add.sprite(cx - 57, runnerY + 23, `buddy${this.buddySuit}`, 0)
+      .setScale(1.7).setDepth(16).setAlpha(0).setFlipX(true);
+    panel.add(this.buddyShadow);
     this.buddyRunner = this.scene.add.sprite(cx, runnerY, `buddy${this.buddySuit}`)
       .setScale(1.7).setDepth(16);
     // Play the one-shot spawn ("appearing") animation, then settle into the run
@@ -1983,15 +2038,11 @@ export class UIManager {
       this.rewindBonusLine.setText(`Descend past Floor ${this.state.rewindHeadStart} (your head start) to earn Fragments.`);
     } else {
       const shards = this.state.rewindShardBonus;   // Conduit pays only on a productive rewind
-      const scrapPreview = this.state.pendingRewindScrap;
       this.rewindPayoutBig.setText(`+${frags}`).setColor('#FFD700');
       this.rewindPayoutLabel.setText('VOID FRAGMENTS · READY NOW').setColor('#CC88FF');
-      const bonusBits: string[] = [];
-      if (shards > 0) bonusBits.push(`+${shards} Void Shard${shards === 1 ? '' : 's'}`);
-      if (scrapPreview > 0) bonusBits.push(`+${scrapPreview} Scrap (benched gear)`);
-      this.rewindBonusLine.setText(bonusBits.length > 0 ? `Plus: ${bonusBits.join('   ·   ')}` : '');
+      this.rewindBonusLine.setText(shards > 0 ? `Plus: +${shards} Void Shard${shards === 1 ? '' : 's'}` : '');
     }
-    this.rewindKeepLine.setText('You keep: equipped gear · Scrap · pets · bases · shards · Void upgrades');
+    this.rewindKeepLine.setText('You keep: gear (equipped + bag) · Scrap · pets · bases · shards · Void upgrades');
     this.rewindBanner.setFillStyle(hot ? 0x2a2040 : 0x1e1c2a);
     this.rewindBanner.setStrokeStyle(2, hot ? 0x8855CC : 0x3a3a55);
     // Heartbeat only while there's a payout to grab.
@@ -2018,7 +2069,6 @@ export class UIManager {
   // Gear card internals: standard card frame plus an effects line (green) and a
   // flavor line, with the item's SLOT as a badge where upgrade cards show Lv.
   private static readonly GEAR_SLOT_BOX = 118;    // slot summary box size (5 across)
-  private static readonly GEAR_HALF_BTN_W = 150;  // EQUIP/SCRAP side-by-side button width
   private static readonly GEAR_SLOT_X0 = 72;      // first slot box center x
   private static readonly GEAR_SLOT_PITCH = 144;  // slot box spacing (720 / 5)
 
@@ -2044,8 +2094,15 @@ export class UIManager {
       const slot = GEAR_SLOTS[i];
       const sx = UIManager.GEAR_SLOT_X0 + i * UIManager.GEAR_SLOT_PITCH;
       scrollContainer.add(makeText(this.scene, sx, headerY, `${GEAR_SLOT_ICONS[slot]} ${GEAR_SLOT_LABELS[slot]}`, 13, '#AAAAAA', { fontStyle: 'bold' }).setOrigin(0.5, 0));
+      // Tap a filled slot box to inspect the equipped piece (level it up there).
       const slotBox = this.scene.add.rectangle(sx, boxCY, box, box, 0x1e1e1e, 1)
-        .setStrokeStyle(1, 0x3a3a3a);
+        .setStrokeStyle(1, 0x3a3a3a)
+        .setInteractive({ useHandCursor: true });
+      slotBox.on('pointerup', (p: Phaser.Input.Pointer) => {
+        if (this.gearDragMoved || !this.inWideContent(p)) return;
+        const id = this.state.gearEquipped[slot];
+        if (id) this.showGearItemPopup(id);
+      });
       scrollContainer.add(slotBox);
       // "--" placeholder while the slot is empty; refreshGearPanel swaps in the icon.
       const emptyTxt = makeText(this.scene, sx, boxCY, '--', 22, '#555555').setOrigin(0.5);
@@ -2056,6 +2113,14 @@ export class UIManager {
       }).setOrigin(0.5, 0);
       scrollContainer.add(nameTxt);
       this.gearSlotNames.set(slot, nameTxt);
+      // LEVEL-UP pip: same red "!" language as the tab-bar alert dots. Sits on
+      // the box's top-right corner; refreshGearPanel drives visibility.
+      const pip = this.scene.add.container(sx + box / 2 - 8, boxCY - box / 2 + 8);
+      pip.add(this.scene.add.circle(0, 0, 11, 0xff3030).setStrokeStyle(2, 0x000000));
+      pip.add(makeText(this.scene, 0, 0, '!', 15, '#FFFFFF', { fontStyle: 'bold' }).setOrigin(0.5));
+      pip.setVisible(false);
+      scrollContainer.add(pip);
+      this.gearSlotPips.set(slot, pip);
     }
 
     // Total loadout bonus line under the boxes.
@@ -2074,13 +2139,50 @@ export class UIManager {
     this.gearScrapIcon = this.createIcon(cx, boxCY + box / 2 + 96 + 10, 'scrap', 26);
     if (this.gearScrapIcon) scrollContainer.add(this.gearScrapIcon);
 
-    const dividerY = boxCY + box / 2 + 128;
+    // The BAG — benched gear that travels with you across Rewinds. One box per
+    // bag slot (same visual language as the loadout row); tap a filled box to
+    // inspect the item and equip or scrap it from the popup. A legacy save can
+    // arrive over capacity, so the row is sized to fit whatever it holds.
+    const bagCap = Math.max(this.state.gearInventorySize, this.state.gearInventory.length);
+    const bagLabelY = boxCY + box / 2 + 128;
+    this.gearBagLabel = makeText(this.scene, cx, bagLabelY, '', 13, '#AAAAAA', { fontStyle: 'bold' })
+      .setOrigin(0.5, 0);
+    scrollContainer.add(this.gearBagLabel);
+    this.gearBagBoxCY = bagLabelY + 26 + box / 2;
+    this.gearBagX0 = cx - ((bagCap - 1) / 2) * UIManager.GEAR_SLOT_PITCH;
+    this.gearBagEmpty = [];
+    this.gearBagNames = [];
+    for (let i = 0; i < bagCap; i++) {
+      const sx = this.gearBagX0 + i * UIManager.GEAR_SLOT_PITCH;
+      const bagBox = this.scene.add.rectangle(sx, this.gearBagBoxCY, box, box, 0x1e1e1e, 1)
+        .setStrokeStyle(1, 0x3a3a3a)
+        .setInteractive({ useHandCursor: true });
+      bagBox.on('pointerup', (p: Phaser.Input.Pointer) => {
+        if (this.gearDragMoved || !this.inWideContent(p)) return;
+        const id = this.state.gearInventory[i];
+        if (id) this.showGearItemPopup(id);
+      });
+      scrollContainer.add(bagBox);
+      const emptyTxt = makeText(this.scene, sx, this.gearBagBoxCY, '--', 22, '#555555').setOrigin(0.5);
+      scrollContainer.add(emptyTxt);
+      this.gearBagEmpty.push(emptyTxt);
+      const nameTxt = makeText(this.scene, sx, this.gearBagBoxCY + box / 2 + 6, '', 12, '#CCCCCC', {
+        align: 'center', wordWrap: { width: UIManager.GEAR_SLOT_PITCH - 8 }, maxLines: 2,
+      }).setOrigin(0.5, 0);
+      scrollContainer.add(nameTxt);
+      this.gearBagNames.push(nameTxt);
+    }
+
+    const dividerY = this.gearBagBoxCY + box / 2 + 44;
     const divider = this.scene.add.rectangle(cx, dividerY, 660, 2, 0x444444);
     scrollContainer.add(divider);
+    scrollContainer.add(makeText(this.scene, cx, dividerY + 8, 'CRAFT NEW GEAR', 13, '#AAAAAA', { fontStyle: 'bold' })
+      .setOrigin(0.5, 0));
 
-    // Card grid of every gear item (craft → equip), same geometry as upgrades.
-    // Scrapped items hide until Rewind; relayoutGearRows() packs the survivors.
-    const firstCardY = dividerY + 14;
+    // Card grid of CRAFTABLE gear only — owned pieces live in the loadout/bag
+    // above, and scrapped items hide until Rewind; relayoutGearRows() packs
+    // whatever remains.
+    const firstCardY = dividerY + 34;
     this.gearFirstCardY = firstCardY;
     for (let i = 0; i < GEAR.length; i++) {
       const gear = GEAR[i];
@@ -2110,8 +2212,8 @@ export class UIManager {
         .setOrigin(1, 0);
       this.gearSlotBadges.set(gear.id, slotTxt);
 
-      // Main button: CRAFT (not owned) / EQUIP (benched) / LEVEL UP (equipped).
-      // renderGearRow resizes it to half-width when the SCRAP button joins it.
+      // Main button: CRAFT — owned pieces leave the grid (loadout/bag manage
+      // them), so the only actions here are craft and the bag-full prompt.
       const btnBg = this.scene.add.image(LX + BW / 2, BCY, 'upg_btn_grad')
         .setInteractive({ useHandCursor: true });
       btnBg.on('pointerdown', () => btnBg.setScale(0.96));
@@ -2119,33 +2221,11 @@ export class UIManager {
       btnBg.on('pointerup', (p: Phaser.Input.Pointer) => {
         btnBg.setScale(1);
         if (this.gearDragMoved || !this.inWideContent(p)) return;
-        if (this.state.gearIsEquipped(gear.id)) this.cb.onLevelGear(gear.id);
-        else if (this.state.gearIsOwned(gear.id)) this.cb.onEquipGear(gear.id);
+        if (this.state.canAffordGear(gear.id) && this.state.craftBlockedByFullInventory(gear.id)) {
+          this.showBagFullPrompt(gear);
+        }
         else this.cb.onCraftGear(gear.id);
       });
-      // SCRAP button (benched gear only): tap once to arm ("SURE?"), again to
-      // dismantle — a crafted piece is gone for the run, so no one-tap accidents.
-      const scrapBtn = this.scene.add.image(LX + BW - 75, BCY, 'upg_btn_grad')
-        .setDisplaySize(UIManager.GEAR_HALF_BTN_W, 50)
-        .setTint(0x777788)
-        .setInteractive({ useHandCursor: true });
-      scrapBtn.on('pointerup', (p: Phaser.Input.Pointer) => {
-        if (this.gearDragMoved || !this.inWideContent(p)) return;
-        const armedAt = this.gearScrapArmedAt.get(gear.id) ?? 0;
-        if (this.scene.time.now - armedAt < 2500) {
-          this.gearScrapArmedAt.delete(gear.id);
-          this.cb.onDismantleGear(gear.id);
-        } else {
-          this.gearScrapArmedAt.set(gear.id, this.scene.time.now);
-          this.gearScrapLabels.get(gear.id)?.setText('SCRAP?\nTAP AGAIN').setColor('#FF9966');
-          this.scene.time.delayedCall(2500, () => this.renderGearRow(gear));
-        }
-      });
-      const scrapLabel = makeText(this.scene, LX + BW - 75, BCY, '', 12, '#FFFFFF', {
-        fontStyle: 'bold', align: 'center',
-      }).setOrigin(0.5, 0.5);
-      this.gearScrapBtns.set(gear.id, scrapBtn);
-      this.gearScrapLabels.set(gear.id, scrapLabel);
 
       // Cost icon (first cost resource) — swapped/hidden by state in renderGearRow.
       const costIcon = this.createIcon(LX + 38, BCY, gear.cost[0].resourceId, 76);
@@ -2160,7 +2240,7 @@ export class UIManager {
 
       row.add(card);
       if (nameIcon) row.add(nameIcon);
-      row.add([nameTxt, descTxt, flavorTxt, slotTxt, btnBg, scrapBtn, scrapLabel]);
+      row.add([nameTxt, descTxt, flavorTxt, slotTxt, btnBg]);
       if (costIcon) row.add(costIcon);
       row.add(costLabel);
 
@@ -2207,10 +2287,11 @@ export class UIManager {
   }
 
   /**
-   * Refresh one gear card through its states:
+   * Refresh one CRAFT-GRID card through its states:
    *   locked (?????? until its floor) → CRAFT (cost per resource, owned/cost)
-   *   → EQUIP + SCRAP side-by-side (owned, benched) → LEVEL UP (equipped;
-   *   Scrap buys +10% of base effects per level) → SCRAPPED (gone this run).
+   *   or BAG FULL (affordable but no room for the displaced piece).
+   * Owned and scrapped items don't render here — relayoutGearRows hides them
+   * (the loadout and bag rows manage owned pieces via the inspect popup).
    */
   private renderGearRow(gear: GearDef): void {
     const name = this.gearNameLabels.get(gear.id);
@@ -2222,21 +2303,6 @@ export class UIManager {
     const icon = this.gearCostIcons.get(gear.id);
     const label = this.gearBtnLabels.get(gear.id);
     const nameIcon = this.gearNameIcons.get(gear.id);
-    const scrapBtn = this.gearScrapBtns.get(gear.id);
-    const scrapLabel = this.gearScrapLabels.get(gear.id);
-
-    const LX = UIManager.UPG_LEFT;
-    const BW = UIManager.UPG_BTN_W;
-    // Default geometry: full-width main button, SCRAP hidden (states override).
-    bg?.setPosition(LX + BW / 2, UIManager.UPG_BTN_CY).setDisplaySize(BW, 50);
-    label?.setX(LX + BW / 2);
-    scrapBtn?.setVisible(false);
-    if (scrapBtn?.input) scrapBtn.input.enabled = false;
-    scrapLabel?.setVisible(false);
-    // The SCRAP confirm survives re-renders (this runs every tick while the tab
-    // is open) — only an EXPIRED arming is dropped.
-    const armed = this.scene.time.now - (this.gearScrapArmedAt.get(gear.id) ?? -Infinity) < 2500;
-    if (!armed) this.gearScrapArmedAt.delete(gear.id);
 
     if (!this.state.isGearUnlocked(gear.id)) {
       name?.setText('??????').setColor('#888888');
@@ -2253,61 +2319,24 @@ export class UIManager {
       return;
     }
 
-    const lvl = this.state.getGearLevel(gear.id);
     name?.setText(gear.name).setColor('#EEEEEE');
-    desc?.setText(gearEffectSummary(gear) + (lvl > 0 ? `  (+${lvl * 10}%)` : '')).setColor('#9fd0a0');
-    flavor?.setText(this.state.gearIsEquipped(gear.id) ? 'Equipped' : '').setColor('#7CFF7C');
-    badge?.setVisible(true);
+    desc?.setText(gearEffectSummary(gear)).setColor('#9fd0a0');
+    flavor?.setText('');
+    badge?.setVisible(true).setText(GEAR_SLOT_LABELS[gear.slot]);
     nameIcon?.setVisible(true);
-
-    const owned = this.state.gearIsOwned(gear.id);
-    const equipped = this.state.gearIsEquipped(gear.id);
-    badge?.setText(`${GEAR_SLOT_LABELS[gear.slot]}${owned ? ` · Lv ${lvl}` : ''}`);
-
-    if (equipped) {
-      // In the slot right now: gold-framed card; the button spends Scrap on levels.
-      card?.setAlpha(1).setStrokeStyle(2, 0xFFD24A);
-      icon?.setVisible(false);
-      const cost = this.state.gearLevelUpCost(gear.id);
-      if (cost === null) {
-        bg?.setVisible(false);
-        if (bg?.input) bg.input.enabled = false;
-        label?.setText('EQUIPPED ✓ · Lv MAX').setColor('#FFD24A').setAlpha(1);
-      } else {
-        const canLevel = this.state.canLevelGear(gear.id);
-        bg?.setVisible(true).clearTint().setAlpha(canLevel ? 1 : 0.35);
-        if (bg?.input) bg.input.enabled = true;
-        label?.setText(`LEVEL UP → Lv ${lvl + 1}\n${fmt(this.state.scrap)}/${cost} Scrap`)
-          .setColor('#FFFFFF').setAlpha(canLevel ? 1 : 0.7);
-      }
-      return;
-    }
-
     card?.setAlpha(1).setStrokeStyle(1, 0x3a3a3a);
-    if (owned) {
-      // Benched: EQUIP on the left, SCRAP (tap-again confirm) on the right.
-      bg?.setVisible(true).clearTint().setAlpha(1)
-        .setPosition(LX + 75, UIManager.UPG_BTN_CY)
-        .setDisplaySize(UIManager.GEAR_HALF_BTN_W, 50);
-      if (bg?.input) bg.input.enabled = true;
-      icon?.setVisible(false);
-      label?.setText('EQUIP').setColor('#FFFFFF').setAlpha(1).setX(LX + 75);
-      scrapBtn?.setVisible(true).setAlpha(1);
-      if (scrapBtn?.input) scrapBtn.input.enabled = true;
-      scrapLabel?.setVisible(true).setAlpha(1);
-      if (armed) scrapLabel?.setText('SCRAP?\nTAP AGAIN').setColor('#FF9966');
-      else scrapLabel?.setText(`SCRAP\n+${this.state.gearDismantleValue(gear.id)} Scrap`).setColor('#FFFFFF');
-      return;
-    }
-
-    // Dismantled gear doesn't render a state — its whole card is hidden by
-    // relayoutGearRows until a Rewind restocks the roster.
 
     // Craftable: per-resource "owned/cost Name" lines, faded until affordable.
     const canCraft = this.state.canAffordGear(gear.id);
     bg?.setVisible(true).clearTint().setAlpha(canCraft ? 1 : 0.35);
     if (bg?.input) bg.input.enabled = true;
     icon?.setVisible(true).setAlpha(canCraft ? 1 : 0.6);
+    // Affordable but the bag can't take the displaced piece: the button stays
+    // live and opens the scrap-or-cancel prompt instead of crafting.
+    if (canCraft && this.state.craftBlockedByFullInventory(gear.id)) {
+      label?.setText('CRAFT\nBAG FULL').setColor('#FFB84A').setAlpha(1);
+      return;
+    }
     const costLines = gear.cost.map((c) =>
       `${fmt(this.state.resources[c.resourceId] ?? D(0))}/${c.amount} ${RESOURCES[c.resourceId]?.name ?? c.resourceId}`,
     );
@@ -2345,6 +2374,13 @@ export class UIManager {
         this.gearSlotEmpty.get(slot)?.setVisible(true).setText('--').setColor('#555555');
         this.gearSlotNames.get(slot)?.setText('');
       }
+      // Level-up pip: lit while this slot's piece can afford its next level.
+      // Re-raised each refresh so the freshly re-added slot icon never covers it.
+      const pip = this.gearSlotPips.get(slot);
+      if (pip) {
+        pip.setVisible(!!def && this.state.canLevelGear(def.id));
+        scrollCont?.bringToTop(pip);
+      }
     }
 
     // Total loadout bonus line. Scrap levels make values fractional — strip noise.
@@ -2371,6 +2407,35 @@ export class UIManager {
     this.gearScrapText.setText(this.gearScrapIcon ? scrapLine : `\u{1F529} ${scrapLine}`);
     this.gearScrapIcon?.setX(this.gearScrapText.x - this.gearScrapText.width / 2 - 18);
 
+    // Bag row: item icon + name per occupied box (same recreate-on-refresh
+    // pattern as the loadout slots above). Count runs red when over capacity
+    // (possible only on legacy saves).
+    const bag = this.state.gearInventory;
+    const cap = this.state.gearInventorySize;
+    this.gearBagLabel?.setText(`\u{1F392} BAG  ${bag.length}/${cap}`)
+      .setColor(bag.length > cap ? '#FF7766' : '#AAAAAA');
+    for (let i = 0; i < this.gearBagEmpty.length; i++) {
+      const oldIcon = this.gearBagIcons.get(i);
+      if (oldIcon) { oldIcon.destroy(); this.gearBagIcons.delete(i); }
+      const sx = this.gearBagX0 + i * UIManager.GEAR_SLOT_PITCH;
+      const def = bag[i] ? GEAR.find((g) => g.id === bag[i]) : undefined;
+      if (def) {
+        const gIcon = def.iconTexture ? this.createIcon(sx, this.gearBagBoxCY, def.iconTexture, 88) : null;
+        if (gIcon && scrollCont) {
+          scrollCont.add(gIcon);
+          this.gearBagIcons.set(i, gIcon);
+          this.gearBagEmpty[i].setVisible(false);
+        } else {
+          this.gearBagEmpty[i].setVisible(true).setText(def.icon).setColor('#EEEEEE');
+        }
+        const lvl = this.state.getGearLevel(def.id);
+        this.gearBagNames[i].setText(`${def.name}${lvl > 0 ? ` Lv${lvl}` : ''}`);
+      } else {
+        this.gearBagEmpty[i].setVisible(true).setText('--').setColor('#555555');
+        this.gearBagNames[i].setText('');
+      }
+    }
+
     for (const gear of GEAR) this.renderGearRow(gear);
     this.relayoutGearRows();
   }
@@ -2385,7 +2450,9 @@ export class UIManager {
     for (const gear of GEAR) {
       const row = this.gearRows.get(gear.id);
       if (!row) continue;
-      const hidden = !this.state.gearIsOwned(gear.id) && this.state.gearIsDismantled(gear.id);
+      // Owned gear lives in the loadout/bag rows; dismantled gear is parts
+      // until Rewind. The grid only shows what can (eventually) be crafted.
+      const hidden = this.state.gearIsOwned(gear.id) || this.state.gearIsDismantled(gear.id);
       row.setVisible(!hidden);
       if (hidden) continue;
       row.x = UIManager.UPG_GRID_X + (vis % 2) * UIManager.UPG_COL_W;
@@ -2787,6 +2854,10 @@ export class UIManager {
 
     // The lighting mood (and its phantoms/dust) belongs to the halls — explore only.
     const showWorld = tab === 'explore';
+    // Floor nav arrows are scene-level (above the overlays), so they don't
+    // ride the explore panel's visibility and need their own toggle.
+    this.navLeft?.setVisible(showWorld);
+    this.navRight?.setVisible(showWorld);
     this.lightOverlay?.setVisible(showWorld);
     this.vignetteOverlay?.setVisible(showWorld);
     this.dimOverlay?.setVisible(showWorld);
@@ -3316,7 +3387,7 @@ export class UIManager {
 
   /* ---- VHS Rewind effect ---- */
 
-  playRewindEffect(fragments: number, shards: number, scrapSalvaged: number, onComplete: () => void): void {
+  playRewindEffect(fragments: number, shards: number, onComplete: () => void): void {
     const { GAME_WIDTH, GAME_HEIGHT } = LAYOUT;
 
     // VHS static overlay
@@ -3339,8 +3410,7 @@ export class UIManager {
     ).setOrigin(0.5).setDepth(402).setAlpha(0);
 
     const fragTxt = makeText(this.scene, GAME_WIDTH / 2, GAME_HEIGHT / 2 + 30,
-      `+${fragments} Void Fragments${shards > 0 ? `\n+${shards} Void Shard${shards === 1 ? '' : 's'}` : ''}`
-      + (scrapSalvaged > 0 ? `\n+${scrapSalvaged} Scrap salvaged from benched gear` : ''),
+      `+${fragments} Void Fragments${shards > 0 ? `\n+${shards} Void Shard${shards === 1 ? '' : 's'}` : ''}`,
       28, '#FFD700', { fontStyle: 'bold', align: 'center' },
     ).setOrigin(0.5).setDepth(402).setAlpha(0);
 
@@ -3720,6 +3790,200 @@ export class UIManager {
     if (!this.petModal) return;
     this.petModal.destroy(true);
     this.petModal = null;
+  }
+
+  /* ---- Bag-full craft prompt ---- *
+   * Crafting benches the equipped piece into the bag — when the bag has no
+   * room, the craft is blocked and this modal offers the way out: scrap a
+   * bagged item (tap-again confirm, same as the cards) and the pending craft
+   * completes automatically, or cancel and manage the bag by hand. */
+
+  private showBagFullPrompt(gear: GearDef): void {
+    if (this.bagFullModal) return;
+    RundotGameAPI.triggerHapticAsync('light' as never);
+    const { GAME_WIDTH, GAME_HEIGHT } = LAYOUT;
+    const cx = GAME_WIDTH / 2;
+    const cy = GAME_HEIGHT / 2;
+    const items = this.state.gearInventory
+      .map((id) => GEAR.find((g) => g.id === id))
+      .filter((g): g is GearDef => !!g);
+
+    const panelW = 620;
+    const rowH = 74;
+    const listTop = 196;
+    const panelH = listTop + items.length * rowH + 84;
+    const top = cy - panelH / 2;
+
+    const modal = this.scene.add.container(0, 0).setDepth(310);
+    modal.add(this.scene.add.rectangle(cx, cy, GAME_WIDTH, GAME_HEIGHT, 0x000000, 0.72).setInteractive());
+    modal.add(this.scene.add.rectangle(cx, cy, panelW, panelH, 0x141414, 0.98)
+      .setStrokeStyle(2, 0x8a5a2a).setInteractive());
+
+    modal.add(makeText(this.scene, cx, top + 34, 'BAG FULL', 30, '#FFB84A', { fontStyle: 'bold' }).setOrigin(0.5));
+    modal.add(makeBtn(this.scene, cx + panelW / 2 - 32, top + 32, '✕', 40, 40, 0x442222, () => this.closeBagFullPrompt()));
+    modal.add(this.scene.add.rectangle(cx, top + 62, panelW - 48, 1, 0x444444));
+    modal.add(makeText(this.scene, cx, top + 84,
+      `Crafting ${gear.name} benches your equipped ${GEAR_SLOT_LABELS[gear.slot]},\nbut the bag is full (${items.length}/${this.state.gearInventorySize}).\nScrap a bagged item to make room — the craft then goes through:`,
+      15, '#AAAAAA', { align: 'center', wordWrap: { width: panelW - 60 } }).setOrigin(0.5, 0));
+
+    let y = top + listTop;
+    for (const item of items) {
+      const rowCY = y + rowH / 2;
+      modal.add(this.scene.add.rectangle(cx, rowCY, panelW - 48, rowH - 10, 0x1e1e1e, 1)
+        .setStrokeStyle(1, 0x3a3a3a));
+      const icon = item.iconTexture ? this.createIcon(cx - panelW / 2 + 58, rowCY, item.iconTexture, 44) : null;
+      if (icon) modal.add(icon);
+      else modal.add(makeText(this.scene, cx - panelW / 2 + 58, rowCY, item.icon, 26, '#FFFFFF').setOrigin(0.5));
+      const lvl = this.state.getGearLevel(item.id);
+      modal.add(makeText(this.scene, cx - panelW / 2 + 92, rowCY, `${item.name}${lvl > 0 ? `  Lv ${lvl}` : ''}`,
+        17, '#EEEEEE', { fontStyle: 'bold' }).setOrigin(0, 0.5));
+
+      const value = this.state.gearDismantleValue(item.id);
+      const scrapText = `SCRAP +${value}`;
+      let armed = false;
+      const btn = makeBtn(this.scene, cx + panelW / 2 - 110, rowCY, scrapText, 160, 46, 0x553333, () => {
+        if (!armed) {
+          armed = true;
+          (btn.getAt(1) as Phaser.GameObjects.Text).setText('SURE?').setColor('#FF9966');
+          this.scene.time.delayedCall(2500, () => {
+            armed = false;
+            if (btn.active) (btn.getAt(1) as Phaser.GameObjects.Text).setText(scrapText).setColor('#FFFFFF');
+          });
+          return;
+        }
+        this.cb.onDismantleGear(item.id);
+        this.closeBagFullPrompt();
+        // Room freed → finish what the player started. (A legacy over-capacity
+        // bag can still be full after one scrap — re-prompt with the rest.)
+        if (!this.state.craftBlockedByFullInventory(gear.id)) this.cb.onCraftGear(gear.id);
+        else this.showBagFullPrompt(gear);
+      });
+      (btn.getAt(1) as Phaser.GameObjects.Text).setFontSize(16);
+      modal.add(btn);
+      y += rowH;
+    }
+
+    modal.add(makeBtn(this.scene, cx, top + panelH - 42, 'CANCEL', 200, 46, 0x2a2a2a, () => this.closeBagFullPrompt()));
+    this.bagFullModal = modal;
+  }
+
+  private closeBagFullPrompt(): void {
+    if (!this.bagFullModal) return;
+    this.bagFullModal.destroy(true);
+    this.bagFullModal = null;
+  }
+
+  /* ---- Gear item inspect popup ---- *
+   * Tap a loadout box or a bag box: the item's full story plus its actions.
+   * Equipped piece → LEVEL UP (Scrap). Bagged piece → EQUIP / SCRAP (tap-again
+   * confirm). Actions run through the same GameScene callbacks as everything
+   * else, so logs/saves/appearance all stay in sync. */
+
+  private showGearItemPopup(id: string): void {
+    if (this.gearItemModal) return;
+    const def = GEAR.find((g) => g.id === id);
+    if (!def || !this.state.gearIsOwned(id)) return;
+    RundotGameAPI.triggerHapticAsync('light' as never);
+    const { GAME_WIDTH, GAME_HEIGHT } = LAYOUT;
+    const cx = GAME_WIDTH / 2;
+    const cy = GAME_HEIGHT / 2;
+    const s = this.state;
+    const equipped = s.gearIsEquipped(id);
+    const lvl = s.getGearLevel(id);
+
+    const rows: [string, string, string?][] = [
+      ['Status', equipped ? 'Equipped' : 'In bag', equipped ? '#7CFF7C' : '#8899AA'],
+      ['Level', `${lvl} / ${GEAR_LEVEL_MAX}`],
+      ['Scrap value', `${s.gearDismantleValue(id)} \u{1F529}`],
+    ];
+
+    const panelW = 560;
+    const panelH = 470 + rows.length * 40;
+    const top = cy - panelH / 2;
+
+    const modal = this.scene.add.container(0, 0).setDepth(310);
+    modal.add(this.scene.add.rectangle(cx, cy, GAME_WIDTH, GAME_HEIGHT, 0x000000, 0.72).setInteractive());
+    modal.add(this.scene.add.rectangle(cx, cy, panelW, panelH, 0x141414, 0.98)
+      .setStrokeStyle(2, equipped ? 0xFFD24A : 0x6a5a2a).setInteractive());
+
+    modal.add(makeText(this.scene, cx, top + 34, def.name.toUpperCase(), 28, '#FFE08A', { fontStyle: 'bold' }).setOrigin(0.5));
+    modal.add(makeText(this.scene, cx, top + 62, `${GEAR_SLOT_ICONS[def.slot]} ${GEAR_SLOT_LABELS[def.slot]}`, 14, '#8a7a4a', { fontStyle: 'bold' }).setOrigin(0.5));
+    modal.add(makeBtn(this.scene, cx + panelW / 2 - 32, top + 32, '✕', 40, 40, 0x442222, () => this.closeGearItemPopup()));
+    modal.add(this.scene.add.rectangle(cx, top + 80, panelW - 48, 1, 0x444444));
+
+    const bigIcon = def.iconTexture ? this.createIcon(cx, top + 146, def.iconTexture, 104) : null;
+    if (bigIcon) modal.add(bigIcon);
+    else modal.add(makeText(this.scene, cx, top + 146, def.icon, 72, '#FFFFFF').setOrigin(0.5));
+    modal.add(makeText(this.scene, cx, top + 210, def.description, 15, '#AAAAAA', {
+      align: 'center', wordWrap: { width: panelW - 80 },
+    }).setOrigin(0.5, 0));
+    modal.add(makeText(this.scene, cx, top + 262, gearEffectSummary(def) + (lvl > 0 ? `  (+${lvl * 10}%)` : ''), 15, '#9fd0a0', {
+      align: 'center', wordWrap: { width: panelW - 80 }, fontStyle: 'bold',
+    }).setOrigin(0.5, 0));
+
+    let y = top + 320;
+    for (const [label, val, color] of rows) {
+      modal.add(makeText(this.scene, cx - panelW / 2 + 36, y, label, 18, '#AAAAAA').setOrigin(0, 0.5));
+      modal.add(makeText(this.scene, cx + panelW / 2 - 36, y, val, 18, color ?? '#FFFFFF', { fontStyle: 'bold' }).setOrigin(1, 0.5));
+      y += 40;
+    }
+
+    const actionY = top + panelH - 96;
+    if (equipped) {
+      // Equipped: the Scrap sink. (No scrapping what's on your body — swap it
+      // out by equipping a bagged piece in the same slot first.)
+      const cost = s.gearLevelUpCost(id);
+      if (cost === null) {
+        modal.add(makeText(this.scene, cx, actionY, 'Lv MAX — fully reinforced', 17, '#FFD24A', { fontStyle: 'bold' }).setOrigin(0.5));
+      } else {
+        const canLevel = s.canLevelGear(id);
+        const lvlBtn = makeBtn(this.scene, cx, actionY, `LEVEL UP → Lv ${lvl + 1}  ·  ${cost} Scrap`, 340, 52, canLevel ? 0x553388 : 0x2a2a3a, () => {
+          if (!this.state.canLevelGear(id)) return;
+          this.cb.onLevelGear(id);
+          // Rebuild so the new level / next cost show immediately.
+          this.closeGearItemPopup();
+          this.showGearItemPopup(id);
+        });
+        // makeBtn's default 22px overflows this long label — shrink to fit.
+        (lvlBtn.getAt(1) as Phaser.GameObjects.Text).setFontSize(17);
+        if (!canLevel) lvlBtn.setAlpha(0.6);
+        modal.add(lvlBtn);
+      }
+    } else {
+      // Bagged: put it on (swaps with the current slot holder) or scrap it.
+      const equipBtn = makeBtn(this.scene, cx - 90, actionY, 'EQUIP', 160, 52, 0x553388, () => {
+        this.cb.onEquipGear(id);
+        this.closeGearItemPopup();
+      });
+      (equipBtn.getAt(1) as Phaser.GameObjects.Text).setFontSize(18);
+      modal.add(equipBtn);
+      const scrapText = `SCRAP +${s.gearDismantleValue(id)}`;
+      let armed = false;
+      const scrapBtn = makeBtn(this.scene, cx + 90, actionY, scrapText, 160, 52, 0x553333, () => {
+        if (!armed) {
+          armed = true;
+          (scrapBtn.getAt(1) as Phaser.GameObjects.Text).setText('SURE?').setColor('#FF9966');
+          this.scene.time.delayedCall(2500, () => {
+            armed = false;
+            if (scrapBtn.active) (scrapBtn.getAt(1) as Phaser.GameObjects.Text).setText(scrapText).setColor('#FFFFFF');
+          });
+          return;
+        }
+        this.cb.onDismantleGear(id);
+        this.closeGearItemPopup();
+      });
+      (scrapBtn.getAt(1) as Phaser.GameObjects.Text).setFontSize(16);
+      modal.add(scrapBtn);
+    }
+
+    modal.add(makeBtn(this.scene, cx, top + panelH - 36, 'CLOSE', 200, 46, 0x2a2a2a, () => this.closeGearItemPopup()));
+    this.gearItemModal = modal;
+  }
+
+  private closeGearItemPopup(): void {
+    if (!this.gearItemModal) return;
+    this.gearItemModal.destroy(true);
+    this.gearItemModal = null;
   }
 
   /* ---- Level change ---- */

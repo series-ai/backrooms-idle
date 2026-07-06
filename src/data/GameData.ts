@@ -1266,6 +1266,8 @@ export function gearEffectSummary(gear: GearDef): string {
  * levels (each level = +10% of the item's base effects).                  */
 
 export const GEAR_LEVEL_MAX = 5;
+/** Bag slots for benched gear (equipped pieces don't count). Upgradeable later. */
+export const GEAR_INVENTORY_BASE = 4;
 /** Extra effect per gear level: Lv N = base effects × (1 + N × this). */
 export const GEAR_LEVEL_BONUS = 0.1;
 /** Scrap refunded from a dismantled item's level investment (the rest is lost). */

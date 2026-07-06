@@ -12,6 +12,7 @@ import {
   GEAR_LEVEL_MAX,
   GEAR_LEVEL_BONUS,
   GEAR_LEVEL_REFUND,
+  GEAR_INVENTORY_BASE,
   gearScrapValue,
   gearLevelCost,
   gearLevelInvested,
@@ -67,7 +68,7 @@ export interface SaveData {
   // Milestones & discoveries
   claimedMilestones: Record<number, number[]>;
   memoryFragments: number;
-  // Gear (crafted loadout — EQUIPPED pieces survive a rewind; the rest scraps)
+  // Gear (crafted loadout — equipped pieces AND the bag survive a rewind)
   gearOwned: string[];
   gearEquipped: Record<string, string | null>;
   gearLevels?: Record<string, number>;   // gear id → Scrap level (lives on the item)
@@ -197,17 +198,16 @@ export class GameState {
   claimedMilestones: Record<number, number[]> = {};
   memoryFragments = 0;
 
-  // Gear — the crafted scavenger loadout. You escape a Rewind with what's ON
-  // you: equipped pieces (and their Scrap levels) survive; benched pieces are
-  // auto-dismantled into Scrap. Dismantled gear can't be re-crafted until the
-  // next Rewind (it's parts now) — that keeps craft→scrap loops from farming.
+  // Gear — the crafted scavenger loadout. Equipped pieces, the bag (benched
+  // gear, capacity gearInventorySize), and Scrap levels ALL survive a Rewind.
+  // Dismantled gear can't be re-crafted until the next Rewind (it's parts
+  // now) — that keeps craft→scrap loops from farming.
   gearOwned: string[] = [];
   gearEquipped: Record<GearSlot, string | null> = { weapon: null, tool: null, light: null, pack: null, charm: null };
   gearLevels: Record<string, number> = {};   // gear id → level (each = +10% base effects)
   dismantledGear: string[] = [];             // scrapped this run
   // Scrap — the salvage currency. PERMANENT (survives Rewind, like Void Shards).
   scrap = 0;
-  lastRewindScrap = 0;   // benched gear auto-scrapped by the last rewind (transient, for the summary)
 
   // Void Shard shop — permanent across all rewinds
   voidShards = 0;
@@ -449,8 +449,13 @@ export class GameState {
     return !!def && this.gearEquipped[def.slot] === id;
   }
 
-  /** Gear stays hidden ("??????") until its unlockFloor has been reached. */
+  /**
+   * Gear stays hidden ("??????") until its unlockFloor has been reached.
+   * Owning a piece always reveals it — gear carried through a Rewind must
+   * render its real card even before its floor is re-reached this run.
+   */
   isGearUnlocked(id: string): boolean {
+    if (this.gearIsOwned(id)) return true;
     const def = GEAR.find((g) => g.id === id);
     if (!def) return false;
     return this.unlockedLevels.includes(def.unlockFloor);
@@ -470,15 +475,40 @@ export class GameState {
   /** True once this item has been scrapped this run (parts now — craftable again after Rewind). */
   gearIsDismantled(id: string): boolean { return this.dismantledGear.includes(id); }
 
+  /* ---- The bag: owned-but-benched gear. Survives Rewinds. ---- */
+
+  /** Benched pieces (owned, not in a slot) — the bag's contents. */
+  get gearInventory(): string[] {
+    return this.gearOwned.filter((id) => !this.gearIsEquipped(id));
+  }
+
+  /** Bag capacity (a flat base for now; inventory upgrades can add to this). */
+  get gearInventorySize(): number { return GEAR_INVENTORY_BASE; }
+
+  /**
+   * True when crafting `id` can't proceed because it would bench the equipped
+   * piece in its slot and the bag has no room. The UI turns this into the
+   * "scrap something or cancel" prompt instead of silently losing gear.
+   */
+  craftBlockedByFullInventory(id: string): boolean {
+    const def = GEAR.find((g) => g.id === id);
+    if (!def || !this.gearEquipped[def.slot]) return false;
+    return this.gearInventory.length >= this.gearInventorySize;
+  }
+
   /** True if any gear is craftable right now — drives the Gear tab alert dot. */
   hasCraftableGear(): boolean {
     return GEAR.some((g) => this.canCraftGear(g.id));
   }
 
-  /** Craft a gear item: pay its resource cost, own it forever (this run), auto-equip it. */
+  /**
+   * Craft a gear item: pay its resource cost, own it, auto-equip it. Whatever
+   * was in the slot goes to the bag — never destroyed — so a full bag blocks
+   * the craft (the UI prompts to scrap something first).
+   */
   craftGear(id: string): boolean {
     const def = GEAR.find((g) => g.id === id);
-    if (!def || !this.canCraftGear(id)) return false;
+    if (!def || !this.canCraftGear(id) || this.craftBlockedByFullInventory(id)) return false;
     for (const c of def.cost) {
       this.resources[c.resourceId] = (this.resources[c.resourceId] ?? D(0)).sub(c.amount);
     }
@@ -556,15 +586,6 @@ export class GameState {
     this.dismantledGear.push(id);
     this.scrap += value;
     return value;
-  }
-
-  /** Scrap the NEXT Rewind would salvage from benched gear (Void menu preview). */
-  get pendingRewindScrap(): number {
-    let total = 0;
-    for (const id of this.gearOwned) {
-      if (!this.gearIsEquipped(id)) total += this.gearDismantleValue(id);
-    }
-    return total;
   }
 
   /* ---- Gear Rating → the runner's look (buddy sheet + weapon-in-hand) ---- */
@@ -1645,17 +1666,10 @@ export class GameState {
       this.upgrades[u.id] = 0;
     }
 
-    // Gear: you escape with what's ON you. Equipped pieces (and their Scrap
-    // levels) come along; everything benched is auto-dismantled into Scrap.
-    const scrapSalvaged = this.pendingRewindScrap;
-    const kept = new Set(Object.values(this.gearEquipped).filter(Boolean) as string[]);
-    for (const id of this.gearOwned) {
-      if (!kept.has(id)) delete this.gearLevels[id];
-    }
-    this.scrap += scrapSalvaged;
-    this.lastRewindScrap = scrapSalvaged;
-    this.gearOwned = [...kept];
-    this.dismantledGear = [];   // scrapped pieces become craftable again
+    // Gear: everything you own comes with you — equipped pieces stay on, the
+    // bag rides along, and Scrap levels live on each item. Only the
+    // dismantled-this-run list resets, so scrapped pieces become craftable again.
+    this.dismantledGear = [];
 
     // Quiet halls again
     this.clearEntity();
