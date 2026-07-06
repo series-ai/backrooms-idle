@@ -73,6 +73,10 @@ export default class GameScene extends Phaser.Scene {
     this.load.image('icon_corpus_vitis', 'icons/entities/corpus_vitis.png');
     this.load.image('icon_lucky_crane', 'icons/entities/lucky_crane.png');
     this.load.image('icon_moth', 'icons/entities/moth.png');   // flying collectible + Moth resource
+    this.load.image('icon_crimson_watcher', 'icons/entities/CrimsonWatcher.png');
+    this.load.image('icon_ink_crawler', 'icons/entities/InkCrawler.png');
+    this.load.image('icon_archivist', 'icons/entities/TheArchivist.png');
+    this.load.image('icon_frost_shade', 'icons/entities/FrostShade.png');
 
     // Abilities (3)
     this.load.image('icon_scavenge', 'icons/abilities/scavenge.png');
@@ -90,6 +94,19 @@ export default class GameScene extends Phaser.Scene {
     this.load.image('icon_combat_knife', 'icons/equipment/combat_knife.png');
     this.load.image('icon_vhs_camera', 'icons/equipment/vhs_camera.png');
     this.load.image('icon_watch', 'icons/equipment/watch.png');
+    // Weapon slot gear
+    this.load.image('icon_pipe_pistol', 'icons/equipment/PipePistol.png');
+    this.load.image('icon_scrap_shotgun', 'icons/equipment/ScrapShotgun.png');
+    this.load.image('icon_salvaged_ar', 'icons/equipment/SalvagedAR.png');
+    this.load.image('icon_impossible_gun', 'icons/equipment/ImpossibleGun.png');
+    // Scrap currency (gear header)
+    this.load.image('icon_scrap', 'icons/equipment/Scrap.png');
+
+    // Pets (texture key = pet id; see PETS in GameData)
+    this.load.image('icon_pet_static', 'icons/pets/Static.png');
+    this.load.image('icon_pet_snapshot', 'icons/pets/Snapshot.png');
+    this.load.image('icon_pet_balloon', 'icons/pets/PartyBalloon.png');
+    this.load.image('icon_pet_cat', 'icons/pets/BlackCat.png');
 
     // Prestige (5)
     this.load.image('icon_void_fragment', 'icons/prestige/void_fragment.png');

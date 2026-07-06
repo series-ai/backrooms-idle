@@ -244,6 +244,7 @@ export class UIManager {
   private gearCards: Map<string, Phaser.GameObjects.Rectangle> = new Map();
   // Scrap economy: the balance line + per-card SCRAP button (with tap-again confirm).
   private gearScrapText!: Phaser.GameObjects.Text;
+  private gearScrapIcon: Phaser.GameObjects.Image | null = null;
   private gearScrapBtns: Map<string, Phaser.GameObjects.Image> = new Map();
   private gearScrapLabels: Map<string, Phaser.GameObjects.Text> = new Map();
   private gearScrapArmedAt: Map<string, number> = new Map();   // gear id → time of the first (arming) tap
@@ -2044,6 +2045,10 @@ export class UIManager {
       fontStyle: 'bold',
     }).setOrigin(0.5, 0);
     scrollContainer.add(this.gearScrapText);
+    // Scrap art sits left of the balance line (x set on refresh — the line's
+    // width changes with the number). Falls back to the 🔩 emoji in the text.
+    this.gearScrapIcon = this.createIcon(cx, boxCY + box / 2 + 96 + 10, 'scrap', 26);
+    if (this.gearScrapIcon) scrollContainer.add(this.gearScrapIcon);
 
     const dividerY = boxCY + box / 2 + 128;
     const divider = this.scene.add.rectangle(cx, dividerY, 660, 2, 0x444444);
@@ -2338,7 +2343,9 @@ export class UIManager {
     this.gearBonusText.setText(parts.length > 0 ? `Loadout: ${parts.join(' · ')}` : 'Nothing equipped — craft gear from your resources below.');
 
     // Scrap balance + how the economy works, in one line.
-    this.gearScrapText.setText(`\u{1F529} Scrap: ${fmt(this.state.scrap)}  ·  Gear Rating: ${this.state.gearRating}`);
+    const scrapLine = `Scrap: ${fmt(this.state.scrap)}  ·  Gear Rating: ${this.state.gearRating}`;
+    this.gearScrapText.setText(this.gearScrapIcon ? scrapLine : `\u{1F529} ${scrapLine}`);
+    this.gearScrapIcon?.setX(this.gearScrapText.x - this.gearScrapText.width / 2 - 18);
 
     for (const gear of GEAR) this.renderGearRow(gear);
     this.relayoutGearRows();
