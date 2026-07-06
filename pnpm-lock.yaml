@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@series-inc/rundot-game-sdk':
-        specifier: ^5.17.0
-        version: 5.17.0
+        specifier: ^5.22.0
+        version: 5.22.0
       phaser:
         specifier: ^3.90.0
         version: 3.90.0
@@ -602,8 +602,8 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@series-inc/rundot-game-sdk@5.17.0':
-    resolution: {integrity: sha512-ZBf1OQoOLQPybbL/fyZ5QW+qiMwfdQHSNmC1av0wZqojTFqHSJ7Rl1tIArLfwhEJiiIR6KhbuQ0H5hGVkSTu/Q==}
+  '@series-inc/rundot-game-sdk@5.22.0':
+    resolution: {integrity: sha512-FERTQ2xuWlCgf2wj/5+6aBvheQK8wpmI4yFcEZG2Tbt8UDcOBZMMmdM5LYqzh3vyRuGottgVSy9Eoy7Vg1Eizg==}
 
   '@types/estree@1.0.9':
     resolution: {integrity: sha512-GhdPgy1el4/ImP05X05Uw4cw2/M93BCUmnEvWZNStlCzEKME4Fkk+YpoA5OiHNQmoS7Cafb8Xa3Pya8m1Qrzeg==}
@@ -1446,7 +1446,7 @@ snapshots:
   '@rollup/rollup-win32-x64-msvc@4.61.1':
     optional: true
 
-  '@series-inc/rundot-game-sdk@5.17.0':
+  '@series-inc/rundot-game-sdk@5.22.0':
     dependencies:
       adm-zip: 0.5.17
       qrcode: 1.5.4

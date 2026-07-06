@@ -30,7 +30,7 @@
     "vite": "^6.3.5"
   },
   "dependencies": {
-    "@series-inc/rundot-game-sdk": "^5.17.0",
+    "@series-inc/rundot-game-sdk": "^5.22.0",
     "phaser": "^3.90.0"
   }
 }
