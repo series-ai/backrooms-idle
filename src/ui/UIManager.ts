@@ -365,14 +365,24 @@ export class UIManager {
   private static readonly EXPLORE_STACK_TOP = -439;
   private static readonly EXPLORE_STACK_BOTTOM = 297;
 
+  /** Pets row center Y — bottom-left of the explore content (66px buttons). */
+  private petRowY(): number {
+    return LAYOUT.CONTENT_BOTTOM - 46;
+  }
+
   /**
    * Showcase icon center, placed so the whole explore column (runner down to
    * noise meter) is vertically centered in the content card — equal air above
-   * and below, instead of a dead band pooling at the bottom.
+   * and below, instead of a dead band pooling at the bottom. On short canvases
+   * (see initLayout) centering would sink the noise meter into the pets row,
+   * so the center is capped to keep a clear gap above the pet buttons.
    */
   private showcaseCenterY(): number {
     const cardMid = (LAYOUT.CONTENT_TOP + LAYOUT.CONTENT_BOTTOM) / 2;
-    return Math.round(cardMid - (UIManager.EXPLORE_STACK_TOP + UIManager.EXPLORE_STACK_BOTTOM) / 2);
+    const centered = Math.round(cardMid - (UIManager.EXPLORE_STACK_TOP + UIManager.EXPLORE_STACK_BOTTOM) / 2);
+    const petRowTop = this.petRowY() - 33;   // half a 66px pet button
+    const maxCenter = petRowTop - 12 - UIManager.EXPLORE_STACK_BOTTOM;
+    return Math.min(centered, maxCenter);
   }
 
   /** Swap/pop the big focal icon. */
@@ -542,7 +552,7 @@ export class UIManager {
     // Fly through one of two empty bands: above the showcase, or below it.
     const band = Phaser.Math.Between(0, 1) === 0
       ? Phaser.Math.Between(210, 340)     // above the showcase, under the header
-      : Phaser.Math.Between(960, 1180);   // below the showcase, above the tabs
+      : Phaser.Math.Between(LAYOUT.CONTENT_BOTTOM - 320, LAYOUT.CONTENT_BOTTOM - 100);   // below the showcase, above the tabs
     const startX = LAYOUT.GAME_WIDTH + 60;
     const endX = -60;
 
@@ -1264,7 +1274,7 @@ export class UIManager {
     // the explore content, below the moth flight band. Each is a small icon with
     // a level badge; tap for a popup of what it's doing. Hidden until owned —
     // refreshPetRow syncs visibility/levels.
-    const petY = LAYOUT.CONTENT_BOTTOM - 46;
+    const petY = this.petRowY();
     PETS.forEach((pet, i) => {
       const btn = this.scene.add.container(58 + i * 78, petY).setDepth(18).setVisible(false);
       const bg = this.scene.add.rectangle(0, 0, 66, 66, 0x1e1e1e, 0.95).setStrokeStyle(2, 0x6a5a2a);

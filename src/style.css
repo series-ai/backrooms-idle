@@ -19,8 +19,10 @@ body {
 }
 
 #app {
-  width: 100%;
-  height: 100%;
+  /* Fills the viewport by default; main.ts narrows the inset to the device's
+     safe area (notch + host chrome) before the game boots. */
+  position: fixed;
+  inset: 0;
 }
 
 canvas {
