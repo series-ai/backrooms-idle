@@ -13,11 +13,16 @@ export const LAYOUT = {
   // also start higher (CONTENT_TOP_WIDE) and end lower (CONTENT_BOTTOM_WIDE),
   // reclaiming the freed space top and bottom.
   CONTENT_TOP_WIDE: 110,
-  CONTENT_BOTTOM_WIDE: 1334,
+  CONTENT_BOTTOM_WIDE: 1386,
 
-  RESOURCE_BAR_Y: 1300,
+  // Bar card center = this + 20. Sits centered in the band between the explore
+  // content card's bottom edge (CONTENT_BOTTOM + 10) and tab row 1's top edge —
+  // see createBackground/createTabBar/createResourceBar.
+  RESOURCE_BAR_Y: 1325,
 
-  TAB_Y: 1400,
+  // Center of the two-row tab grid. Rows fill 1400..1536, leaving a 24px
+  // bottom margin so phone home-indicator/browser chrome never sits on row 2.
+  TAB_Y: 1468,
   TAB_HEIGHT: 50,
   TAB_WIDTH: 160,
 

@@ -1007,7 +1007,7 @@ export class UIManager {
       ? [{ id: 'shop', label: 'SHOP' }, { id: 'void', label: 'VOID' }, { id: 'achievements', label: 'ACHIEVEMENTS' }]
       : [{ id: 'shop', label: 'SHOP' }, { id: 'achievements', label: 'ACHIEVEMENTS' }];
 
-    const rowH = 56;
+    const rowH = 64;
     const rowGap = 8;
     const row1Y = LAYOUT.TAB_Y - rowGap / 2 - rowH / 2;
     const row2Y = LAYOUT.TAB_Y + rowGap / 2 + rowH / 2;
