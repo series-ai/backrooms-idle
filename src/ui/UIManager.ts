@@ -3651,8 +3651,29 @@ export class UIManager {
     const s = this.state;
     const lvl = s.getPetLevel(petId);
 
+    // Live readout: what it gives, how it grows, milestone status (green = active).
+    const rows: [string, string, string?][] = [
+      ['Level', `${lvl} / ${pet.maxLevel}`],
+      [pet.bonusLabel, `+${+(lvl * pet.bonusPerLevel).toFixed(2)}%`],
+    ];
+    if (petId === 'lamp_trap') rows.push(['Your total auto-catch', `${Math.round(s.autoCaptureChance * 100)}%`]);
+    if (petId === 'pet_static') rows.push(['Super Crit multiplier', `×${s.superCritMult}`]);
+    if (petId === 'pet_snapshot') rows.push(['Your total Mint chance', `${+(s.mintChance * 100).toFixed(2)}%`]);
+    if (petId === 'pet_balloon') rows.push(['Current hype duration', `${s.hypeDuration / 1000}s`]);
+    if (petId === 'pet_cat') {
+      rows.push(['Your total auto vs entities', `${Math.round(s.autoRepelPct * 100)}%`]);
+      rows.push(['Entity give-up time', `${Math.round(s.entityLeaveMs / 1000)}s`]);
+    }
+    rows.push(['Grows', lvl >= pet.maxLevel ? 'MAX level reached' : `1-in-${s.petLevelUpOdds(petId)} per ${pet.growsOn}`]);
+    for (const m of pet.milestones) {
+      rows.push([`Lv ${m.level} bonus`, m.desc, lvl >= m.level ? '#7CFF7C' : '#777777']);
+    }
+
     const panelW = 560;
-    const panelH = 600;
+    // Panel grows with the row count (the Black Cat has two extra stat rows),
+    // keeping the same air between the last row and the CLOSE button as the
+    // 6-row pets had at the old fixed 600.
+    const panelH = 360 + rows.length * 40;
     const top = cy - panelH / 2;
 
     const modal = this.scene.add.container(0, 0).setDepth(310);
@@ -3674,23 +3695,6 @@ export class UIManager {
       align: 'center', wordWrap: { width: panelW - 80 },
     }).setOrigin(0.5, 0));
 
-    // Live readout: what it gives, how it grows, milestone status (green = active).
-    const rows: [string, string, string?][] = [
-      ['Level', `${lvl} / ${pet.maxLevel}`],
-      [pet.bonusLabel, `+${+(lvl * pet.bonusPerLevel).toFixed(2)}%`],
-    ];
-    if (petId === 'lamp_trap') rows.push(['Your total auto-catch', `${Math.round(s.autoCaptureChance * 100)}%`]);
-    if (petId === 'pet_static') rows.push(['Super Crit multiplier', `×${s.superCritMult}`]);
-    if (petId === 'pet_snapshot') rows.push(['Your total Mint chance', `${+(s.mintChance * 100).toFixed(2)}%`]);
-    if (petId === 'pet_balloon') rows.push(['Current hype duration', `${s.hypeDuration / 1000}s`]);
-    if (petId === 'pet_cat') {
-      rows.push(['Your total auto vs entities', `${Math.round(s.autoRepelPct * 100)}%`]);
-      rows.push(['Entity give-up time', `${Math.round(s.entityLeaveMs / 1000)}s`]);
-    }
-    rows.push(['Grows', lvl >= pet.maxLevel ? 'MAX level reached' : `1-in-${s.petLevelUpOdds(petId)} per ${pet.growsOn}`]);
-    for (const m of pet.milestones) {
-      rows.push([`Lv ${m.level} bonus`, m.desc, lvl >= m.level ? '#7CFF7C' : '#777777']);
-    }
     let y = top + 296;
     for (const [label, val, color] of rows) {
       modal.add(makeText(this.scene, cx - panelW / 2 + 36, y, label, 18, '#AAAAAA').setOrigin(0, 0.5));
