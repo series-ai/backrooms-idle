@@ -370,14 +370,18 @@ export class UIManager {
   /*  Focal showcase — big icon that pops in as events happen          */
   /* ================================================================ */
 
+  /** Focal showcase icon box — art size and tap-zone extent. */
+  private static readonly SHOWCASE_SIZE = 380;
+
   /**
    * Vertical extent of the explore column relative to the showcase icon
-   * center — top is the runner sprite's frame top (center -330, half-frame
-   * 109), bottom is the noise meter's bottom edge (+286 center, +11 half-
-   * height). Keep in sync with the offsets in createExplorePanel.
+   * center — top is the bounced HYPE pill's top edge (runner center -330,
+   * pill -54, half-pill 18; the sprite frame's empty upper half doesn't
+   * reserve space), bottom is the noise meter's bottom edge (+318 center,
+   * +11 half-height). Keep in sync with the offsets in createExplorePanel.
    */
-  private static readonly EXPLORE_STACK_TOP = -439;
-  private static readonly EXPLORE_STACK_BOTTOM = 297;
+  private static readonly EXPLORE_STACK_TOP = -402;
+  private static readonly EXPLORE_STACK_BOTTOM = 329;
 
   /** Pets row center Y — bottom-left of the explore content (66px buttons). */
   private petRowY(): number {
@@ -403,7 +407,7 @@ export class UIManager {
   private popShowcase(iconId: string, tier: number = 1): void {
     const key = `icon_${iconId}`;
     if (!this.scene.textures.exists(key)) return;
-    const targetScale = 320 / ICON_NATIVE;
+    const targetScale = UIManager.SHOWCASE_SIZE / ICON_NATIVE;
 
     if (this.showcaseBig && this.showcaseKey === iconId && this.showcaseTier === tier) {
       // Same icon + tier — just re-pop it.
@@ -1173,7 +1177,7 @@ export class UIManager {
 
     // The big focal icon doubles as the explore BUTTON: tap or hold to explore.
     // A transparent hit zone sits on top of the swappable showcase icon.
-    this.exploreBtnZone = this.scene.add.rectangle(cx, iconCy, 320, 320, 0xffffff, 0)
+    this.exploreBtnZone = this.scene.add.rectangle(cx, iconCy, UIManager.SHOWCASE_SIZE, UIManager.SHOWCASE_SIZE, 0xffffff, 0)
       .setDepth(17).setInteractive({ useHandCursor: true });
     this.exploreBtnZone.on('pointerdown', () => this.startHoldExplore());
     this.exploreBtnZone.on('pointerup', () => this.stopHoldExplore());
@@ -1210,29 +1214,29 @@ export class UIManager {
     // Carries a centered "remaining / max" HP readout for transparency.
     const durW = 240;
     const durH = 22;
-    const durBg = this.scene.add.rectangle(cx, iconCy + 168, durW, durH, 0x2a1212, 1).setDepth(16).setStrokeStyle(1, 0x4a2a2a);
-    this.durFill = this.scene.add.rectangle(cx - durW / 2, iconCy + 168, durW, durH, 0xffcc44).setOrigin(0, 0.5).setDepth(17);
-    this.durLabel = makeText(this.scene, cx, iconCy + 168, '', 13, '#FFFFFF', {
+    const durBg = this.scene.add.rectangle(cx, iconCy + 200, durW, durH, 0x2a1212, 1).setDepth(16).setStrokeStyle(1, 0x4a2a2a);
+    this.durFill = this.scene.add.rectangle(cx - durW / 2, iconCy + 200, durW, durH, 0xffcc44).setOrigin(0, 0.5).setDepth(17);
+    this.durLabel = makeText(this.scene, cx, iconCy + 200, '', 13, '#FFFFFF', {
       fontStyle: 'bold', stroke: '#000000', strokeThickness: 3,
     }).setOrigin(0.5).setDepth(18);
     panel.add([durBg, this.durFill, this.durLabel]);
 
     // "QUALITY" tag above the icon — shown only when the current node was pre-rolled
     // as a quality find, so the player is motivated to break it for the +1 extra.
-    this.qualityLabel = makeText(this.scene, cx, iconCy - 140, 'QUALITY', 26, '#FFA500', {
+    this.qualityLabel = makeText(this.scene, cx, iconCy - 166, 'QUALITY', 26, '#FFA500', {
       fontStyle: 'bold', stroke: '#000000', strokeThickness: 4,
     }).setOrigin(0.5).setDepth(18).setVisible(false);
     panel.add(this.qualityLabel);
 
     // "EASY ACCESS" tag — independent of grade (a node can be MINT and easy-access),
     // so it sits just below the grade tag and shows on its own roll.
-    this.easyAccessLabel = makeText(this.scene, cx, iconCy - 108, 'EASY ACCESS', 22, '#66CCFF', {
+    this.easyAccessLabel = makeText(this.scene, cx, iconCy - 134, 'EASY ACCESS', 22, '#66CCFF', {
       fontStyle: 'bold', stroke: '#000000', strokeThickness: 4,
     }).setOrigin(0.5).setDepth(18).setVisible(false);
     panel.add(this.easyAccessLabel);
 
     // Persistent hint under the icon.
-    this.hintText = makeText(this.scene, cx, iconCy + 198, 'Tap or hold to search', 18, '#FFFFFF')
+    this.hintText = makeText(this.scene, cx, iconCy + 230, 'Tap or hold to search', 18, '#FFFFFF')
       .setOrigin(0.5).setDepth(16);
     panel.add(this.hintText);
 
@@ -1240,9 +1244,9 @@ export class UIManager {
     // (FLOOR_BASE_STAGES) plus a smaller line spelling out the bonuses it grants
     // (or, with no base, what the first stage would give). Node breaks roll to
     // advance it; text/color follow the current floor in updateStatusBars.
-    this.baseLabel = makeText(this.scene, cx, iconCy + 226, '', 16, '#777777')
+    this.baseLabel = makeText(this.scene, cx, iconCy + 258, '', 16, '#777777')
       .setOrigin(0.5).setDepth(16);
-    this.baseDescLabel = makeText(this.scene, cx, iconCy + 252, '', 14, '#666666')
+    this.baseDescLabel = makeText(this.scene, cx, iconCy + 284, '', 14, '#666666')
       .setOrigin(0.5).setDepth(16);
     panel.add([this.baseLabel, this.baseDescLabel]);
 
@@ -1250,7 +1254,7 @@ export class UIManager {
     // entity from this floor's roster finds you (see the encounter display).
     const noiseW = 240;
     const noiseH = 22;
-    const noiseY = iconCy + 286;
+    const noiseY = iconCy + 318;
     const noiseBg = this.scene.add.rectangle(cx, noiseY, noiseW, noiseH, 0x141414, 1)
       .setDepth(16).setStrokeStyle(1, 0x3a3a3a);
     this.noiseFill = this.scene.add.rectangle(cx - noiseW / 2, noiseY, 0, noiseH, 0x66aa66)
@@ -1268,17 +1272,17 @@ export class UIManager {
     this.entityEmoji = makeText(this.scene, cx, iconCy, '', 110, '#FFFFFF')
       .setOrigin(0.5).setDepth(18).setVisible(false);
     const ebW = 240;
-    this.entityBarBg = this.scene.add.rectangle(cx, iconCy - 140, ebW, 20, 0x1a0a1a, 1)
+    this.entityBarBg = this.scene.add.rectangle(cx, iconCy - 166, ebW, 20, 0x1a0a1a, 1)
       .setDepth(17).setStrokeStyle(1, 0x663366).setVisible(false);
-    this.entityFill = this.scene.add.rectangle(cx - ebW / 2, iconCy - 140, ebW, 20, 0xcc4466)
+    this.entityFill = this.scene.add.rectangle(cx - ebW / 2, iconCy - 166, ebW, 20, 0xcc4466)
       .setOrigin(0, 0.5).setDepth(18).setVisible(false);
-    this.entityLabel = makeText(this.scene, cx, iconCy - 140, '', 12, '#FFFFFF', {
+    this.entityLabel = makeText(this.scene, cx, iconCy - 166, '', 12, '#FFFFFF', {
       fontStyle: 'bold', stroke: '#000000', strokeThickness: 3,
     }).setOrigin(0.5).setDepth(19).setVisible(false);
     panel.add([this.entityImg, this.entityEmoji, this.entityBarBg, this.entityFill, this.entityLabel]);
 
     // The player avatar — you, running endlessly through the backrooms. Sits
-    // up top, above the entity/ambient flavor line (flavor is at iconCy - 200),
+    // up top, above the entity/ambient flavor line (flavor is at iconCy - 212),
     // and loops the run cycle so the screen always feels like forward motion.
     // The sprite sheet already bakes in its own shadow.
     const runnerY = iconCy - 330;
@@ -1308,7 +1312,9 @@ export class UIManager {
 
     // "HYPE!" prompt — yellow text in a black pill that bounces above the runner
     // when hype is available. Hidden until then; tapping the runner activates it.
-    const hype = this.scene.add.container(cx, runnerY - 70).setDepth(20).setVisible(false);
+    // Tucked just above his head — the old -70 reserved a dead band that
+    // pushed the whole column down (see EXPLORE_STACK_TOP).
+    const hype = this.scene.add.container(cx, runnerY - 44).setDepth(20).setVisible(false);
     const pill = this.scene.add.graphics();
     pill.fillStyle(0x000000, 0.92).fillRoundedRect(-42, -18, 84, 36, 18);
     pill.lineStyle(2, 0xFFD24A, 1).strokeRoundedRect(-42, -18, 84, 36, 18);
@@ -1317,7 +1323,7 @@ export class UIManager {
     panel.add(hype);
     this.hypePrompt = hype;
     this.scene.tweens.add({
-      targets: hype, y: runnerY - 80, duration: 420, yoyo: true, repeat: -1, ease: 'Sine.easeInOut',
+      targets: hype, y: runnerY - 54, duration: 420, yoyo: true, repeat: -1, ease: 'Sine.easeInOut',
     });
 
     // Clicks steer the avatar: tap off him to point him toward the click and run
@@ -1432,7 +1438,7 @@ export class UIManager {
       return;
     }
 
-    const s = 320 / ICON_NATIVE;
+    const s = UIManager.SHOWCASE_SIZE / ICON_NATIVE;
     this.scene.tweens.killTweensOf(this.showcaseBig);
     this.showcaseBig.setScale(s * 0.93);
     this.showcaseBig.angle = 0;
@@ -2972,7 +2978,9 @@ export class UIManager {
     // drift) and lingers long enough to read, then fades. One reusable label so
     // a new line replaces the old instead of overlapping it.
     if (!this.flavorMsg) {
-      this.flavorMsg = makeText(this.scene, LAYOUT.CENTER_X, this.showcaseCenterY() - 200, '', 20, evt.color, {
+      // Sits in the band between the runner's feet (-235, shadow at ~-215)
+      // and the showcase icon's top (-190) — over the shadow, never the sprite.
+      this.flavorMsg = makeText(this.scene, LAYOUT.CENTER_X, this.showcaseCenterY() - 212, '', 20, evt.color, {
         align: 'center', wordWrap: { width: 600 }, fontStyle: 'bold',
       }).setOrigin(0.5).setDepth(19);
       this.panels.get('explore')?.add(this.flavorMsg);
