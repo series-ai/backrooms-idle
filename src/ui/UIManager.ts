@@ -299,7 +299,6 @@ export class UIManager {
   // Ability refs
   private abilityBtns: Map<string, Phaser.GameObjects.Container> = new Map();
   private abilityLabels: Map<string, Phaser.GameObjects.Text> = new Map();
-  private logBottom = 0;
   private exploreDescendBg?: Phaser.GameObjects.Rectangle;   // right arrow (go deeper)
   private exploreDescendTxt?: Phaser.GameObjects.Text;
   private leftArrowBg?: Phaser.GameObjects.Rectangle;        // left arrow (go back up)
@@ -357,8 +356,23 @@ export class UIManager {
   /*  Focal showcase — big icon that pops in as events happen          */
   /* ================================================================ */
 
+  /**
+   * Vertical extent of the explore column relative to the showcase icon
+   * center — top is the runner sprite's frame top (center -330, half-frame
+   * 109), bottom is the noise meter's bottom edge (+286 center, +8 half-
+   * height). Keep in sync with the offsets in createExplorePanel.
+   */
+  private static readonly EXPLORE_STACK_TOP = -439;
+  private static readonly EXPLORE_STACK_BOTTOM = 294;
+
+  /**
+   * Showcase icon center, placed so the whole explore column (runner down to
+   * noise meter) is vertically centered in the content card — equal air above
+   * and below, instead of a dead band pooling at the bottom.
+   */
   private showcaseCenterY(): number {
-    return (LAYOUT.CONTENT_TOP + this.logBottom) / 2;
+    const cardMid = (LAYOUT.CONTENT_TOP + LAYOUT.CONTENT_BOTTOM) / 2;
+    return Math.round(cardMid - (UIManager.EXPLORE_STACK_TOP + UIManager.EXPLORE_STACK_BOTTOM) / 2);
   }
 
   /** Swap/pop the big focal icon. */
@@ -866,12 +880,14 @@ export class UIManager {
     // Resource-bar card — same inset card style as the header/content panels.
     // Only shown on the explore tab (toggled in showTab) since it reflects the
     // resource you're actively collecting.
-    this.resBarCard = this.scene.add.rectangle(GAME_WIDTH / 2, LAYOUT.RESOURCE_BAR_Y + 20, GAME_WIDTH - 20, 52, 0x0a0a0a, 0.6)
+    this.resBarCard = this.scene.add.rectangle(GAME_WIDTH / 2, LAYOUT.RESOURCE_BAR_CENTER, GAME_WIDTH - 20, LAYOUT.RESOURCE_BAR_HEIGHT, 0x0a0a0a, 0.6)
       .setDepth(3)
       .setStrokeStyle(1, 0x333333);
-    // Footer — one solid panel behind the tab buttons down to the screen bottom
-    // (replaces the old overlapping tab + bottom-fill rects).
-    const footerTop = LAYOUT.RESOURCE_BAR_Y + 50;
+    // Footer — one solid panel behind the tab buttons down to the screen bottom.
+    // FOOTER_TOP sits one CARD_GAP under both the resource card (explore) and
+    // the wide content card (menus), so the seam is identical on every tab and
+    // the 0.6-alpha panels never stack into a darker band.
+    const footerTop = LAYOUT.FOOTER_TOP;
     this.scene.add.rectangle(GAME_WIDTH / 2, (footerTop + GAME_HEIGHT) / 2, GAME_WIDTH, GAME_HEIGHT - footerTop, 0x0a0a0a, 0.6)
       .setDepth(3);
 
@@ -951,7 +967,6 @@ export class UIManager {
   /* ---- Resource bar ---- */
 
   private createResourceBar(): void {
-    const y = LAYOUT.RESOURCE_BAR_Y;
     const cx = LAYOUT.CENTER_X;
     // (Background is the resource-bar card drawn in createBackground.)
 
@@ -959,7 +974,7 @@ export class UIManager {
     // how many you have. Icon + name + count all swap as you descend (see
     // updateResourceBar). Laid out as: [icon] Name ............... count
     const res = this.state.floorOre.resource;
-    const cy = y + 20;                         // vertical center of the bar card
+    const cy = LAYOUT.RESOURCE_BAR_CENTER;     // vertical center of the bar card
 
     this.resBarIcon = this.createIcon(cx, cy, res, 72) ?? undefined;
     if (this.resBarIcon) this.resBarIcon.setDepth(11);
@@ -1007,8 +1022,8 @@ export class UIManager {
       ? [{ id: 'shop', label: 'SHOP' }, { id: 'void', label: 'VOID' }, { id: 'achievements', label: 'ACHIEVEMENTS' }]
       : [{ id: 'shop', label: 'SHOP' }, { id: 'achievements', label: 'ACHIEVEMENTS' }];
 
-    const rowH = 64;
-    const rowGap = 8;
+    const rowH = LAYOUT.TAB_ROW_HEIGHT;
+    const rowGap = LAYOUT.TAB_ROW_GAP;
     const row1Y = LAYOUT.TAB_Y - rowGap / 2 - rowH / 2;
     const row2Y = LAYOUT.TAB_Y + rowGap / 2 + rowH / 2;
     const totalPad = 20;
@@ -1105,7 +1120,6 @@ export class UIManager {
 
     const cx = LAYOUT.CENTER_X;
 
-    this.logBottom = LAYOUT.CONTENT_BOTTOM - 56;
     const iconCy = this.showcaseCenterY();
 
     // The big focal icon doubles as the explore BUTTON: tap or hold to explore.
