@@ -359,11 +359,11 @@ export class UIManager {
   /**
    * Vertical extent of the explore column relative to the showcase icon
    * center — top is the runner sprite's frame top (center -330, half-frame
-   * 109), bottom is the noise meter's bottom edge (+286 center, +8 half-
+   * 109), bottom is the noise meter's bottom edge (+286 center, +11 half-
    * height). Keep in sync with the offsets in createExplorePanel.
    */
   private static readonly EXPLORE_STACK_TOP = -439;
-  private static readonly EXPLORE_STACK_BOTTOM = 294;
+  private static readonly EXPLORE_STACK_BOTTOM = 297;
 
   /**
    * Showcase icon center, placed so the whole explore column (runner down to
@@ -1193,14 +1193,14 @@ export class UIManager {
 
     // Noise meter — searching is loud. Fills green → amber → red; at 100% an
     // entity from this floor's roster finds you (see the encounter display).
-    const noiseW = 200;
-    const noiseH = 16;
+    const noiseW = 240;
+    const noiseH = 22;
     const noiseY = iconCy + 286;
     const noiseBg = this.scene.add.rectangle(cx, noiseY, noiseW, noiseH, 0x141414, 1)
       .setDepth(16).setStrokeStyle(1, 0x3a3a3a);
     this.noiseFill = this.scene.add.rectangle(cx - noiseW / 2, noiseY, 0, noiseH, 0x66aa66)
       .setOrigin(0, 0.5).setDepth(17);
-    this.noiseLabel = makeText(this.scene, cx, noiseY, 'Noise 0%', 11, '#CCCCCC', {
+    this.noiseLabel = makeText(this.scene, cx, noiseY, 'Noise 0%', 13, '#CCCCCC', {
       fontStyle: 'bold', stroke: '#000000', strokeThickness: 3,
     }).setOrigin(0.5).setDepth(18);
     panel.add([noiseBg, this.noiseFill, this.noiseLabel]);
@@ -3019,7 +3019,7 @@ export class UIManager {
     // something has already found you.
     if (this.noiseFill && this.noiseLabel) {
       const pct = s.entityActive ? 1 : s.noise / 100;
-      this.noiseFill.width = Phaser.Math.Linear(this.noiseFill.width, 200 * pct, 0.25);
+      this.noiseFill.width = Phaser.Math.Linear(this.noiseFill.width, 240 * pct, 0.25);
       this.noiseFill.setFillStyle(s.entityActive ? 0xff4444 : pct > 0.75 ? 0xff8844 : pct > 0.4 ? 0xd8c04a : 0x66aa66);
       this.noiseLabel.setText(s.entityActive ? '!!! FOUND !!!'
         : `Noise ${Math.floor(s.noise)}%${s.lighting === 'dark' ? ' ×1.5' : ''}`);
