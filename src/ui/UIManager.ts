@@ -5,6 +5,7 @@ import { UPGRADES, RESOURCES, RESOURCE_ORDER, ORE_SEQUENCE, VOID_UPGRADES, REWIN
 import { fmt, D, type Big } from '../num';
 import type { GameEvent, OfflineSummary, LightingState } from '../GameState';
 import { GameState } from '../GameState';
+import { haptic } from '../haptics';
 
 const FONT_FAMILY = 'monospace';
 
@@ -82,6 +83,7 @@ export interface UICallbacks {
   onUseAbility: (id: string) => void;
   onToggleAutoEscape: () => void;
   onToggleHideMaxed: () => void;
+  onToggleHaptics: () => void;
   onCraftGear: (id: string) => void;
   onEquipGear: (id: string) => void;
   onDismantleGear: (id: string) => void;   // scrap a benched piece for Scrap
@@ -3410,7 +3412,7 @@ export class UIManager {
       duration: 400,
       ease: 'Power2',
     });
-    RundotGameAPI.triggerHapticAsync('warning' as never);
+    haptic('warning');
   }
 
   flashDeath(): void {
@@ -3420,7 +3422,7 @@ export class UIManager {
       duration: 800,
       ease: 'Power2',
     });
-    RundotGameAPI.triggerHapticAsync('error' as never);
+    haptic('error');
   }
 
   /* ---- VHS Rewind effect ---- */
@@ -3469,7 +3471,7 @@ export class UIManager {
     this.scene.time.delayedCall(500, () => {
       this.scene.tweens.add({ targets: rewindTxt, alpha: 1, duration: 300 });
       this.scene.tweens.add({ targets: fragTxt, alpha: 1, duration: 300, delay: 200 });
-      RundotGameAPI.triggerHapticAsync('success' as never);
+      haptic('success');
     });
 
     // Phase 3: fade out and rebuild
@@ -3551,7 +3553,7 @@ export class UIManager {
     const cy = GAME_HEIGHT / 2;
 
     RundotGameAPI.analytics.recordCustomEvent('settings_opened');
-    RundotGameAPI.triggerHapticAsync('light' as never);
+    haptic('light');
 
     // Container groups the modal for one-call teardown. Input still routes to the
     // top-most object under the pointer, so the backdrop blocks the game beneath.
@@ -3562,7 +3564,7 @@ export class UIManager {
     modal.add(overlay);
 
     const panelW = 560;
-    const panelH = 470;
+    const panelH = 600;
     const top = cy - panelH / 2;
     const panel = this.scene.add.rectangle(cx, cy, panelW, panelH, 0x141414, 0.98)
       .setStrokeStyle(2, 0x555555).setInteractive();
@@ -3582,29 +3584,50 @@ export class UIManager {
 
     modal.add(this.scene.add.rectangle(cx, top + 186, panelW - 48, 1, 0x444444));
 
+    // ---- Haptics ----
+    modal.add(makeText(this.scene, cx, top + 214, 'HAPTICS', 20, '#88CCFF', { fontStyle: 'bold' }).setOrigin(0.5));
+    modal.add(makeText(this.scene, cx, top + 244, 'Vibration on taps, hits and button presses.', 14, '#999999', {
+      align: 'center', wordWrap: { width: panelW - 80 },
+    }).setOrigin(0.5));
+    const hapticsBtn = makeBtn(this.scene, cx, top + 292, '', 220, 48, 0x2a2a2a, () => {
+      this.cb.onToggleHaptics();
+      paintHapticsBtn();
+    });
+    const paintHapticsBtn = () => {
+      const on = this.state.hapticsEnabled;
+      (hapticsBtn.getAt(0) as Phaser.GameObjects.Rectangle)
+        .setFillStyle(on ? 0x336633 : 0x333333)
+        .setStrokeStyle(2, on ? 0x66aa66 : 0x555555);
+      (hapticsBtn.getAt(1) as Phaser.GameObjects.Text).setText(on ? 'HAPTICS: ON' : 'HAPTICS: OFF');
+    };
+    paintHapticsBtn();
+    modal.add(hapticsBtn);
+
+    modal.add(this.scene.add.rectangle(cx, top + 330, panelW - 48, 1, 0x444444));
+
     // ---- Reset progress ----
-    modal.add(makeText(this.scene, cx, top + 214, 'RESET PROGRESS', 20, '#FF8888', { fontStyle: 'bold' }).setOrigin(0.5));
-    modal.add(makeText(this.scene, cx, top + 244, 'Permanently erase your save and start over.', 14, '#999999', {
+    modal.add(makeText(this.scene, cx, top + 358, 'RESET PROGRESS', 20, '#FF8888', { fontStyle: 'bold' }).setOrigin(0.5));
+    modal.add(makeText(this.scene, cx, top + 388, 'Permanently erase your save and start over.', 14, '#999999', {
       align: 'center', wordWrap: { width: panelW - 80 },
     }).setOrigin(0.5));
 
     // Confirmation row — hidden until RESET is tapped.
     const confirmGroup = this.scene.add.container(0, 0).setVisible(false);
-    confirmGroup.add(makeText(this.scene, cx, top + 278, 'Erase everything? This cannot be undone.', 15, '#FFAAAA', {
+    confirmGroup.add(makeText(this.scene, cx, top + 422, 'Erase everything? This cannot be undone.', 15, '#FFAAAA', {
       align: 'center', fontStyle: 'bold',
     }).setOrigin(0.5));
-    const yesBtn = makeBtn(this.scene, cx - 72, top + 314, 'YES, WIPE', 132, 44, 0x882222, () => {
+    const yesBtn = makeBtn(this.scene, cx - 72, top + 458, 'YES, WIPE', 132, 44, 0x882222, () => {
       this.closeSettings();
       this.cb.onResetProgress();
     });
     (yesBtn.getAt(0) as Phaser.GameObjects.Rectangle).setStrokeStyle(2, 0xcc4444);
-    const noBtn = makeBtn(this.scene, cx + 72, top + 314, 'CANCEL', 132, 44, 0x333333, () => {
+    const noBtn = makeBtn(this.scene, cx + 72, top + 458, 'CANCEL', 132, 44, 0x333333, () => {
       confirmGroup.setVisible(false);
       resetBtn.setVisible(true);
     });
     confirmGroup.add([yesBtn, noBtn]);
 
-    const resetBtn = makeBtn(this.scene, cx, top + 300, 'RESET', 220, 48, 0x662222, () => {
+    const resetBtn = makeBtn(this.scene, cx, top + 444, 'RESET', 220, 48, 0x662222, () => {
       resetBtn.setVisible(false);
       confirmGroup.setVisible(true);
     });
@@ -3631,7 +3654,7 @@ export class UIManager {
     const { GAME_WIDTH, GAME_HEIGHT } = LAYOUT;
     const cx = GAME_WIDTH / 2;
     const cy = GAME_HEIGHT / 2;
-    RundotGameAPI.triggerHapticAsync('light' as never);
+    haptic('light');
 
     // Snapshot of the live values (reopen to refresh).
     const s = this.state;
@@ -3762,7 +3785,7 @@ export class UIManager {
     if (this.petModal) return;
     const pet = PETS.find((p) => p.id === petId);
     if (!pet) return;
-    RundotGameAPI.triggerHapticAsync('light' as never);
+    haptic('light');
     const { GAME_WIDTH, GAME_HEIGHT } = LAYOUT;
     const cx = GAME_WIDTH / 2;
     const cy = GAME_HEIGHT / 2;
@@ -3838,7 +3861,7 @@ export class UIManager {
 
   private showBagFullPrompt(gear: GearDef): void {
     if (this.bagFullModal) return;
-    RundotGameAPI.triggerHapticAsync('light' as never);
+    haptic('light');
     const { GAME_WIDTH, GAME_HEIGHT } = LAYOUT;
     const cx = GAME_WIDTH / 2;
     const cy = GAME_HEIGHT / 2;
@@ -3921,7 +3944,7 @@ export class UIManager {
     if (this.gearItemModal) return;
     const def = GEAR.find((g) => g.id === id);
     if (!def || !this.state.gearIsOwned(id)) return;
-    RundotGameAPI.triggerHapticAsync('light' as never);
+    haptic('light');
     const { GAME_WIDTH, GAME_HEIGHT } = LAYOUT;
     const cx = GAME_WIDTH / 2;
     const cy = GAME_HEIGHT / 2;

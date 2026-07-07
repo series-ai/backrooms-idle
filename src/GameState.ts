@@ -100,6 +100,7 @@ export interface SaveData {
   // Preferences
   autoEscape: boolean;
   hideMaxedUpgrades?: boolean;
+  hapticsEnabled?: boolean;
 }
 
 export interface GameStats {
@@ -257,6 +258,7 @@ export class GameState {
   // Preferences
   autoEscape = true;
   hideMaxedUpgrades = false;
+  hapticsEnabled = true;
 
   constructor() {
     for (const key of Object.keys(RESOURCES)) {
@@ -1808,6 +1810,7 @@ export class GameState {
       // Preferences
       autoEscape: this.autoEscape,
       hideMaxedUpgrades: this.hideMaxedUpgrades,
+      hapticsEnabled: this.hapticsEnabled,
     };
   }
 
@@ -1941,6 +1944,7 @@ export class GameState {
     // Preferences
     this.autoEscape = data.autoEscape ?? true;
     this.hideMaxedUpgrades = data.hideMaxedUpgrades ?? false;
+    this.hapticsEnabled = data.hapticsEnabled ?? true;
 
     // Recalculate max HP/Sanity from both void and run upgrades
     this.maxHealth = Math.max(this.maxHealth, this.baseMaxHealth + this.getUpgradeLevel('tough_body') * 10);

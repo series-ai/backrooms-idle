@@ -2,6 +2,7 @@ import Phaser from 'phaser';
 import RundotGameAPI from '@series-inc/rundot-game-sdk/api';
 import { TICK_INTERVAL_MS, SAVE_INTERVAL_MS } from '../config';
 import { GameState, type GameEvent } from '../GameState';
+import { haptic, bindHapticsSetting } from '../haptics';
 import { UIManager } from '../ui/UIManager';
 import { ORE_SEQUENCE } from '../data/GameData';
 
@@ -132,6 +133,7 @@ export default class GameScene extends Phaser.Scene {
 
   async create(): Promise<void> {
     this.state = new GameState();
+    bindHapticsSetting(() => this.state.hapticsEnabled);
     this.tickAcc = 0;
     this.saveAcc = 0;
     this.firstResourceFired = false;
@@ -210,6 +212,7 @@ export default class GameScene extends Phaser.Scene {
       onUseAbility: (id) => this.handleUseAbility(id),
       onToggleAutoEscape: () => this.handleToggleAutoEscape(),
       onToggleHideMaxed: () => this.handleToggleHideMaxed(),
+      onToggleHaptics: () => this.handleToggleHaptics(),
       onCraftGear: (id) => this.handleCraftGear(id),
       onEquipGear: (id) => this.handleEquipGear(id),
       onDismantleGear: (id) => this.handleDismantleGear(id),
@@ -276,7 +279,7 @@ export default class GameScene extends Phaser.Scene {
         message: `Explorer self-hyped! ×${this.state.hypeMultiplier} auto search for ${this.state.hypeDuration / 1000}s`,
         color: '#FFD24A',
       });
-      RundotGameAPI.triggerHapticAsync('medium' as never);
+      haptic('medium');
     }
     if (hype.ended) this.ui.endHype();
 
@@ -328,7 +331,7 @@ export default class GameScene extends Phaser.Scene {
           level: this.state.currentLevel,
           entity: this.state.activeEntityId ?? 'unknown',
         });
-        RundotGameAPI.triggerHapticAsync('warning' as never);
+        haptic('warning');
       }
 
       if (evt.type === 'damage') {
@@ -352,7 +355,7 @@ export default class GameScene extends Phaser.Scene {
           level: this.state.currentLevel,
           message: evt.message,
         });
-        RundotGameAPI.triggerHapticAsync('success' as never);
+        haptic('success');
       }
 
       if (evt.type === 'event') {
@@ -393,7 +396,7 @@ export default class GameScene extends Phaser.Scene {
       });
       this.ui.updateResourceBar();
       RundotGameAPI.analytics.recordCustomEvent('item_used', { item: 'almond_water' });
-      RundotGameAPI.triggerHapticAsync('light' as never);
+      haptic('light');
     }
   }
 
@@ -406,7 +409,7 @@ export default class GameScene extends Phaser.Scene {
       });
       this.ui.updateResourceBar();
       RundotGameAPI.analytics.recordCustomEvent('item_used', { item: 'canned_food' });
-      RundotGameAPI.triggerHapticAsync('light' as never);
+      haptic('light');
     }
   }
 
@@ -418,7 +421,7 @@ export default class GameScene extends Phaser.Scene {
     this.notePetEvents(hit.events);   // a crit can level Static
     this.ui.showSearchHit(hit.damage, hit.crit, hit.superCrit);
     this.ui.updateResourceBar();
-    RundotGameAPI.triggerHapticAsync((hit.superCrit ? 'heavy' : hit.crit ? 'medium' : 'light') as never);
+    haptic(hit.superCrit ? 'heavy' : hit.crit ? 'medium' : 'light');
   }
 
   private handleActivateHype(): void {
@@ -429,7 +432,7 @@ export default class GameScene extends Phaser.Scene {
       message: `HYPE! ×${this.state.hypeMultiplier} auto search for ${this.state.hypeDuration / 1000}s`,
       color: '#FFD24A',
     });
-    RundotGameAPI.triggerHapticAsync('medium' as never);
+    haptic('medium');
     RundotGameAPI.analytics.recordCustomEvent('hype_activated');
   }
 
@@ -439,7 +442,7 @@ export default class GameScene extends Phaser.Scene {
     this.ui.addLogMessage({ type: 'system', message: `+${gain} Moth${gain > 1 ? 's' : ''}`, color: '#C9B6FF' });
     for (const evt of events) this.ui.addLogMessage(evt);
     this.notePetEvents(events);   // a catch can level the Lamp Trap
-    if (!events.some((e) => e.type === 'pet')) RundotGameAPI.triggerHapticAsync('light' as never);
+    if (!events.some((e) => e.type === 'pet')) haptic('light');
     RundotGameAPI.analytics.recordCustomEvent('moth_collected');
     return gain;
   }
@@ -453,7 +456,7 @@ export default class GameScene extends Phaser.Scene {
       level: this.state.currentLevel,
       lifetime: this.state.lifetimePhantomsCaught,
     });
-    RundotGameAPI.triggerHapticAsync('medium' as never);
+    haptic('medium');
     return gain;
   }
 
@@ -467,7 +470,7 @@ export default class GameScene extends Phaser.Scene {
     if (!pet) return;
     this.ui.refreshPetRow();
     RundotGameAPI.analytics.recordCustomEvent('pet_level_up', { message: pet.message });
-    RundotGameAPI.triggerHapticAsync('success' as never);
+    haptic('success');
     this.saveGame();
   }
 
@@ -485,7 +488,7 @@ export default class GameScene extends Phaser.Scene {
         upgrade: id,
         level: this.state.getUpgradeLevel(id),
       });
-      RundotGameAPI.triggerHapticAsync('success' as never);
+      haptic('success');
       this.saveGame();
     }
   }
@@ -500,7 +503,7 @@ export default class GameScene extends Phaser.Scene {
         to_level: this.state.currentLevel,
         total_escapes: this.state.stats.levelsEscaped,
       });
-      RundotGameAPI.triggerHapticAsync('success' as never);
+      haptic('success');
       this.drainShardAwards();   // reaching a new floor pays a Void Shard
       this.ui.refreshForNewLevel();
       this.ui.showTab('explore');
@@ -515,7 +518,7 @@ export default class GameScene extends Phaser.Scene {
         from,
         to: levelId,
       });
-      RundotGameAPI.triggerHapticAsync('light' as never);
+      haptic('light');
       this.ui.refreshForNewLevel();
       this.ui.showTab('explore');
       this.saveGame();
@@ -524,7 +527,7 @@ export default class GameScene extends Phaser.Scene {
 
   private handleTabChanged(tab: string): void {
     RundotGameAPI.analytics.recordCustomEvent('tab_switched', { tab });
-    RundotGameAPI.triggerHapticAsync('light' as never);
+    haptic('light');
   }
 
   private handleRewind(): void {
@@ -560,13 +563,24 @@ export default class GameScene extends Phaser.Scene {
     RundotGameAPI.analytics.recordCustomEvent('auto_escape_toggled', {
       enabled: this.state.autoEscape,
     });
-    RundotGameAPI.triggerHapticAsync('light' as never);
+    haptic('light');
     this.saveGame();
   }
 
   private handleToggleHideMaxed(): void {
     this.state.hideMaxedUpgrades = !this.state.hideMaxedUpgrades;
     this.ui.refreshHideMaxed();
+    this.saveGame();
+  }
+
+  private handleToggleHaptics(): void {
+    this.state.hapticsEnabled = !this.state.hapticsEnabled;
+    RundotGameAPI.analytics.recordCustomEvent('haptics_toggled', {
+      enabled: this.state.hapticsEnabled,
+    });
+    // A pulse when switching ON confirms the phone buzzes; OFF stays silent
+    // through the helper's own gate.
+    haptic('light');
     this.saveGame();
   }
 
@@ -583,7 +597,7 @@ export default class GameScene extends Phaser.Scene {
         ability: id,
         level: this.state.currentLevel,
       });
-      RundotGameAPI.triggerHapticAsync('light' as never);
+      haptic('light');
       this.saveGame();
     }
   }
@@ -603,7 +617,7 @@ export default class GameScene extends Phaser.Scene {
         level: this.state.currentLevel,
         lifetime_crafted: this.state.lifetimeGearCrafted,
       });
-      RundotGameAPI.triggerHapticAsync('success' as never);
+      haptic('success');
       this.saveGame();
     }
   }
@@ -618,7 +632,7 @@ export default class GameScene extends Phaser.Scene {
       this.ui.refreshGearPanel();
       this.ui.syncBuddyAppearance();
       RundotGameAPI.analytics.recordCustomEvent('gear_equipped', { gear: id });
-      RundotGameAPI.triggerHapticAsync('light' as never);
+      haptic('light');
       this.saveGame();
     }
   }
@@ -633,7 +647,7 @@ export default class GameScene extends Phaser.Scene {
     });
     this.ui.refreshGearPanel();
     RundotGameAPI.analytics.recordCustomEvent('gear_dismantled', { gear: id, scrap_gained: gained, scrap_total: this.state.scrap });
-    RundotGameAPI.triggerHapticAsync('medium' as never);
+    haptic('medium');
     this.saveGame();
   }
 
@@ -648,7 +662,7 @@ export default class GameScene extends Phaser.Scene {
     this.ui.refreshGearPanel();
     this.ui.syncBuddyAppearance();   // levels feed Gear Rating → the runner's look
     RundotGameAPI.analytics.recordCustomEvent('gear_leveled', { gear: id, gear_level: lvl, scrap_left: this.state.scrap });
-    RundotGameAPI.triggerHapticAsync('light' as never);
+    haptic('light');
     this.saveGame();
   }
 
@@ -666,7 +680,7 @@ export default class GameScene extends Phaser.Scene {
         level: this.state.getShopLevel(id),
         shards_remaining: this.state.voidShards,
       });
-      RundotGameAPI.triggerHapticAsync('success' as never);
+      haptic('success');
       this.saveGame();
     }
   }
@@ -687,7 +701,7 @@ export default class GameScene extends Phaser.Scene {
         tier: this.state.getAchievementLevel(id),
         shards_remaining: this.state.voidShards,
       });
-      RundotGameAPI.triggerHapticAsync('success' as never);
+      haptic('success');
       this.saveGame();
     }
   }
@@ -697,7 +711,7 @@ export default class GameScene extends Phaser.Scene {
     const awards = this.state.collectShardAwards();
     for (const evt of awards) {
       this.ui.addLogMessage(evt);
-      RundotGameAPI.triggerHapticAsync('success' as never);
+      haptic('success');
     }
     if (awards.length > 0) this.ui.refreshShopPanel();
   }
@@ -716,7 +730,7 @@ export default class GameScene extends Phaser.Scene {
         level: this.state.getVoidLevel(id),
         fragments_remaining: this.state.voidFragments,
       });
-      RundotGameAPI.triggerHapticAsync('success' as never);
+      haptic('success');
       this.saveGame();
     }
   }
@@ -727,7 +741,7 @@ export default class GameScene extends Phaser.Scene {
       total_depth: this.state.totalDepth,
       prestiges: this.state.prestigeCount,
     });
-    RundotGameAPI.triggerHapticAsync('warning' as never);
+    haptic('warning');
     try {
       await RundotGameAPI.appStorage.removeItem('backrooms_save');
     } catch (err) {
