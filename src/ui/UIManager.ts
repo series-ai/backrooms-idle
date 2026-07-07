@@ -243,7 +243,9 @@ export class UIManager {
   private gearNameIcons: Map<string, Phaser.GameObjects.Image> = new Map();
   private gearBtnBg: Map<string, Phaser.GameObjects.Image> = new Map();
   private gearBtnLabels: Map<string, Phaser.GameObjects.Text> = new Map();
-  private gearCostIcons: Map<string, Phaser.GameObjects.Image> = new Map();
+  // Recipe cost pairs on the CRAFT button: one icon + "owned/cost" text per
+  // cost resource (icons instead of spelled-out names — names don't fit).
+  private gearCostPairs: Map<string, { icon: Phaser.GameObjects.Image | null; txt: Phaser.GameObjects.Text }[]> = new Map();
   private gearCards: Map<string, Phaser.GameObjects.Rectangle> = new Map();
   // Scrap economy: the balance line + per-card SCRAP button (with tap-again confirm).
   private gearScrapText!: Phaser.GameObjects.Text;
@@ -2233,12 +2235,21 @@ export class UIManager {
         else this.cb.onCraftGear(gear.id);
       });
 
-      // Cost icon (first cost resource) — swapped/hidden by state in renderGearRow.
-      const costIcon = this.createIcon(LX + 38, BCY, gear.cost[0].resourceId, 76);
-      if (costIcon) this.gearCostIcons.set(gear.id, costIcon);
+      // Cost pairs: resource icon + "owned/cost" per ingredient, laid out to
+      // the right of the CRAFT word. Icons instead of names — names overflow.
       const costLabel = makeText(this.scene, LX + BW / 2, BCY, '', 12, '#FFFFFF', {
         fontStyle: 'bold', align: 'center',
       }).setOrigin(0.5, 0.5);
+      const pairs: { icon: Phaser.GameObjects.Image | null; txt: Phaser.GameObjects.Text }[] = [];
+      for (let ci = 0; ci < gear.cost.length; ci++) {
+        const pairX = LX + 108 + ci * 106;
+        const pairIcon = this.createIcon(pairX, BCY, gear.cost[ci].resourceId, 36);
+        const pairTxt = makeText(this.scene, pairX + 22, BCY, '', 12, '#FFFFFF', {
+          fontStyle: 'bold',
+        }).setOrigin(0, 0.5);
+        pairs.push({ icon: pairIcon, txt: pairTxt });
+      }
+      this.gearCostPairs.set(gear.id, pairs);
 
       const card = this.scene.add.rectangle(UIManager.UPG_CARD_CX, 69, UIManager.UPG_CARD_W, 158, 0x1e1e1e, 1)
         .setStrokeStyle(1, 0x3a3a3a);
@@ -2247,7 +2258,10 @@ export class UIManager {
       row.add(card);
       if (nameIcon) row.add(nameIcon);
       row.add([nameTxt, descTxt, flavorTxt, slotTxt, btnBg]);
-      if (costIcon) row.add(costIcon);
+      for (const pair of pairs) {
+        if (pair.icon) row.add(pair.icon);
+        row.add(pair.txt);
+      }
       row.add(costLabel);
 
       scrollContainer.add(row);
@@ -2306,9 +2320,14 @@ export class UIManager {
     const badge = this.gearSlotBadges.get(gear.id);
     const card = this.gearCards.get(gear.id);
     const bg = this.gearBtnBg.get(gear.id);
-    const icon = this.gearCostIcons.get(gear.id);
+    const pairs = this.gearCostPairs.get(gear.id) ?? [];
     const label = this.gearBtnLabels.get(gear.id);
     const nameIcon = this.gearNameIcons.get(gear.id);
+    const LX = UIManager.UPG_LEFT;
+    const BW = UIManager.UPG_BTN_W;
+    const hidePairs = () => {
+      for (const pair of pairs) { pair.icon?.setVisible(false); pair.txt.setVisible(false); }
+    };
 
     if (!this.state.isGearUnlocked(gear.id)) {
       name?.setText('??????').setColor('#888888');
@@ -2320,8 +2339,8 @@ export class UIManager {
       // Locked: the gradient goes ghostly — desaturated tint + heavy fade.
       bg?.setVisible(true).setTint(0x666677).setAlpha(0.25);
       if (bg?.input) bg.input.enabled = false;
-      icon?.setVisible(false);
-      label?.setText('\u{1F512} LOCKED').setColor('#777777').setAlpha(1);
+      hidePairs();
+      label?.setX(LX + BW / 2).setText('\u{1F512} LOCKED').setColor('#777777').setAlpha(1);
       return;
     }
 
@@ -2332,21 +2351,32 @@ export class UIManager {
     nameIcon?.setVisible(true);
     card?.setAlpha(1).setStrokeStyle(1, 0x3a3a3a);
 
-    // Craftable: per-resource "owned/cost Name" lines, faded until affordable.
+    // Craftable: icon + "owned/cost" per recipe ingredient, faded until affordable.
     const canCraft = this.state.canAffordGear(gear.id);
     bg?.setVisible(true).clearTint().setAlpha(canCraft ? 1 : 0.35);
     if (bg?.input) bg.input.enabled = true;
-    icon?.setVisible(true).setAlpha(canCraft ? 1 : 0.6);
     // Affordable but the bag can't take the displaced piece: the button stays
     // live and opens the scrap-or-cancel prompt instead of crafting.
     if (canCraft && this.state.craftBlockedByFullInventory(gear.id)) {
-      label?.setText('CRAFT\nBAG FULL').setColor('#FFB84A').setAlpha(1);
+      hidePairs();
+      label?.setX(LX + BW / 2).setText('CRAFT\nBAG FULL').setColor('#FFB84A').setAlpha(1);
       return;
     }
-    const costLines = gear.cost.map((c) =>
-      `${fmt(this.state.resources[c.resourceId] ?? D(0))}/${c.amount} ${RESOURCES[c.resourceId]?.name ?? c.resourceId}`,
-    );
-    label?.setText(`CRAFT\n${costLines.join('  +  ')}`).setColor('#FFFFFF').setAlpha(canCraft ? 1 : 0.7);
+    label?.setX(LX + 44).setText('CRAFT').setColor('#FFFFFF').setAlpha(canCraft ? 1 : 0.7);
+    for (let ci = 0; ci < pairs.length; ci++) {
+      const c = gear.cost[ci];
+      const owned = this.state.resources[c.resourceId] ?? D(0);
+      const enough = owned.gte(c.amount);
+      // Clamp the owned count so the pair never outgrows its slot on the button.
+      const count = `${enough ? c.amount : fmt(owned)}/${c.amount}`;
+      const pair = pairs[ci];
+      pair.icon?.setVisible(true).setAlpha(canCraft ? 1 : 0.6);
+      // No texture for this resource: fall back to its emoji in the text.
+      pair.txt.setVisible(true)
+        .setText(pair.icon ? count : `${RESOURCES[c.resourceId]?.icon ?? ''}${count}`)
+        .setColor(enough ? '#A0FFA0' : '#FFB4B4')
+        .setAlpha(canCraft ? 1 : 0.8);
+    }
   }
 
   refreshGearPanel(): void {
