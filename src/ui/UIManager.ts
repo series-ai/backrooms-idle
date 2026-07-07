@@ -117,6 +117,8 @@ export class UIManager {
   private showcaseTier = 1;
   /** The player avatar running across the explore screen (run01..run04 cycle). */
   private buddyRunner: Phaser.GameObjects.Sprite | null = null;
+  /** Extra dudes from the shop's Another Explorer — they run alongside you. */
+  private companionRunners: Phaser.GameObjects.Sprite[] = [];
   private buddyShadow: Phaser.GameObjects.Sprite | null = null;   // bright-phase contact shadow
   private navLeft?: Phaser.GameObjects.Container;    // ◀ / ▶ floor arrows — scene-level so the
   private navRight?: Phaser.GameObjects.Container;   // lighting overlays never wash them
@@ -130,6 +132,8 @@ export class UIManager {
   private hypePrompt?: Phaser.GameObjects.Container;
   /** Static frame for the idle "stand00" pose. */
   private static readonly BUDDY_STAND_FRAME = 56;
+  /** Where each companion runs relative to the player (a step behind him). */
+  private static readonly COMPANION_OFFSETS = [{ x: -95, y: -12 }, { x: 96, y: -14 }];
   private lastPulseTime = 0;                           // throttles the tap pulse animation
   private flavorMsg?: Phaser.GameObjects.Text;         // reusable entity/ambient flavor line
   private flavorTween?: Phaser.Tweens.Tween;
@@ -479,9 +483,36 @@ export class UIManager {
    */
   private setBuddyFacing(faceLeft: boolean): void {
     this.buddyRunner?.setFlipX(faceLeft);
+    for (const comp of this.companionRunners) comp.setFlipX(faceLeft);
     if (this.buddyShadow) {
       this.buddyShadow.setFlipX(!faceLeft);
       this.buddyShadow.x = LAYOUT.CENTER_X + (faceLeft ? 57 : -57);
+    }
+  }
+
+  /**
+   * Sync the companion runners with the shop's Another Explorer level: one
+   * extra dude per level, running a step behind the player. They wear the
+   * starter suit on purpose — the geared-up look stays the player's own.
+   * Called on explore-panel build and after every shop purchase.
+   */
+  refreshExplorerCompanions(): void {
+    const panel = this.panels.get('explore');
+    if (!panel || !this.buddyRunner) return;
+    const want = Math.min(this.state.explorerCount - 1, UIManager.COMPANION_OFFSETS.length);
+    while (this.companionRunners.length > want) this.companionRunners.pop()?.destroy();
+    while (this.companionRunners.length < want) {
+      const off = UIManager.COMPANION_OFFSETS[this.companionRunners.length];
+      const comp = this.scene.add.sprite(LAYOUT.CENTER_X + off.x, this.buddyRunner.y + off.y, 'buddy1')
+        .setScale(1.55).setDepth(16).setFlipX(this.buddyRunner.flipX);
+      comp.anims.timeScale = this.buddyRunner.anims.timeScale;
+      comp.play('buddy1_spawn');
+      comp.once(Phaser.Animations.Events.ANIMATION_COMPLETE, () => {
+        if (comp.active) comp.play('buddy1_run');
+      });
+      panel.add(comp);
+      panel.moveBelow<Phaser.GameObjects.GameObject>(comp, this.buddyRunner);
+      this.companionRunners.push(comp);
     }
   }
 
@@ -498,11 +529,13 @@ export class UIManager {
       this.buddyRunner.play(this.buddyRunAnim());
       this.buddyRunner.anims.timeScale = 2;
     }
+    for (const comp of this.companionRunners) comp.anims.timeScale = 2;
   }
 
   /** Hype ended: return the runner to normal speed. */
   endHype(): void {
     if (this.buddyRunner) this.buddyRunner.anims.timeScale = 1;
+    for (const comp of this.companionRunners) comp.anims.timeScale = 1;
   }
 
   /**
@@ -1361,6 +1394,11 @@ export class UIManager {
     this.refreshPetRow();
 
     this.panels.set('explore', panel);
+
+    // Companions from Another Explorer join as soon as the panel exists (the
+    // array may hold sprites from a torn-down panel — start fresh).
+    this.companionRunners = [];
+    this.refreshExplorerCompanions();
 
     // Initial focal icon = this floor's ore.
     this.popShowcase(this.state.floorOre.resource, this.state.floorOre.tier);

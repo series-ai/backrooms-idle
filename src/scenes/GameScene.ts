@@ -675,6 +675,7 @@ export default class GameScene extends Phaser.Scene {
       });
       this.ui.refreshShopPanel();
       this.ui.refreshPetRow();   // a pet unlock (e.g. Lamp Trap) appears on the explore page
+      this.ui.refreshExplorerCompanions();   // Another Explorer adds a runner on the spot
       RundotGameAPI.analytics.recordCustomEvent('shop_upgrade_purchased', {
         upgrade: id,
         level: this.state.getShopLevel(id),
