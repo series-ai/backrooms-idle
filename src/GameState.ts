@@ -25,6 +25,7 @@ import {
   getLevel,
   getFloorOre,
   tierSuffix,
+  resourceKey,
   ensureUpgradesForFloor,
   type LevelDef,
   type GearSlot,
@@ -704,7 +705,8 @@ export class GameState {
     const ore = this.floorOre;
     const catMult = this.petCatLevel >= 20 ? 2 : 1;   // Cat Lv 20: ×2 drive-off rewards
     const gain = Math.round((2 + this.level.danger) * (1 + this.flatYieldBonus)) * catMult;
-    this.resources[ore.resource] = (this.resources[ore.resource] ?? D(0)).add(gain);
+    const oreKey = resourceKey(ore.resource, ore.tier);
+    this.resources[oreKey] = (this.resources[oreKey] ?? D(0)).add(gain);
     this.stats.resourcesFound += gain;
     this.lifetimeResourcesCollected += gain;
     this.exploration = Math.min(ore.required, this.exploration + gain);
@@ -775,7 +777,8 @@ export class GameState {
     const events: GameEvent[] = [];
     const ore = this.floorOre;
     const gain = Math.round((1 + this.level.danger) * (1 + this.flatYieldBonus));
-    this.resources[ore.resource] = (this.resources[ore.resource] ?? D(0)).add(gain);
+    const oreKey = resourceKey(ore.resource, ore.tier);
+    this.resources[oreKey] = (this.resources[oreKey] ?? D(0)).add(gain);
     this.stats.resourcesFound += gain;
     this.lifetimeResourcesCollected += gain;
     this.exploration = Math.min(ore.required, this.exploration + gain);
@@ -1288,7 +1291,8 @@ export class GameState {
     }
     gain += this.flatYieldBonus;   // floor base + pack gear + Deep Pockets pay on EVERY break
     if (this.nodeIsEasyAccess) this.stats.easyAccessFinds += 1;   // brittle node mined (independent of grade)
-    this.resources[ore.resource] = (this.resources[ore.resource] ?? D(0)).add(gain);   // inventory (uncapped)
+    const oreKey = resourceKey(ore.resource, ore.tier);
+    this.resources[oreKey] = (this.resources[oreKey] ?? D(0)).add(gain);   // inventory (uncapped, per-tier pool)
     this.stats.resourcesFound += gain;
     this.lifetimeResourcesCollected += gain;
     this.exploration = Math.min(ore.required, this.exploration + gain);                 // descend progress (capped)
@@ -1587,7 +1591,8 @@ export class GameState {
       // floor base's flat yield, so offline ≈ live. (Base CONSTRUCTION rolls don't
       // happen offline — stages only advance while playing.)
       const count = Math.round(cycles * (1 + this.flatYieldBonus + this.qualityChance * this.qualityBonus + 9 * this.mintChance));
-      this.resources[ore.resource] = (this.resources[ore.resource] ?? D(0)).add(count);
+      const oreKey = resourceKey(ore.resource, ore.tier);
+      this.resources[oreKey] = (this.resources[oreKey] ?? D(0)).add(count);
       this.stats.resourcesFound += count;
       this.lifetimeResourcesCollected += count;
       this.exploration = Math.min(ore.required, this.exploration + count);
@@ -1657,8 +1662,9 @@ export class GameState {
     this.currentLevel = headStart;
     this.exploration = 0;
 
-    // Reset resources
-    for (const key of Object.keys(RESOURCES)) {
+    // Reset resources — iterate the LIVE inventory, not RESOURCES, so tiered
+    // pools ("almond_water_t2", …) from deep laps are wiped too.
+    for (const key of Object.keys(this.resources)) {
       this.resources[key] = D(0);
     }
     this.resources['almond_water'] = D(5);

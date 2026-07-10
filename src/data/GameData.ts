@@ -115,6 +115,28 @@ export function getTierColor(tier: number): number | null {
   return TIER_OUTLINE_COLORS[(tier - 2) % TIER_OUTLINE_COLORS.length];
 }
 
+/**
+ * Inventory key for a resource at a tier. Tier 1 keeps the bare id (existing
+ * saves keep working); tier 2+ gets its own pool ("almond_water_t2") so deep
+ * laps can't pay for their upgrades out of the cheap tier-1 stockpile.
+ */
+export function resourceKey(resource: string, tier: number): string {
+  return tier <= 1 ? resource : `${resource}_t${tier}`;
+}
+
+/** Split an inventory key back into base resource + tier. */
+export function parseResourceKey(key: string): { resource: string; tier: number } {
+  const m = key.match(/^(.+)_t(\d+)$/);
+  if (m && RESOURCES[m[1]]) return { resource: m[1], tier: parseInt(m[2], 10) };
+  return { resource: key, tier: 1 };
+}
+
+/** Display name for an inventory key ("almond_water_t2" → "Almond Water II"). */
+export function resourceKeyName(key: string): string {
+  const { resource, tier } = parseResourceKey(key);
+  return `${RESOURCES[resource]?.name ?? resource}${tierSuffix(tier)}`;
+}
+
 /** Roman-numeral suffix for a tier (Tier 1 = '', Tier 2 = ' II', ...). */
 export function tierSuffix(tier: number): string {
   if (tier <= 1) return '';
@@ -907,7 +929,8 @@ function genUpgradeForFloor(floorId: number): UpgradeDef | null {
     baseCost: Math.round(150 * Math.pow(1.09, floorId - 30)),
     costMultiplier: 2, maxLevel: template.maxLevel,
     effectPerLevel: perLevel, effectUnit: template.effectUnit,
-    costResource: res, effect: template.effect,
+    // Paid in the TIERED pool ("almond_water_t2") — tier-1 stock can't fund it.
+    costResource: resourceKey(res, tier), effect: template.effect,
     unlockFloor: floorId,
   };
 }

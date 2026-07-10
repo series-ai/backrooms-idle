@@ -1,7 +1,7 @@
 import Phaser from 'phaser';
 import RundotGameAPI from '@series-inc/rundot-game-sdk/api';
 import { LAYOUT } from '../config';
-import { UPGRADES, RESOURCES, RESOURCE_ORDER, ORE_SEQUENCE, VOID_UPGRADES, REWIND_MIN_FLOOR, ABILITIES, GEAR, GEAR_SLOTS, GEAR_SLOT_ICONS, GEAR_SLOT_LABELS, GEAR_LEVEL_MAX, gearEffectSummary, ENTITIES, SHOP_UPGRADES, ACHIEVEMENTS, FLOOR_BASE_STAGES, PETS, getTierColor, tierSuffix, getFloorOre, type UpgradeDef, type ShopUpgradeDef, type AchievementDef, type VoidUpgradeDef, type GearDef, type GearEffect } from '../data/GameData';
+import { UPGRADES, RESOURCES, RESOURCE_ORDER, ORE_SEQUENCE, VOID_UPGRADES, REWIND_MIN_FLOOR, ABILITIES, GEAR, GEAR_SLOTS, GEAR_SLOT_ICONS, GEAR_SLOT_LABELS, GEAR_LEVEL_MAX, gearEffectSummary, ENTITIES, SHOP_UPGRADES, ACHIEVEMENTS, FLOOR_BASE_STAGES, PETS, getTierColor, tierSuffix, getFloorOre, resourceKey, parseResourceKey, resourceKeyName, type UpgradeDef, type ShopUpgradeDef, type AchievementDef, type VoidUpgradeDef, type GearDef, type GearEffect } from '../data/GameData';
 import { fmt, D, type Big } from '../num';
 import type { GameEvent, OfflineSummary, LightingState } from '../GameState';
 import { GameState } from '../GameState';
@@ -881,7 +881,8 @@ export class UIManager {
       onComplete: () => img.destroy(),
     });
 
-    const resName = RESOURCES[this.state.floorOre.resource]?.name ?? '';
+    const ore = this.state.floorOre;
+    const resName = `${RESOURCES[ore.resource]?.name ?? ''}${tierSuffix(ore.tier)}`;
     const mote = makeText(this.scene, img.x, img.y - 40, `+${gain} ${resName}  ·  −20 Noise`, 17, '#9FB4FF', {
       fontStyle: 'bold', stroke: '#000000', strokeThickness: 3,
     }).setOrigin(0.5).setDepth(27).setAlpha(0);
@@ -1063,17 +1064,18 @@ export class UIManager {
     // Single readout: which resource you're CURRENTLY collecting, its name, and
     // how many you have. Icon + name + count all swap as you descend (see
     // updateResourceBar). Laid out as: [icon] Name ............... count
-    const res = this.state.floorOre.resource;
+    const ore = this.state.floorOre;
+    const res = ore.resource;
     const cy = LAYOUT.RESOURCE_BAR_CENTER;     // vertical center of the bar card
 
     this.resBarIcon = this.createIcon(cx, cy, res, 72) ?? undefined;
     if (this.resBarIcon) this.resBarIcon.setDepth(11);
 
-    this.resBarName = makeText(this.scene, cx, cy, RESOURCES[res].name, 22, '#DDDDDD', {
+    this.resBarName = makeText(this.scene, cx, cy, `${RESOURCES[res].name}${tierSuffix(ore.tier)}`, 22, '#DDDDDD', {
       fontStyle: 'bold',
     }).setOrigin(0, 0.5).setDepth(11);
 
-    this.resBarText = makeText(this.scene, cx, cy, `${fmt(this.state.resources[res] ?? D(0))}`, 24, '#FFD700', {
+    this.resBarText = makeText(this.scene, cx, cy, `${fmt(this.state.resources[resourceKey(res, ore.tier)] ?? D(0))}`, 24, '#FFD700', {
       fontStyle: 'bold',
     }).setOrigin(0, 0.5).setDepth(11);
 
@@ -1537,41 +1539,7 @@ export class UIManager {
     this.itemsScroll = scrollContainer;
     const contentH = LAYOUT.CONTENT_BOTTOM_WIDE - LAYOUT.CONTENT_TOP_WIDE - 10;
 
-    for (const resId of RESOURCE_ORDER) {
-      const res = RESOURCES[resId];
-      // Row children use LOCAL offsets; the row container itself is slotted
-      // into place (row.y) by layoutItemRows.
-      const row = this.scene.add.container(0, 0).setVisible(false);
-
-      // Resource icon + name (left) + count (right) — same line
-      const icon = this.createIcon(60, 14, resId, 100);
-      if (icon) {
-        row.add(icon);
-        row.add(makeText(this.scene, 120, 0, res.name, 22, '#EEEEEE'));
-      } else {
-        row.add(makeText(this.scene, 40, 0, `${res.icon}  ${res.name}`, 22, '#EEEEEE'));
-      }
-      const countTxt = makeText(this.scene, 680, 2, `x${fmt(this.state.resources[resId] ?? D(0))}`, 22, '#FFD700', {
-        fontStyle: 'bold',
-      }).setOrigin(1, 0);
-      row.add(countTxt);
-      this.resTexts.set(`item_${resId}`, countTxt);
-
-      // Description (left) + use button (right) — same line
-      row.add(makeText(this.scene, icon ? 120 : 60, 30, res.description, 16, '#AAAAAA'));
-
-      if (res.usable && res.useLabel) {
-        const label = res.useLabel;
-        const btn = makeBtn(this.scene, 640, 40, label, 100, 32, 0x334433, () => {
-          if (resId === 'almond_water') this.cb.onHeal();
-          else if (resId === 'canned_food') this.cb.onEat();
-        });
-        row.add(btn);
-      }
-
-      scrollContainer.add(row);
-      this.itemRows.set(resId, row);
-    }
+    for (const resId of RESOURCE_ORDER) this.buildItemRow(resId);
 
     panel.add(scrollContainer);
 
@@ -1616,8 +1584,68 @@ export class UIManager {
   }
 
   /**
+   * Build one Items-tab row for an inventory key — a base resource
+   * ("almond_water") or a deep-lap tiered pool ("almond_water_t2"). Tiered
+   * rows reuse the base icon/blurb with a "Name II" title; use buttons only
+   * exist at tier 1 (consumables drink from the tier-1 pool). Row children
+   * use LOCAL offsets; the row container itself is slotted into place
+   * (row.y) by layoutItemRows.
+   */
+  private buildItemRow(key: string): Phaser.GameObjects.Container {
+    const { resource, tier } = parseResourceKey(key);
+    const res = RESOURCES[resource];
+    const name = `${res.name}${tierSuffix(tier)}`;
+    const row = this.scene.add.container(0, 0).setVisible(false);
+
+    // Resource icon + name (left) + count (right) — same line
+    const icon = this.createIcon(60, 14, resource, 100);
+    if (icon) {
+      row.add(icon);
+      row.add(makeText(this.scene, 120, 0, name, 22, '#EEEEEE'));
+    } else {
+      row.add(makeText(this.scene, 40, 0, `${res.icon}  ${name}`, 22, '#EEEEEE'));
+    }
+    const countTxt = makeText(this.scene, 680, 2, `x${fmt(this.state.resources[key] ?? D(0))}`, 22, '#FFD700', {
+      fontStyle: 'bold',
+    }).setOrigin(1, 0);
+    row.add(countTxt);
+    this.resTexts.set(`item_${key}`, countTxt);
+
+    // Description (left) + use button (right) — same line
+    row.add(makeText(this.scene, icon ? 120 : 60, 30, res.description, 16, '#AAAAAA'));
+
+    if (tier === 1 && res.usable && res.useLabel) {
+      const label = res.useLabel;
+      const btn = makeBtn(this.scene, 640, 40, label, 100, 32, 0x334433, () => {
+        if (resource === 'almond_water') this.cb.onHeal();
+        else if (resource === 'canned_food') this.cb.onEat();
+      });
+      row.add(btn);
+    }
+
+    this.itemsScroll?.add(row);
+    this.itemRows.set(key, row);
+    return row;
+  }
+
+  /**
+   * Every inventory key the Items tab could show, in display order: the tier-1
+   * lap (plus floor-independent extras like Moth), then one full lap per
+   * deeper tier the run has reached.
+   */
+  private itemPanelKeys(): string[] {
+    const maxUnlocked = Math.max(0, ...this.state.unlockedLevels);
+    const maxTier = Math.floor(maxUnlocked / ORE_SEQUENCE.length) + 1;
+    const keys: string[] = [...RESOURCE_ORDER];
+    for (let tier = 2; tier <= maxTier; tier++) {
+      for (const res of ORE_SEQUENCE) keys.push(resourceKey(res, tier));
+    }
+    return keys;
+  }
+
+  /**
    * Show only the resources you've SEEN this run — a floor's ore appears once
-   * that floor is unlocked (or you're holding some, e.g. Moths), everything
+   * that floor is unlocked (deep laps get their own tiered rows), everything
    * deeper stays hidden. Visible rows pack together; scroll bounds follow.
    */
   private layoutItemRows(): void {
@@ -1626,16 +1654,18 @@ export class UIManager {
     const contentH = LAYOUT.CONTENT_BOTTOM_WIDE - LAYOUT.CONTENT_TOP_WIDE - 10;
     const maxUnlocked = Math.max(0, ...this.state.unlockedLevels);
     let visIdx = 0;
-    RESOURCE_ORDER.forEach((resId, i) => {
-      const row = this.itemRows.get(resId);
-      if (!row) return;
-      const owned = (this.state.resources[resId] ?? D(0)).gt(0);
-      // Ore rows unlock with their floor (tier laps re-use the same row);
-      // floor-independent extras (Moth) show once you hold any.
-      const seen = (i < ORE_SEQUENCE.length && i <= maxUnlocked) || owned;
+    for (const key of this.itemPanelKeys()) {
+      // Deep-lap tiered rows are created on demand the first time they can show.
+      const row = this.itemRows.get(key) ?? this.buildItemRow(key);
+      const owned = (this.state.resources[key] ?? D(0)).gt(0);
+      const { resource, tier } = parseResourceKey(key);
+      const pos = ORE_SEQUENCE.indexOf(resource);
+      // Ore rows unlock with their floor; floor-independent extras (Moth)
+      // show once you hold any.
+      const seen = (pos >= 0 && (tier - 1) * ORE_SEQUENCE.length + pos <= maxUnlocked) || owned;
       row.setVisible(seen);
       if (seen) row.y = startY + (visIdx++) * rowH;   // slot into the packed list
-    });
+    }
     this.itemsMinScroll = Math.min(0, -(visIdx * rowH - contentH));
     if (this.itemsScroll) {
       this.itemsScroll.y = Phaser.Math.Clamp(this.itemsScroll.y, this.itemsMinScroll, 0);
@@ -1781,7 +1811,8 @@ export class UIManager {
       if (!this.upgDragMoved && this.inWideContent(p)) this.cb.onBuyUpgrade(upg.id);
     });
     // Oversized on purpose — the icon overhangs the button top/bottom for pop.
-    const costIcon = this.createIcon(LX + 38, BCY, upg.costResource, 76);
+    // Tiered costs ("almond_water_t2") wear the base resource's icon.
+    const costIcon = this.createIcon(LX + 38, BCY, parseResourceKey(upg.costResource).resource, 76);
     if (costIcon) this.upgCostIcons.set(upg.id, costIcon);
     const costLabel = makeText(this.scene, LX + BW / 2, BCY, '', 13, '#FFFFFF', { fontStyle: 'bold' })
       .setOrigin(0.5, 0.5);
@@ -3019,7 +3050,9 @@ export class UIManager {
       // Resource feedback = "+N ResourceName!" that pops in (scale/fade up), holds
       // a beat, then vanishes — in place, no long upward float.
       if (evt.value) {
-        const resName = evt.iconKey ? (RESOURCES[evt.iconKey]?.name ?? '') : '';
+        // Floor-ore pickups carry the current lap's tier suffix ("Almond Water II").
+        const tierSfx = evt.iconKey === this.state.floorOre.resource ? tierSuffix(this.state.floorOre.tier) : '';
+        const resName = evt.iconKey ? `${RESOURCES[evt.iconKey]?.name ?? ''}${tierSfx}` : '';
         // Fixed spot just below the focal icon — centered, no drift.
         const mx = LAYOUT.CENTER_X;
         const my = this.showcaseCenterY() + 120;
@@ -3261,8 +3294,9 @@ export class UIManager {
 
   updateResourceBar(): void {
     // Show the resource you're currently collecting — icon + count both follow
-    // the active floor.
-    const res = this.state.floorOre.resource;
+    // the active floor (count reads the TIERED pool on deep laps).
+    const ore = this.state.floorOre;
+    const res = ore.resource;
     const key = `icon_${res}`;
     // The readout only lives on the explore tab; never re-show it elsewhere.
     const onExplore = this.activeTab === 'explore';
@@ -3276,10 +3310,11 @@ export class UIManager {
     }
     if (this.resBarName) {
       // Fall back to the emoji glyph as a prefix when no PNG icon is loaded.
-      this.resBarName.setText(hasIcon ? RESOURCES[res].name : `${RESOURCES[res].icon} ${RESOURCES[res].name}`);
+      const name = `${RESOURCES[res].name}${tierSuffix(ore.tier)}`;
+      this.resBarName.setText(hasIcon ? name : `${RESOURCES[res].icon} ${name}`);
     }
     if (this.resBarText) {
-      this.resBarText.setText(fmt(this.state.resources[res] ?? D(0)));
+      this.resBarText.setText(fmt(this.state.resources[resourceKey(res, ore.tier)] ?? D(0)));
     }
     this.layoutResourceBar();
     // Keep item counts in sync when viewing items tab
@@ -3290,9 +3325,9 @@ export class UIManager {
   }
 
   refreshItemCounts(): void {
-    for (const resId of RESOURCE_ORDER) {
-      const txt = this.resTexts.get(`item_${resId}`);
-      if (txt) txt.setText(`x${fmt(this.state.resources[resId] ?? D(0))}`);
+    for (const key of this.itemRows.keys()) {
+      const txt = this.resTexts.get(`item_${key}`);
+      if (txt) txt.setText(`x${fmt(this.state.resources[key] ?? D(0))}`);
     }
     // A new floor (or a first Moth) may have just revealed a row — repack.
     this.layoutItemRows();
@@ -3308,10 +3343,13 @@ export class UIManager {
     const maxed = lvl >= upg.maxLevel;
     const canBuy = this.state.canAffordUpgrade(upg.id);
     // Cost resource can change per level (cycling upgrades like Master Scav).
+    // Deep-lap upgrades cost a TIERED pool ("almond_water_t2") — parse it back
+    // to the base resource for the icon and a "Name II" label.
     const resId = this.state.getUpgradeCostResource(upg.id);
+    const baseRes = parseResourceKey(resId).resource;
     const owned = this.state.resources[resId] ?? D(0);
     const cost = this.state.getUpgradeCost(upg.id);
-    const resName = RESOURCES[resId]?.name ?? resId;
+    const resName = resourceKeyName(resId);
     const LX = UIManager.UPG_LEFT;
 
     // When maxed, HIDE the button (and disable its tap) but keep the MAXED
@@ -3326,7 +3364,7 @@ export class UIManager {
     // Swap the icon to the current cost resource (matters for cycling upgrades).
     const icon = this.upgCostIcons.get(upg.id);
     if (icon) {
-      const key = `icon_${resId}`;
+      const key = `icon_${baseRes}`;
       if (!maxed && this.scene.textures.exists(key)) icon.setTexture(key).setVisible(true).setAlpha(canBuy ? 1 : 0.6);
       else icon.setVisible(false);
     }
