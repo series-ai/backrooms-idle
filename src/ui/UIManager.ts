@@ -9,6 +9,28 @@ import { haptic } from '../haptics';
 
 const FONT_FAMILY = 'monospace';
 
+/**
+ * Mockup palette — dark olive-tinted cards with muted gold borders, gold
+ * accents for currency/highlights, and desaturated military green for the
+ * "go" affordances (descend, nav triangles).
+ */
+const UI = {
+  cardFill: 0x0d0c07,
+  cardAlpha: 0.66,
+  cardStroke: 0x45412f,
+  cardRadius: 18,
+  boxFill: 0x11100a,
+  boxStroke: 0x3d3a2c,
+  btnFill: 0x1b1a12,
+  btnStroke: 0x4a4636,
+  gold: 0xffd24a,
+  goldCss: '#FFD24A',
+  greenFill: 0x1c2f14,
+  greenStroke: 0x6f8f4c,
+  triCss: '#8fae5e',
+  dimTextCss: '#999483',
+} as const;
+
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                            */
 /* ------------------------------------------------------------------ */
@@ -60,6 +82,65 @@ function makeBtn(
   return container;
 }
 
+/**
+ * (Re)draw a centered rounded panel into a Graphics object. Callers position
+ * the Graphics at the panel center; redraws no-op when the style key is
+ * unchanged so per-tick callers (updateStatusBars) don't rebuild geometry.
+ */
+function drawPanel(
+  g: Phaser.GameObjects.Graphics,
+  w: number,
+  h: number,
+  fill: number,
+  fillAlpha: number,
+  stroke: number,
+  radius = 14,
+  lineW = 2,
+): Phaser.GameObjects.Graphics {
+  const key = `${w}|${h}|${fill}|${fillAlpha}|${stroke}|${radius}|${lineW}`;
+  const holder = g as unknown as Record<string, string>;
+  if (holder.__panelKey === key) return g;
+  holder.__panelKey = key;
+  g.clear();
+  g.fillStyle(fill, fillAlpha);
+  g.fillRoundedRect(-w / 2, -h / 2, w, h, radius);
+  g.lineStyle(lineW, stroke, 1);
+  g.strokeRoundedRect(-w / 2, -h / 2, w, h, radius);
+  return g;
+}
+
+/**
+ * Rounded-corner button in the mockup's language: dark pill, olive-gold
+ * border. Children are [bg Graphics, label Text] — same slot order as
+ * makeBtn so getAt(1) label tweaks keep working.
+ */
+function makePillBtn(
+  scene: Phaser.Scene,
+  x: number,
+  y: number,
+  label: string,
+  w: number,
+  h: number,
+  cb: () => void,
+  fill: number = UI.btnFill,
+  stroke: number = UI.btnStroke,
+): Phaser.GameObjects.Container {
+  const container = scene.add.container(x, y);
+  const bg = drawPanel(scene.add.graphics(), w, h, fill, 1, stroke, Math.min(14, h / 2 - 2));
+  const txt = scene.add.text(0, 0, label, {
+    fontFamily: FONT_FAMILY,
+    fontSize: '22px',
+    color: '#E8E2CF',
+    align: 'center',
+    resolution: 2,
+  }).setOrigin(0.5);
+  container.add([bg, txt]);
+  container.setSize(w, h);
+  container.setInteractive({ useHandCursor: true });
+  container.on('pointerdown', cb);
+  return container;
+}
+
 /** Icon native resolution (all icons are 170x170) */
 const ICON_NATIVE = 170;
 
@@ -98,8 +179,10 @@ export class UIManager {
   private state: GameState;
   private cb: UICallbacks;
 
-  // Background
-  private bgImage!: Phaser.GameObjects.Image;
+  // Background — bg_default is the always-on base; the bright/dark variants
+  // sit above it and fade in/out with the lighting phase.
+  private bgBright?: Phaser.GameObjects.Image;
+  private bgDark?: Phaser.GameObjects.Image;
   private flickerOverlay!: Phaser.GameObjects.Rectangle;
   private damageOverlay!: Phaser.GameObjects.Rectangle;
 
@@ -145,7 +228,6 @@ export class UIManager {
   private mothTimer?: Phaser.Time.TimerEvent;
   private activeMoth?: Phaser.GameObjects.Image;
   // Lighting overlays (light wash from above / vignette + pall for the dark)
-  private lightOverlay?: Phaser.GameObjects.Image;
   private vignetteOverlay?: Phaser.GameObjects.Image;
   private dimOverlay?: Phaser.GameObjects.Rectangle;
   private dustEmitter?: Phaser.GameObjects.Particles.ParticleEmitter;   // bright-phase dust motes
@@ -154,6 +236,10 @@ export class UIManager {
   private activePhantom?: Phaser.GameObjects.Image;
   private durFill?: Phaser.GameObjects.Rectangle;
   private durLabel?: Phaser.GameObjects.Text;   // "N to collect" readout on the durability bar
+  private durPct?: Phaser.GameObjects.Text;     // percent readout beside the integrity bar
+  private teamBox?: Phaser.GameObjects.Graphics;   // "TEAM" fieldset around the pets row
+  private teamLabel?: Phaser.GameObjects.Container;
+  private progFrame?: Phaser.GameObjects.Graphics; // rounded frame on the exploration bar
   private qualityLabel?: Phaser.GameObjects.Text;   // "QUALITY"/"MINT" tag above a pre-rolled node
   private easyAccessLabel?: Phaser.GameObjects.Text;   // "EASY ACCESS" tag (independent of grade)
   private baseLabel?: Phaser.GameObjects.Text;   // floor-base status line under the search hint
@@ -177,9 +263,7 @@ export class UIManager {
   private itemsScroll?: Phaser.GameObjects.Container;
   private itemsMinScroll = 0;
   private floorCleared = false;                        // tracks the "Cleared!" flash on the counter
-  private headerCard?: Phaser.GameObjects.Rectangle;   // top header panel (resizes per tab)
-  private contentCard?: Phaser.GameObjects.Rectangle;  // main content panel (resizes per tab)
-  private resBarCard?: Phaser.GameObjects.Rectangle;   // bottom resource-bar background card
+  private resBarCard?: Phaser.GameObjects.Graphics;   // bottom resource-bar background card
   private resBarIcon?: Phaser.GameObjects.Image;       // current floor's resource icon
   private resBarName?: Phaser.GameObjects.Text;        // current floor's resource name
   private resBarText?: Phaser.GameObjects.Text;        // current floor's resource count
@@ -188,7 +272,7 @@ export class UIManager {
   private activeTab = 'explore';
   private panels: Map<string, Phaser.GameObjects.Container> = new Map();
   private tabBGs: Map<string, Phaser.GameObjects.Rectangle> = new Map();
-  private tabActiveImgs: Map<string, Phaser.GameObjects.Image> = new Map();   // gradient pane on the active tab
+  private tabActiveImgs: Map<string, Phaser.GameObjects.Graphics> = new Map();   // gold highlight pane on the active tab
 
   // Upgrade panel refs for live updates
   private upgCostLabels: Map<string, Phaser.GameObjects.Text> = new Map();
@@ -318,12 +402,14 @@ export class UIManager {
   // Ability refs
   private abilityBtns: Map<string, Phaser.GameObjects.Container> = new Map();
   private abilityLabels: Map<string, Phaser.GameObjects.Text> = new Map();
-  private exploreDescendBg?: Phaser.GameObjects.Rectangle;   // right arrow (go deeper)
-  private exploreDescendTxt?: Phaser.GameObjects.Text;
-  private leftArrowBg?: Phaser.GameObjects.Rectangle;        // left arrow (go back up)
-  private leftArrowTxt?: Phaser.GameObjects.Text;
+  private exploreDescendBg?: Phaser.GameObjects.Graphics;    // right nav card (go deeper)
+  private exploreDescendTxt?: Phaser.GameObjects.Text;       // its green ▶ triangle
+  private leftArrowBg?: Phaser.GameObjects.Graphics;         // left nav card (go back up)
+  private leftArrowTxt?: Phaser.GameObjects.Text;            // its green ◀ triangle
   private leftArrowIcon?: Phaser.GameObjects.Image;          // previous floor's resource preview
   private rightArrowIcon?: Phaser.GameObjects.Image;         // next floor's resource preview
+  private leftArrowName?: Phaser.GameObjects.Text;           // previous floor's resource name
+  private rightArrowName?: Phaser.GameObjects.Text;          // next floor's resource name
 
   // Void prompt (stuck at max level)
   private voidPromptBanner: Phaser.GameObjects.Container | null = null;
@@ -381,6 +467,10 @@ export class UIManager {
   /** Focal showcase icon box — art size and tap-zone extent. */
   private static readonly SHOWCASE_SIZE = 380;
 
+  /** Floor-nav card dimensions (the ◀/▶ neighbor-floor preview panels). */
+  private static readonly NAV_CARD_W = 128;
+  private static readonly NAV_CARD_H = 182;
+
   /**
    * Vertical extent of the explore column relative to the showcase icon
    * center — top is the bounced HYPE pill's top edge (runner center -330,
@@ -389,7 +479,7 @@ export class UIManager {
    * +11 half-height). Keep in sync with the offsets in createExplorePanel.
    */
   private static readonly EXPLORE_STACK_TOP = -402;
-  private static readonly EXPLORE_STACK_BOTTOM = 329;
+  private static readonly EXPLORE_STACK_BOTTOM = 342;   // noise pill frame bottom (+326 center, +11 half + 3px frame + stroke)
 
   /** Pets row center Y — bottom-left of the explore content (66px buttons). */
   private petRowY(): number {
@@ -406,7 +496,9 @@ export class UIManager {
   private showcaseCenterY(): number {
     const cardMid = (LAYOUT.CONTENT_TOP + LAYOUT.CONTENT_BOTTOM) / 2;
     const centered = Math.round(cardMid - (UIManager.EXPLORE_STACK_TOP + UIManager.EXPLORE_STACK_BOTTOM) / 2);
-    const petRowTop = this.petRowY() - 33;   // half a 66px pet button
+    // The TEAM fieldset (106px tall, centered at petRowY + 2) reaches higher
+    // than the pet buttons themselves — clamp against its top border.
+    const petRowTop = this.petRowY() - 51;
     const maxCenter = petRowTop - 12 - UIManager.EXPLORE_STACK_BOTTOM;
     return Math.min(centered, maxCenter);
   }
@@ -692,21 +784,8 @@ export class UIManager {
    * cross-faded by alpha, and they only show on the explore tab. */
 
   private ensureLightingTextures(): void {
-    if (!this.scene.textures.exists('light_gradient')) {
-      const w = LAYOUT.GAME_WIDTH;
-      const h = 560;
-      const tex = this.scene.textures.createCanvas('light_gradient', w, h);
-      if (tex) {
-        const ctx = tex.getContext();
-        const grad = ctx.createLinearGradient(0, 0, 0, h);
-        grad.addColorStop(0, 'rgba(255, 238, 180, 0.85)');
-        grad.addColorStop(0.45, 'rgba(255, 238, 180, 0.30)');
-        grad.addColorStop(1, 'rgba(255, 238, 180, 0)');
-        ctx.fillStyle = grad;
-        ctx.fillRect(0, 0, w, h);
-        tex.refresh();
-      }
-    }
+    // (No more baked ceiling-light gradient — the bright mood now comes from
+    // the bg_bright hall art itself; only the dust motes mark the bright phase.)
     if (!this.scene.textures.exists('dark_vignette')) {
       const w = LAYOUT.GAME_WIDTH;
       const h = LAYOUT.GAME_HEIGHT;
@@ -747,10 +826,6 @@ export class UIManager {
     // hall, below the tab bar (30). None are interactive — input passes through.
     this.dimOverlay = this.scene.add.rectangle(CENTER_X, GAME_HEIGHT / 2, GAME_WIDTH, GAME_HEIGHT, 0x020208, 1)
       .setDepth(23).setAlpha(0);
-    if (this.scene.textures.exists('light_gradient')) {
-      this.lightOverlay = this.scene.add.image(CENTER_X, 0, 'light_gradient')
-        .setOrigin(0.5, 0).setDepth(24).setAlpha(0);
-    }
     if (this.scene.textures.exists('dark_vignette')) {
       this.vignetteOverlay = this.scene.add.image(CENTER_X, GAME_HEIGHT / 2, 'dark_vignette')
         .setDepth(24).setAlpha(0);
@@ -790,7 +865,9 @@ export class UIManager {
   /** Cross-fade the overlays to a lighting state (called on every phase shift). */
   applyLighting(state: LightingState, instant = false): void {
     const targets: [Phaser.GameObjects.GameObject | undefined, number][] = [
-      [this.lightOverlay, state === 'bright' ? 0.9 : 0],
+      // The hall art itself shifts mood: bright/dark variants fade over the base.
+      [this.bgBright, state === 'bright' ? 1 : 0],
+      [this.bgDark, state === 'dark' ? 1 : 0],
       [this.vignetteOverlay, state === 'dark' ? 0.9 : 0],
       [this.dimOverlay, state === 'dark' ? 0.22 : 0],
       // The runner casts a contact shadow only while the fluorescents are on.
@@ -802,14 +879,14 @@ export class UIManager {
       if (instant) (obj as Phaser.GameObjects.Image).setAlpha(alpha);
       // The fluorescents don't fade up — they FLICKER on: stutter bursts with
       // dead gaps between them, then hold. Fading out stays a smooth gutter.
-      else if (obj === this.lightOverlay && alpha > 0) {
+      else if (obj === this.bgBright && alpha > 0) {
         this.scene.tweens.chain({
           targets: obj,
           tweens: [
             { alpha, duration: 30, hold: 60 },
-            { alpha: 0.04, duration: 20, hold: 120 },
+            { alpha: 0.05, duration: 20, hold: 120 },
             { alpha: alpha * 0.85, duration: 25, hold: 45 },
-            { alpha: 0.08, duration: 20, hold: 170 },
+            { alpha: 0.1, duration: 20, hold: 170 },
             { alpha, duration: 35 },
           ],
         });
@@ -912,15 +989,18 @@ export class UIManager {
   private createBackground(): void {
     const { GAME_WIDTH, GAME_HEIGHT } = LAYOUT;
 
-    // Wallpaper image — scale to cover the portrait game area
-    this.bgImage = this.scene.add.image(GAME_WIDTH / 2, GAME_HEIGHT / 2, 'wallpaper')
-      .setDepth(0);
-    const scaleX = GAME_WIDTH / this.bgImage.width;
-    const scaleY = GAME_HEIGHT / this.bgImage.height;
-    const coverScale = Math.max(scaleX, scaleY);
-    this.bgImage.setScale(coverScale);
+    // Background halls, three lighting moods stacked: default always visible,
+    // bright/dark cross-faded over it by applyLighting. Each scaled to cover.
+    const addBg = (key: string, depth: number): Phaser.GameObjects.Image => {
+      const img = this.scene.add.image(GAME_WIDTH / 2, GAME_HEIGHT / 2, key).setDepth(depth);
+      img.setScale(Math.max(GAME_WIDTH / img.width, GAME_HEIGHT / img.height));
+      return img;
+    };
+    addBg('bg_default', 0);
+    this.bgBright = addBg('bg_bright', 0.1).setAlpha(0);
+    this.bgDark = addBg('bg_dark', 0.2).setAlpha(0);
 
-    // Dark overlay so UI is readable on top of the yellow wallpaper
+    // Dark overlay so UI is readable on top of the halls
     this.scene.add.rectangle(
       GAME_WIDTH / 2, GAME_HEIGHT / 2,
       GAME_WIDTH, GAME_HEIGHT,
@@ -950,33 +1030,15 @@ export class UIManager {
       },
     });
 
-    // Dark panels behind UI sections for contrast
-    // Header card — behind Title + Depth + explore bar + count on Explore; it
-    // shrinks to just the title band on other tabs (see setContentBounds).
-    this.headerCard = this.scene.add.rectangle(GAME_WIDTH / 2, 87, GAME_WIDTH - 20, 158, 0x0a0a0a, 0.6)
-      .setDepth(3)
-      .setStrokeStyle(1, 0x333333);
-    // Main content panel. Its bottom edge moves with the active tab: on Explore
-    // it stops above the resource bar; on other tabs it expands down into that
-    // freed space (see setContentBottom, called from showTab).
-    this.contentCard = this.scene.add.rectangle(GAME_WIDTH / 2, (LAYOUT.CONTENT_TOP + LAYOUT.CONTENT_BOTTOM) / 2,
-      GAME_WIDTH - 20, LAYOUT.CONTENT_BOTTOM - LAYOUT.CONTENT_TOP + 20, 0x0a0a0a, 0.6)
-      .setDepth(3)
-      .setStrokeStyle(1, 0x333333);
-    // Resource-bar card — same inset card style as the header/content panels.
+    // (The old full-width header/content/footer backing cards are gone — the
+    // sub-panels carry their own dark backgrounds now, and the halls show
+    // through between them like the mockup.)
+    // Resource-bar card — the FLOOR RESOURCES readout keeps its own box.
     // Only shown on the explore tab (toggled in showTab) since it reflects the
     // resource you're actively collecting.
-    this.resBarCard = this.scene.add.rectangle(GAME_WIDTH / 2, LAYOUT.RESOURCE_BAR_CENTER, GAME_WIDTH - 20, LAYOUT.RESOURCE_BAR_HEIGHT, 0x0a0a0a, 0.6)
-      .setDepth(3)
-      .setStrokeStyle(1, 0x333333);
-    // Footer — one solid panel behind the tab buttons down to the screen bottom.
-    // FOOTER_TOP sits one CARD_GAP under both the resource card (explore) and
-    // the wide content card (menus), so the seam is identical on every tab and
-    // the 0.6-alpha panels never stack into a darker band.
-    const footerTop = LAYOUT.FOOTER_TOP;
-    this.scene.add.rectangle(GAME_WIDTH / 2, (footerTop + GAME_HEIGHT) / 2, GAME_WIDTH, GAME_HEIGHT - footerTop, 0x0a0a0a, 0.6)
-      .setDepth(3);
-
+    this.resBarCard = drawPanel(
+      this.scene.add.graphics({ x: GAME_WIDTH / 2, y: LAYOUT.RESOURCE_BAR_CENTER }),
+      GAME_WIDTH - 20, LAYOUT.RESOURCE_BAR_HEIGHT, UI.cardFill, UI.cardAlpha, UI.cardStroke, 14, 2).setDepth(3);
     // Damage flash overlay
     this.damageOverlay = this.scene.add.rectangle(
       GAME_WIDTH / 2, GAME_HEIGHT / 2,
@@ -995,9 +1057,10 @@ export class UIManager {
     // Depth 27-29 (with the exploration bar below): above the lighting overlays
     // (23-25) so the bright wash / dark pall never dim the floor readout, still
     // under the header buttons and tab bar (30+).
-    this.levelText = makeText(this.scene, cx, 42, this.state.level.name, 36, '#FFFFFF', {
+    this.levelText = makeText(this.scene, cx, 42, this.state.level.name, 36, '#EDE4CF', {
       fontStyle: 'bold',
     }).setOrigin(0.5, 0.5).setDepth(27);
+    this.levelText.setShadow(0, 3, '#000000', 6, true, true);
 
     this.depthText = makeText(this.scene, cx, 76, this.depthLabel(), 18, '#8888CC', {
       fontStyle: 'bold',
@@ -1008,18 +1071,18 @@ export class UIManager {
     // and an invisible overflow row would otherwise swallow these clicks.
 
     // Settings button — top-right corner of the header card.
-    const settingsBtn = makeBtn(this.scene, LAYOUT.GAME_WIDTH - 78, 30, 'SETTINGS', 120, 36, 0x2a2a2a, () => this.openSettings());
-    (settingsBtn.getAt(1) as Phaser.GameObjects.Text).setFontSize(16);
+    const settingsBtn = makePillBtn(this.scene, LAYOUT.GAME_WIDTH - 78, 30, '⚙ SETTINGS', 128, 36, () => this.openSettings());
+    (settingsBtn.getAt(1) as Phaser.GameObjects.Text).setFontSize(15);
     settingsBtn.setDepth(30);
 
     // Stats button — top-LEFT corner, mirroring Settings (temporary placement).
-    const statsBtn = makeBtn(this.scene, 78, 30, 'STATS', 120, 36, 0x2a2a2a, () => this.showStats());
-    (statsBtn.getAt(1) as Phaser.GameObjects.Text).setFontSize(16);
+    const statsBtn = makePillBtn(this.scene, 78, 30, 'STATS', 120, 36, () => this.showStats());
+    (statsBtn.getAt(1) as Phaser.GameObjects.Text).setFontSize(15);
     statsBtn.setDepth(30);
 
     // "Hide maxed" toggle — same style as Settings, tucked just beneath it.
     // Only shown on the Upgrades tab (toggled in showTab).
-    this.hideMaxedBtn = makeBtn(this.scene, LAYOUT.GAME_WIDTH - 78, 72, 'HIDE MAXED', 120, 34, 0x2a2a2a, () => this.cb.onToggleHideMaxed());
+    this.hideMaxedBtn = makePillBtn(this.scene, LAYOUT.GAME_WIDTH - 78, 72, 'HIDE MAXED', 120, 34, () => this.cb.onToggleHideMaxed());
     (this.hideMaxedBtn.getAt(1) as Phaser.GameObjects.Text).setFontSize(14);
     this.hideMaxedBtn.setDepth(30).setVisible(false);
     this.updateHideMaxedBtn();   // sync initial color/label to state
@@ -1043,10 +1106,22 @@ export class UIManager {
     const y = 110 - BAR_HEIGHT / 2; // bar top (center at 110)
     // Depth 27-29: keeps the bar out of the lighting overlays' wash (see
     // createHeader) — the floor readout stays legible in bright and dark.
-    this.progBarBg = this.scene.add.rectangle(BAR_X + BAR_WIDTH / 2, y + BAR_HEIGHT / 2, BAR_WIDTH, BAR_HEIGHT, 0x16241a)
-      .setDepth(27).setStrokeStyle(1, 0x2e4a2e);
-    this.progFill = this.scene.add.rectangle(BAR_X, y, 0, BAR_HEIGHT, 0x4caf50).setOrigin(0, 0).setDepth(28);
-    this.progLabel = makeText(this.scene, LAYOUT.CENTER_X, y + BAR_HEIGHT / 2, 'EXPLORING 0%', 16, '#FFFFFF', { fontStyle: 'bold' })
+    // Mockup-style green banner pill: dark green base, military-green fill
+    // creeping across it, rounded green border. Fill is inset 3px so its square
+    // corners hide behind the rounded frame.
+    this.progBarBg = this.scene.add.rectangle(BAR_X + BAR_WIDTH / 2, y + BAR_HEIGHT / 2, BAR_WIDTH, BAR_HEIGHT, 0x131c0d)
+      .setDepth(27);
+    // Once the floor is cleared the bar reads "— DESCEND!" (see updateStatusBars),
+    // and per the mockup that banner IS a button: tap it to head down.
+    this.progBarBg.setInteractive({ useHandCursor: true });
+    this.progBarBg.on('pointerdown', () => {
+      if (this.state.canEscape()) this.goDeeper();
+    });
+    this.progFill = this.scene.add.rectangle(BAR_X + 3, y + 3, 0, BAR_HEIGHT - 6, 0x3f6a2a).setOrigin(0, 0).setDepth(28);
+    this.progFrame = this.scene.add.graphics({ x: BAR_X + BAR_WIDTH / 2, y: y + BAR_HEIGHT / 2 }).setDepth(29);
+    this.progFrame.lineStyle(2, UI.greenStroke, 1)
+      .strokeRoundedRect(-BAR_WIDTH / 2, -BAR_HEIGHT / 2, BAR_WIDTH, BAR_HEIGHT, 12);
+    this.progLabel = makeText(this.scene, LAYOUT.CENTER_X, y + BAR_HEIGHT / 2, 'EXPLORING 0%', 17, '#D6E8C0', { fontStyle: 'bold' })
       .setOrigin(0.5, 0.5).setDepth(29);
 
     // Discrete count just under the bar (center at 144).
@@ -1100,19 +1175,19 @@ export class UIManager {
 
   private createTabBar(): void {
     const showVoid = this.state.prestigeCount > 0 || this.state.canRewind();
-    this.ensureUpgradeBtnTexture();   // the active tab wears the same gradient as buy buttons
 
     // Two UNIFORM rows: every button the same size no matter how full its row
     // is (short rows just center) — no more one-tab-spans-the-screen banners.
     // Items sits LAST — it's the least-used tab and kept getting fat-fingered
     // when it lived next to Explore.
-    const row1: { id: string; label: string }[] = [
-      { id: 'explore', label: 'EXPLORE' }, { id: 'upgrades', label: 'UPGRADES' },
-      { id: 'gear', label: 'GEAR' }, { id: 'items', label: 'ITEMS' },
+    type TabDef = { id: string; label: string; icon: string };
+    const row1: TabDef[] = [
+      { id: 'explore', label: 'EXPLORE', icon: 'tab_explore' }, { id: 'upgrades', label: 'UPGRADES', icon: 'tab_upgrades' },
+      { id: 'gear', label: 'GEAR', icon: 'tab_gear' }, { id: 'items', label: 'ITEMS', icon: 'tab_items' },
     ];
-    const row2: { id: string; label: string }[] = showVoid
-      ? [{ id: 'shop', label: 'SHOP' }, { id: 'void', label: 'VOID' }, { id: 'achievements', label: 'ACHIEVEMENTS' }]
-      : [{ id: 'shop', label: 'SHOP' }, { id: 'achievements', label: 'ACHIEVEMENTS' }];
+    const row2: TabDef[] = showVoid
+      ? [{ id: 'shop', label: 'SHOP', icon: 'void_shard' }, { id: 'void', label: 'VOID', icon: 'tab_void' }, { id: 'achievements', label: 'ACHIEVEMENTS', icon: 'tab_achievements' }]
+      : [{ id: 'shop', label: 'SHOP', icon: 'void_shard' }, { id: 'achievements', label: 'ACHIEVEMENTS', icon: 'tab_achievements' }];
 
     const rowH = LAYOUT.TAB_ROW_HEIGHT;
     const rowGap = LAYOUT.TAB_ROW_GAP;
@@ -1123,7 +1198,7 @@ export class UIManager {
     const maxCols = Math.max(row1.length, row2.length);
     const tabW = Math.floor((LAYOUT.GAME_WIDTH - totalPad - (maxCols - 1) * gapX) / maxCols);
 
-    const buildRow = (tabs: { id: string; label: string }[], centerY: number) => {
+    const buildRow = (tabs: TabDef[], centerY: number) => {
       const count = tabs.length;
       const rowW = count * tabW + (count - 1) * gapX;
       const startX = (LAYOUT.GAME_WIDTH - rowW) / 2;
@@ -1134,32 +1209,38 @@ export class UIManager {
         // to the content area, but masks don't clip INPUT — overflow rows sit
         // invisibly over the tab bar and would otherwise swallow tab clicks
         // (Phaser routes input to the topmost object only).
-        const bg = this.scene.add.rectangle(x, centerY, tabW, rowH, 0x222222)
-          .setDepth(30)
-          .setStrokeStyle(1, 0x444444);
-        // Active-state gradient pane — hidden until showTab lights this tab up.
-        // Not interactive, so it never steals the rectangle's clicks.
-        const glow = this.scene.add.image(x, centerY, 'upg_btn_grad')
-          .setDisplaySize(tabW, rowH).setDepth(31).setVisible(false);
+        // Rounded card visuals + an invisible rectangle for input (Graphics
+        // hit areas are awkward; the alpha-0.001 rect keeps Phaser's plain
+        // rectangle hit-testing).
+        drawPanel(this.scene.add.graphics({ x, y: centerY }), tabW, rowH, 0x181710, 0.95, UI.boxStroke, 14)
+          .setDepth(30);
+        const bg = this.scene.add.rectangle(x, centerY, tabW, rowH, 0xffffff, 0.001)
+          .setDepth(30);
+        // Active-state pane — warm fill + gold outline (mockup's lit EXPLORE
+        // button); hidden until showTab lights this tab up.
+        const glow = drawPanel(this.scene.add.graphics({ x, y: centerY }), tabW, rowH, 0x39310f, 0.8, UI.gold, 14, 3)
+          .setDepth(31).setVisible(false);
         this.tabActiveImgs.set(tabs[i].id, glow);
-        const txt = makeText(this.scene, x, centerY, tabs[i].label, 16, '#888888', {
+        const txt = makeText(this.scene, x, centerY, tabs[i].label, 16, UI.dimTextCss, {
           fontStyle: 'bold',
         }).setOrigin(0.5).setDepth(32);
-        // Long labels (ACHIEVEMENTS) shrink until they fit their button.
-        for (let size = 16; txt.width > tabW - 14 && size > 11; size--) txt.setFontSize(size);
-
-        // Shop tab gets the Void Shard icon to the left of its label (icon + text
-        // centered together within the button).
-        if (tabs[i].id === 'shop') {
-          const iconSize = 36;
-          const iconGap = 6;
-          const icon = this.createIcon(0, centerY, 'void_shard', iconSize);
-          if (icon) {
-            icon.setDepth(32);
-            const total = iconSize + iconGap + txt.width;
-            icon.x = x - total / 2 + iconSize / 2;
-            txt.setX(icon.x + iconSize / 2 + iconGap + txt.width / 2);
-          }
+        // Every tab wears its PNG icon to the left of the label (icon + text
+        // centered together within the button). Long labels (ACHIEVEMENTS)
+        // shrink until the pair fits.
+        // The new tab_* art fills its canvas edge to edge while void_shard has
+        // generous transparent padding — render the tab icons smaller so they
+        // read the same visual size as the shop's shard.
+        const iconSize = tabs[i].icon === 'void_shard' ? 34 : 26;
+        const iconGap = 6;
+        const icon = this.createIcon(0, centerY, tabs[i].icon, iconSize);
+        icon?.setDisplaySize(iconSize, iconSize);
+        const iconSpan = icon ? iconSize + iconGap : 0;
+        for (let size = 16; iconSpan + txt.width > tabW - 14 && size > 11; size--) txt.setFontSize(size);
+        if (icon) {
+          icon.setDepth(32);
+          const total = iconSpan + txt.width;
+          icon.x = x - total / 2 + iconSize / 2;
+          txt.setX(icon.x + iconSize / 2 + iconGap + txt.width / 2);
         }
 
         bg.setInteractive({ useHandCursor: true });
@@ -1223,42 +1304,63 @@ export class UIManager {
     this.exploreBtnZone.on('pointerout', () => this.stopHoldExplore());
     panel.add(this.exploreBtnZone);
 
-    // Navigation arrows flanking the icon: ◀ go back a floor, ▶ descend deeper.
-    // Each arrow previews the resource of that floor (prev on the left, next on
-    // the right) above a small direction glyph. Textures swap in updateStatusBars.
-    const left = makeBtn(this.scene, cx - 250, iconCy, '◀', 92, 132, 0x2a2a2a, () => this.goShallower());
-    this.leftArrowBg = left.getAt(0) as Phaser.GameObjects.Rectangle;
-    this.leftArrowTxt = left.getAt(1) as Phaser.GameObjects.Text;
-    this.leftArrowTxt.setPosition(0, 42).setFontSize(20);
-    this.leftArrowIcon = this.scene.add.image(0, -26, `icon_${this.state.floorOre.resource}`).setScale(56 / ICON_NATIVE);
-    left.add(this.leftArrowIcon);
+    // Navigation cards flanking the icon (mockup's "Security Camera ◀ / Old
+    // Tape ▶" panels): each previews the neighboring floor's resource — icon,
+    // name, and a green direction triangle. Left goes back a floor, right
+    // descends deeper. Textures/names swap in updateStatusBars.
+    const buildNavCard = (x: number, glyph: string, cb: () => void) => {
+      const card = this.scene.add.container(x, iconCy);
+      const bg = this.scene.add.graphics();
+      const hit = this.scene.add.rectangle(0, 0, UIManager.NAV_CARD_W, UIManager.NAV_CARD_H, 0xffffff, 0.001)
+        .setInteractive({ useHandCursor: true });
+      hit.on('pointerdown', cb);
+      const icon = this.scene.add.image(0, -50, `icon_${this.state.floorOre.resource}`).setScale(56 / ICON_NATIVE);
+      const name = makeText(this.scene, 0, -8, '', 14, '#CCC8B8', {
+        align: 'center', wordWrap: { width: UIManager.NAV_CARD_W - 16 },
+      }).setOrigin(0.5, 0);
+      const tri = makeText(this.scene, 0, 58, glyph, 26, UI.triCss, { fontStyle: 'bold' }).setOrigin(0.5);
+      card.add([bg, hit, icon, name, tri]);
+      return { card, bg, icon, name, tri };
+    };
 
-    const right = makeBtn(this.scene, cx + 250, iconCy, '▶', 92, 132, 0x333355, () => this.goDeeper());
-    this.exploreDescendBg = right.getAt(0) as Phaser.GameObjects.Rectangle;
-    this.exploreDescendTxt = right.getAt(1) as Phaser.GameObjects.Text;
-    this.exploreDescendTxt.setPosition(0, 42).setFontSize(20);
-    this.rightArrowIcon = this.scene.add.image(0, -26, `icon_${this.state.floorOre.resource}`).setScale(56 / ICON_NATIVE);
-    right.add(this.rightArrowIcon);
+    const left = buildNavCard(cx - 258, '◀', () => this.goShallower());
+    this.leftArrowBg = left.bg;
+    this.leftArrowTxt = left.tri;
+    this.leftArrowIcon = left.icon;
+    this.leftArrowName = left.name;
 
-    // The arrows stay scene-level (not in the panel) at depth 27 so the
+    const right = buildNavCard(cx + 258, '▶', () => this.goDeeper());
+    this.exploreDescendBg = right.bg;
+    this.exploreDescendTxt = right.tri;
+    this.rightArrowIcon = right.icon;
+    this.rightArrowName = right.name;
+
+    // The nav cards stay scene-level (not in the panel) at depth 27 so the
     // lighting overlays (23-25) never wash the buttons; showTab toggles them
     // with the rest of the explore-only chrome.
-    left.setDepth(27);
-    right.setDepth(27);
-    this.navLeft = left;
-    this.navRight = right;
+    left.card.setDepth(27);
+    right.card.setDepth(27);
+    this.navLeft = left.card;
+    this.navRight = right.card;
 
     // Integrity bar under the icon — the node's HP. Starts full and DRAINS as you
     // search it; when it empties you collect the resource and it refills (new node).
     // Carries a centered "remaining / max" HP readout for transparency.
-    const durW = 240;
-    const durH = 22;
-    const durBg = this.scene.add.rectangle(cx, iconCy + 200, durW, durH, 0x2a1212, 1).setDepth(16).setStrokeStyle(1, 0x4a2a2a);
+    const durW = 300;
+    const durH = 26;
+    const durBg = this.scene.add.rectangle(cx, iconCy + 200, durW, durH, 0x201709, 1).setDepth(16);
     this.durFill = this.scene.add.rectangle(cx - durW / 2, iconCy + 200, durW, durH, 0xffcc44).setOrigin(0, 0.5).setDepth(17);
-    this.durLabel = makeText(this.scene, cx, iconCy + 200, '', 13, '#FFFFFF', {
+    // Rounded gold frame over the square fill, per the mockup's HP pill.
+    const durFrame = this.scene.add.graphics({ x: cx, y: iconCy + 200 }).setDepth(18);
+    durFrame.lineStyle(2, 0x8a7434, 1).strokeRoundedRect(-durW / 2 - 3, -durH / 2 - 3, durW + 6, durH + 6, 12);
+    this.durLabel = makeText(this.scene, cx, iconCy + 200, '', 15, '#FFFFFF', {
       fontStyle: 'bold', stroke: '#000000', strokeThickness: 3,
     }).setOrigin(0.5).setDepth(18);
-    panel.add([durBg, this.durFill, this.durLabel]);
+    // Percent readout beside the bar ("77%" in the mockup).
+    this.durPct = makeText(this.scene, cx + durW / 2 + 14, iconCy + 200, '', 16, '#DDD8C0', {
+      fontStyle: 'bold',
+    }).setOrigin(0, 0.5).setDepth(18);
+    panel.add([durBg, this.durFill, durFrame, this.durLabel, this.durPct]);
 
     // "QUALITY" tag above the icon — shown only when the current node was pre-rolled
     // as a quality find, so the player is motivated to break it for the +1 extra.
@@ -1275,7 +1377,7 @@ export class UIManager {
     panel.add(this.easyAccessLabel);
 
     // Persistent hint under the icon.
-    this.hintText = makeText(this.scene, cx, iconCy + 230, 'Tap or hold to search', 18, '#FFFFFF')
+    this.hintText = makeText(this.scene, cx, iconCy + 230, '👆 Tap or hold to search', 18, '#FFFFFF')
       .setOrigin(0.5).setDepth(16);
     panel.add(this.hintText);
 
@@ -1283,25 +1385,36 @@ export class UIManager {
     // (FLOOR_BASE_STAGES) plus a smaller line spelling out the bonuses it grants
     // (or, with no base, what the first stage would give). Node breaks roll to
     // advance it; text/color follow the current floor in updateStatusBars.
+    // Boxed like the mockup's "Base: Secured Room (1/5)" panel.
+    const baseBox = drawPanel(this.scene.add.graphics({ x: cx, y: iconCy + 271 }),
+      640, 62, UI.boxFill, 0.85, UI.boxStroke, 12).setDepth(15);
     this.baseLabel = makeText(this.scene, cx, iconCy + 258, '', 16, '#777777')
       .setOrigin(0.5).setDepth(16);
-    this.baseDescLabel = makeText(this.scene, cx, iconCy + 284, '', 14, '#666666')
-      .setOrigin(0.5).setDepth(16);
-    panel.add([this.baseLabel, this.baseDescLabel]);
+    this.baseDescLabel = makeText(this.scene, cx, iconCy + 284, '', 14, '#666666', {
+      align: 'center', wordWrap: { width: 600 },
+    }).setOrigin(0.5).setDepth(16);
+    panel.add([baseBox, this.baseLabel, this.baseDescLabel]);
 
     // Noise meter — searching is loud. Fills green → amber → red; at 100% an
     // entity from this floor's roster finds you (see the encounter display).
-    const noiseW = 240;
+    const noiseW = 300;
     const noiseH = 22;
-    const noiseY = iconCy + 318;
-    const noiseBg = this.scene.add.rectangle(cx, noiseY, noiseW, noiseH, 0x141414, 1)
-      .setDepth(16).setStrokeStyle(1, 0x3a3a3a);
+    // ~10px of air under the base box (bottom edge at +302) — the pets/TEAM
+    // gap below comes from the showcaseCenterY clamp instead.
+    const noiseY = iconCy + 326;
+    const noiseBg = this.scene.add.rectangle(cx, noiseY, noiseW, noiseH, 0x141410, 1)
+      .setDepth(16);
     this.noiseFill = this.scene.add.rectangle(cx - noiseW / 2, noiseY, 0, noiseH, 0x66aa66)
       .setOrigin(0, 0.5).setDepth(17);
+    // Rounded pill frame + speaker glyph, per the mockup's noise row.
+    const noiseFrame = this.scene.add.graphics({ x: cx, y: noiseY }).setDepth(18);
+    noiseFrame.lineStyle(2, UI.boxStroke, 1).strokeRoundedRect(-noiseW / 2 - 3, -noiseH / 2 - 3, noiseW + 6, noiseH + 6, 12);
+    const noiseSpk = makeText(this.scene, cx - noiseW / 2 - 20, noiseY, '🔊', 16, '#CCCCCC')
+      .setOrigin(1, 0.5).setDepth(18);
     this.noiseLabel = makeText(this.scene, cx, noiseY, 'Noise 0%', 13, '#CCCCCC', {
       fontStyle: 'bold', stroke: '#000000', strokeThickness: 3,
     }).setOrigin(0.5).setDepth(18);
-    panel.add([noiseBg, this.noiseFill, this.noiseLabel]);
+    panel.add([noiseBg, this.noiseFill, noiseFrame, noiseSpk, this.noiseLabel]);
 
     // Encounter display — the entity takes over the node area (art above the
     // dimmed showcase; taps hit IT). Its presence bar sits where the grade tags
@@ -1375,12 +1488,24 @@ export class UIManager {
     // a level badge; tap for a popup of what it's doing. Hidden until owned —
     // refreshPetRow syncs visibility/levels.
     const petY = this.petRowY();
+    // "TEAM" fieldset around the row (mockup) — a rounded box with the label
+    // punched through the top border. Shown only when at least one pet is
+    // unlocked (refreshPetRow toggles it with the buttons).
+    this.teamBox = drawPanel(this.scene.add.graphics({ x: cx, y: petY + 2 }),
+      LAYOUT.GAME_WIDTH - 56, 106, UI.boxFill, 0.7, UI.boxStroke, 14).setDepth(15).setVisible(false);
+    this.teamLabel = this.scene.add.container(76, petY - 51).setDepth(16).setVisible(false);
+    this.teamLabel.add([
+      this.scene.add.rectangle(0, 0, 62, 16, 0x0d0c07, 1),
+      makeText(this.scene, 0, 0, 'TEAM', 14, '#AAA692', { fontStyle: 'bold' }).setOrigin(0.5),
+    ]);
+    panel.add([this.teamBox, this.teamLabel]);
     PETS.forEach((pet, i) => {
-      const btn = this.scene.add.container(58 + i * 78, petY).setDepth(18).setVisible(false);
-      const bg = this.scene.add.rectangle(0, 0, 66, 66, 0x1e1e1e, 0.95).setStrokeStyle(2, 0x6a5a2a);
+      const btn = this.scene.add.container(78 + i * 82, petY).setDepth(18).setVisible(false);
+      const gfx = drawPanel(this.scene.add.graphics(), 68, 68, 0x1e1c12, 0.95, 0x6a5a2a, 12);
+      const bg = this.scene.add.rectangle(0, 0, 68, 68, 0xffffff, 0.001);
       bg.setInteractive({ useHandCursor: true });
       bg.on('pointerdown', () => this.showPetPopup(pet.id));
-      btn.add(bg);
+      btn.add([gfx, bg]);
       // PNG art when loaded; the pet's emoji stands in until art exists.
       const petIcon = this.createIcon(0, -6, pet.iconKey, 46);
       if (petIcon) btn.add(petIcon);
@@ -1888,7 +2013,8 @@ export class UIManager {
     if (!this.hideMaxedBtn) return;
     const on = this.state.hideMaxedUpgrades;
     // Green while it offers to HIDE (maxed shown), gray once they're hidden.
-    (this.hideMaxedBtn.getAt(0) as Phaser.GameObjects.Rectangle).setFillStyle(on ? 0x2a2a2a : 0x336633);
+    drawPanel(this.hideMaxedBtn.getAt(0) as Phaser.GameObjects.Graphics, 120, 34,
+      on ? UI.btnFill : UI.greenFill, 1, on ? UI.btnStroke : UI.greenStroke, 12);
     (this.hideMaxedBtn.getAt(1) as Phaser.GameObjects.Text).setText(on ? 'SHOW MAXED' : 'HIDE MAXED');
   }
 
@@ -2942,9 +3068,8 @@ export class UIManager {
     for (const [id, bg] of this.tabBGs) {
       const isActive = id === tab;
       this.tabActiveImgs.get(id)?.setVisible(isActive);
-      bg.setStrokeStyle(1, isActive ? 0xa89bff : 0x444444);
       const txt = (bg as unknown as Record<string, Phaser.GameObjects.Text>).__tabTxt;
-      if (txt) txt.setColor(isActive ? '#FFFFFF' : '#888888');
+      if (txt) txt.setColor(isActive ? '#FFE28A' : UI.dimTextCss);
     }
 
     if (tab === 'upgrades') this.refreshUpgradePanel();
@@ -2965,7 +3090,6 @@ export class UIManager {
     // ride the explore panel's visibility and need their own toggle.
     this.navLeft?.setVisible(showWorld);
     this.navRight?.setVisible(showWorld);
-    this.lightOverlay?.setVisible(showWorld);
     this.vignetteOverlay?.setVisible(showWorld);
     this.dimOverlay?.setVisible(showWorld);
     this.dustEmitter?.setVisible(showWorld);
@@ -2980,11 +3104,9 @@ export class UIManager {
     if (onExplore) this.updateResourceBar();        // refreshes icon + relayout
     else this.resBarIcon?.setVisible(false);
 
-    // Explore uses the full header + a resource bar below the content; other tabs
-    // collapse the header to a title band and reclaim the space top and bottom.
+    // Explore uses the full header; other tabs collapse it to a title band.
+    // (No backing cards to resize anymore — sub-panels bring their own.)
     const cTop = onExplore ? LAYOUT.CONTENT_TOP : LAYOUT.CONTENT_TOP_WIDE;
-    const cBottom = onExplore ? LAYOUT.CONTENT_BOTTOM : LAYOUT.CONTENT_BOTTOM_WIDE;
-    this.setContentBounds(cTop, cBottom);
 
     // Header: full floor status on Explore; just the menu title (centered in the
     // slim header band) elsewhere.
@@ -2993,6 +3115,7 @@ export class UIManager {
     this.depthText.setVisible(onExplore);
     this.progBarBg.setVisible(onExplore);
     this.progFill.setVisible(onExplore);
+    this.progFrame?.setVisible(onExplore);
     this.progLabel.setVisible(onExplore);
     this.roomsLabel.setVisible(onExplore);
 
@@ -3013,25 +3136,6 @@ export class UIManager {
       case 'shop': return 'SHOP';
       case 'achievements': return 'ACHIEVEMENTS';
       default: return this.state.level.name;
-    }
-  }
-
-  /**
-   * Resize the header + content cards to a tab's vertical bounds. The content card
-   * spans `top`..`bottom`; the header card fills the strip above it (down to
-   * `top - 12`). On Explore that's the full header; on menus it's a slim title band.
-   */
-  private setContentBounds(top: number, bottom: number): void {
-    const W = LAYOUT.GAME_WIDTH;
-    if (this.contentCard) {
-      this.contentCard.setPosition(W / 2, (top + bottom) / 2);
-      this.contentCard.setSize(W - 20, bottom - top + 20);
-    }
-    if (this.headerCard) {
-      const hTop = 8;                 // header card starts just below the screen top
-      const hBottom = top - 12;       // ...and ends just above the content card
-      this.headerCard.setPosition(W / 2, (hTop + hBottom) / 2);
-      this.headerCard.setSize(W - 20, hBottom - hTop);
     }
   }
 
@@ -3083,12 +3187,19 @@ export class UIManager {
     if (!this.flavorMsg) {
       // Sits in the band between the runner's feet (-235, shadow at ~-215)
       // and the showcase icon's top (-190) — over the shadow, never the sprite.
-      this.flavorMsg = makeText(this.scene, LAYOUT.CENTER_X, this.showcaseCenterY() - 212, '', 20, evt.color, {
-        align: 'center', wordWrap: { width: 600 }, fontStyle: 'bold',
+      this.flavorMsg = makeText(this.scene, LAYOUT.CENTER_X, this.showcaseCenterY() - 212, '', 21, evt.color, {
+        align: 'center', wordWrap: { width: 520 }, fontStyle: 'bold',
       }).setOrigin(0.5).setDepth(19);
+      this.flavorMsg.setShadow(0, 2, '#000000', 4, true, true);
       this.panels.get('explore')?.add(this.flavorMsg);
     }
-    this.flavorMsg.setText(evt.message).setColor(evt.color).setAlpha(1);
+    // Mockup event-title treatment: uppercase, em-dash flanks when it fits on
+    // one line, and the flat grey default warmed up to the parchment tone.
+    const flavorColor = evt.color === '#AAAAAA' ? '#D8D2C0' : evt.color;
+    const flavorText = evt.message.length <= 34
+      ? `— ${evt.message.toUpperCase()} —`
+      : evt.message.toUpperCase();
+    this.flavorMsg.setText(flavorText).setColor(flavorColor).setAlpha(1);
     this.flavorTween?.stop();
     this.flavorTween = this.scene.tweens.add({
       targets: this.flavorMsg, alpha: 0,
@@ -3110,10 +3221,15 @@ export class UIManager {
     const oreName = (RESOURCES[ore.resource]?.name ?? ore.resource) + tierSuffix(ore.tier);
     const done = s.exploration >= ore.required;
 
-    const progW = BAR_WIDTH * Math.max(0, s.explorationPct / 100);
+    const progW = (BAR_WIDTH - 6) * Math.max(0, s.explorationPct / 100);
     this.progFill.width = Phaser.Math.Linear(this.progFill.width, progW, 0.15);
-    this.progFill.x = BAR_X;
+    this.progFill.x = BAR_X + 3;
     this.progLabel.setText(done ? `${oreName} — DESCEND!` : `Exploring for ${oreName}`);
+    // Cleared floor: the whole banner lights up green (and progBarBg's
+    // pointerdown sends you down).
+    this.progBarBg.setFillStyle(done ? 0x2c4a1e : 0x131c0d);
+    this.progFill.setFillStyle(done ? 0x3f6a2a : 0x2f5220);
+    this.progLabel.setColor(done ? '#EAF6D8' : '#D6E8C0');
     // Counter shows N / required while exploring; on clearing it flashes
     // "Cleared!" once, then hides.
     if (done) {
@@ -3135,13 +3251,14 @@ export class UIManager {
     const remaining = integ.sub(s.nodeDamage).max(0);
     const remainPct = Math.max(0, Math.min(1, remaining.div(integ).toNumber()));
     if (this.durFill) {
-      this.durFill.width = Phaser.Math.Linear(this.durFill.width, 240 * remainPct, 0.25);
+      this.durFill.width = Phaser.Math.Linear(this.durFill.width, 300 * remainPct, 0.25);
       this.durFill.setFillStyle(remainPct > 0.5 ? 0xffcc44 : remainPct > 0.25 ? 0xff9933 : 0xff5544);
     }
     // Explicit HP readout. During respawn this naturally reads "0 / max".
     if (this.durLabel) {
       this.durLabel.setText(`${fmt(remaining)} / ${fmt(integ)}`);
     }
+    this.durPct?.setText(`${Math.round(remainPct * 100)}%`);
 
     // Grade tag above the icon: "MINT" (mint green) or "QUALITY" (orange), shown only
     // on a live pre-rolled node (hidden mid-respawn) so the player breaks it on purpose.
@@ -3211,7 +3328,7 @@ export class UIManager {
     // something has already found you.
     if (this.noiseFill && this.noiseLabel) {
       const pct = s.entityActive ? 1 : s.noise / 100;
-      this.noiseFill.width = Phaser.Math.Linear(this.noiseFill.width, 240 * pct, 0.25);
+      this.noiseFill.width = Phaser.Math.Linear(this.noiseFill.width, 300 * pct, 0.25);
       this.noiseFill.setFillStyle(s.entityActive ? 0xff4444 : pct > 0.75 ? 0xff8844 : pct > 0.4 ? 0xd8c04a : 0x66aa66);
       this.noiseLabel.setText(s.entityActive ? '!!! FOUND !!!'
         : `Noise ${Math.floor(s.noise)}%${s.lighting === 'dark' ? ' ×1.5' : ''}`);
@@ -3263,22 +3380,27 @@ export class UIManager {
       const nextUnlocked = s.unlockedLevels.includes(s.currentLevel + 1);
       const newReady = s.canEscape() && !nextUnlocked;
       const enabled = nextUnlocked || s.canEscape();
-      this.exploreDescendBg.setFillStyle(newReady ? 0x2c6a3c : enabled ? 0x2a2a2a : 0x1e1e1e);
-      this.exploreDescendBg.setStrokeStyle(3, newReady ? 0x66cc88 : enabled ? 0x555555 : 0x333333);
-      this.exploreDescendTxt.setColor(newReady ? '#FFFFFF' : enabled ? '#DDDDDD' : '#555555');
+      drawPanel(this.exploreDescendBg, UIManager.NAV_CARD_W, UIManager.NAV_CARD_H,
+        newReady ? UI.greenFill : 0x14130c, 0.92,
+        newReady ? UI.greenStroke : enabled ? UI.btnStroke : 0x2e2c20, 16, 2);
+      this.exploreDescendTxt.setColor(newReady ? '#B8E080' : enabled ? UI.triCss : '#44432f');
     }
-    // Right arrow preview = the NEXT floor's resource icon.
-    this.setArrowIcon(this.rightArrowIcon, getFloorOre(s.currentLevel + 1).resource);
+    // Right card preview = the NEXT floor's resource icon + name.
+    const nextRes = getFloorOre(s.currentLevel + 1).resource;
+    this.setArrowIcon(this.rightArrowIcon, nextRes);
+    this.rightArrowName?.setText(RESOURCES[nextRes]?.name ?? '');
 
-    // Left arrow (go back up): enabled whenever you're below floor 0.
+    // Left card (go back up): enabled whenever you're below floor 0.
     if (this.leftArrowBg && this.leftArrowTxt) {
       const canBack = s.currentLevel > 0;
-      this.leftArrowBg.setFillStyle(canBack ? 0x2a2a2a : 0x1e1e1e);
-      this.leftArrowBg.setStrokeStyle(3, canBack ? 0x555555 : 0x333333);
-      this.leftArrowTxt.setColor(canBack ? '#DDDDDD' : '#555555');
+      drawPanel(this.leftArrowBg, UIManager.NAV_CARD_W, UIManager.NAV_CARD_H,
+        0x14130c, 0.92, canBack ? UI.btnStroke : 0x2e2c20, 16, 2);
+      this.leftArrowTxt.setColor(canBack ? UI.triCss : '#44432f');
     }
-    // Left arrow preview = the PREVIOUS floor's resource (hidden on floor 0).
-    this.setArrowIcon(this.leftArrowIcon, s.currentLevel > 0 ? getFloorOre(s.currentLevel - 1).resource : null);
+    // Left card preview = the PREVIOUS floor's resource (hidden on floor 0).
+    const prevRes = s.currentLevel > 0 ? getFloorOre(s.currentLevel - 1).resource : null;
+    this.setArrowIcon(this.leftArrowIcon, prevRes);
+    this.leftArrowName?.setText(prevRes ? (RESOURCES[prevRes]?.name ?? '') : '');
   }
 
   /** Point an arrow's preview image at a resource icon, or hide it if none. */
@@ -3847,13 +3969,19 @@ export class UIManager {
 
   /** Sync the pets row to what's unlocked + current levels (call after buys/level-ups). */
   refreshPetRow(): void {
+    let anyVisible = false;
     for (const pet of PETS) {
       const btn = this.petBtns.get(pet.id);
       if (!btn) continue;
       const lvl = this.state.getPetLevel(pet.id);
       btn.setVisible(lvl > 0);
-      this.petLvlBadges.get(pet.id)?.setText(`Lv ${lvl}`);
+      if (lvl > 0) anyVisible = true;
+      this.petLvlBadges.get(pet.id)?.setText(`Lv ${lvl} ★`);
     }
+    // The TEAM fieldset only earns its place once someone is actually in it.
+    // (Both live inside the explore panel, so tab switching hides them anyway.)
+    this.teamBox?.setVisible(anyVisible);
+    this.teamLabel?.setVisible(anyVisible);
   }
 
   /** Popup explaining what a pet is doing right now (level, bonuses, milestones). */

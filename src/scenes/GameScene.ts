@@ -41,7 +41,16 @@ export default class GameScene extends Phaser.Scene {
   }
 
   preload(): void {
-    this.load.image('wallpaper', 'wallpaper.png');
+    // Backrooms halls in three lighting moods — the default is always the
+    // base layer; bright/dark cross-fade over it as the lighting phase shifts
+    // (see UIManager.applyLighting).
+    // Tab-bar button icons (replace the old emoji prefixes).
+    for (const tab of ['explore', 'upgrades', 'gear', 'items', 'void', 'achievements']) {
+      this.load.image(`icon_tab_${tab}`, `icons/${tab}_icon.png`);
+    }
+    this.load.image('bg_default', 'background_default.png');
+    this.load.image('bg_bright', 'background_bright.png');
+    this.load.image('bg_dark', 'background_dark.png');
 
     // --- Icon assets ---
     // Resources — all 31 explorable resources (one per floor, cycling by tier)

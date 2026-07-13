@@ -1489,6 +1489,29 @@ export const PETS: PetDef[] = [
       { level: 20, desc: '+3% Mint chance' },
     ],
   },
+  // The entity specialist: while a monster has you cornered, the cat lends
+  // +4%/lvl of your auto power against it (stacking with Escape Plan) — the
+  // idle counterplay pet. Grows on every drive-off; encounters are minutes
+  // apart, so its roll is generous (1-in-3, steepening ×1.25/level).
+  // Ordered before the balloon: players always unlock the cat first, so it
+  // sits next to Snapshot on the pet bar.
+  {
+    id: 'pet_cat',
+    name: 'Black Cat',
+    iconKey: 'pet_cat',
+    icon: '\u{1F408}\u{200D}\u{2B1B}',
+    maxLevel: 20,
+    levelChance: 3,
+    levelChanceGrowth: 1.25,
+    bonusPerLevel: 4,
+    bonusLabel: 'auto power vs entities',
+    growsOn: 'entity driven off',
+    description: 'It walked out of the dark and decided you were its person. The dark disapproves.',
+    milestones: [
+      { level: 10, desc: 'Entities give up 25% sooner' },
+      { level: 20, desc: 'x2 drive-off rewards' },
+    ],
+  },
   // Hype specialist: +5% Explorer power per level WHILE HYPED, rolling its
   // level-up on every idle tick that hype is active (~10-15 rolls per burst).
   {
@@ -1506,27 +1529,6 @@ export const PETS: PetDef[] = [
     milestones: [
       { level: 10, desc: '+50% hype duration' },
       { level: 20, desc: '+15% resource gathering speed' },
-    ],
-  },
-  // The entity specialist: while a monster has you cornered, the cat lends
-  // +4%/lvl of your auto power against it (stacking with Escape Plan) — the
-  // idle counterplay pet. Grows on every drive-off; encounters are minutes
-  // apart, so its roll is generous (1-in-3, steepening ×1.25/level).
-  {
-    id: 'pet_cat',
-    name: 'Black Cat',
-    iconKey: 'pet_cat',
-    icon: '\u{1F408}\u{200D}\u{2B1B}',
-    maxLevel: 20,
-    levelChance: 3,
-    levelChanceGrowth: 1.25,
-    bonusPerLevel: 4,
-    bonusLabel: 'auto power vs entities',
-    growsOn: 'entity driven off',
-    description: 'It walked out of the dark and decided you were its person. The dark disapproves.',
-    milestones: [
-      { level: 10, desc: 'Entities give up 25% sooner' },
-      { level: 20, desc: 'x2 drive-off rewards' },
     ],
   },
 ];

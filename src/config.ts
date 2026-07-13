@@ -26,7 +26,7 @@ const RESOURCE_BAR_HEIGHT = 52;
 // Footer panel behind the tab buttons: fixed height, pinned to the bottom of
 // the canvas whatever the canvas height is. Host chrome / home indicator are
 // kept off the buttons by the safe-area insets applied in main.ts.
-const FOOTER_HEIGHT = 198;
+const FOOTER_HEIGHT = 170;
 
 // Two-row tab grid, centered vertically in the footer panel.
 const TAB_ROW_HEIGHT = 56;
@@ -42,9 +42,11 @@ function computeLayout(gameHeight: number) {
     GAME_HEIGHT: gameHeight,
     CENTER_X: GAME_WIDTH / 2,
 
-    BAR_X: 70,
-    BAR_WIDTH: 580,
-    BAR_HEIGHT: 22,
+    // Exploration/descend banner — a centered pill like the mockup's
+    // "Computer – DESCEND!" button, not a full-width strip.
+    BAR_X: 120,
+    BAR_WIDTH: 480,
+    BAR_HEIGHT: 34,
 
     CONTENT_TOP,
     CONTENT_BOTTOM,
