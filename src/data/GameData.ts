@@ -1336,6 +1336,64 @@ export interface ShopUpgradeDef {
   effectUnit: string;
 }
 
+/* ------------------------------------------------------------------ */
+/*  RUN-currency merchandising (Terminal Defense playbook)              */
+/* ------------------------------------------------------------------ */
+//
+// Real-money layer, paid in RUN hard currency via iap.spendCurrency:
+// - Shard packs: six tiers with escalating advertised bonus; the FIRST pack
+//   anyone buys pays double (first-purchase deal).
+// - Bundles: contents + shards priced just above the equivalent bare pack so
+//   the deal math is visible. The ice-breaker is the cheap ~$1 first spend;
+//   Deep Delver is depth-of-spend, gated behind the Amplifier Bundle.
+
+export interface ShardPackDef {
+  id: string;
+  price: number;      // RUN currency
+  shards: number;
+  bonusPct: number;   // advertised "extra" on the base 400:10 rate
+}
+
+export const SHARD_PACKS: ShardPackDef[] = [
+  { id: 'shard_pack_1', price: 400, shards: 10, bonusPct: 0 },
+  { id: 'shard_pack_2', price: 800, shards: 24, bonusPct: 20 },
+  { id: 'shard_pack_3', price: 1600, shards: 60, bonusPct: 50 },
+  { id: 'shard_pack_4', price: 2400, shards: 100, bonusPct: 67 },
+  { id: 'shard_pack_5', price: 4000, shards: 200, bonusPct: 100 },
+  { id: 'shard_pack_6', price: 8000, shards: 500, bonusPct: 150 },
+];
+
+export interface IapBundleDef {
+  id: string;
+  name: string;
+  icon: string;             // emoji tag on the card title
+  price: number;            // RUN currency
+  desc: string;
+  shards: number;
+  scrap: number;
+  grantsAmplifier: boolean; // permanent ×2 resource multiplier
+  requires?: string;        // iap id that must be owned first (depth of spend)
+  iceBreaker?: boolean;     // cheap limited-time card (distinct styling + countdown)
+}
+
+export const IAP_BUNDLES: IapBundleDef[] = [
+  {
+    id: 'ice_breaker', name: "SCAVENGER'S CACHE", icon: '🎒', price: 100,
+    desc: '5 Void Shards + 100 Scrap. Today only!',
+    shards: 5, scrap: 100, grantsAmplifier: false, iceBreaker: true,
+  },
+  {
+    id: 'amplifier_bundle', name: 'VOID AMPLIFIER BUNDLE', icon: '⚡', price: 600,
+    desc: 'Permanent ×2 on ALL resource gains (survives Rewind) + 10 Void Shards.',
+    shards: 10, scrap: 0, grantsAmplifier: true,
+  },
+  {
+    id: 'deep_delver', name: 'DEEP DELVER BUNDLE', icon: '🕳️', price: 1400,
+    desc: '40 Void Shards + 500 Scrap. For explorers who mean it.',
+    shards: 40, scrap: 500, grantsAmplifier: false, requires: 'amplifier_bundle',
+  },
+];
+
 export const SHOP_UPGRADES: ShopUpgradeDef[] = [
   {
     id: 'search_upgrade', name: 'Search Upgrade', icon: '',

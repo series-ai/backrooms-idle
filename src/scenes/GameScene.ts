@@ -4,7 +4,7 @@ import { TICK_INTERVAL_MS, SAVE_INTERVAL_MS } from '../config';
 import { GameState, type GameEvent } from '../GameState';
 import { haptic, bindHapticsSetting } from '../haptics';
 import { UIManager } from '../ui/UIManager';
-import { ORE_SEQUENCE } from '../data/GameData';
+import { ORE_SEQUENCE, IAP_BUNDLES, SHARD_PACKS } from '../data/GameData';
 
 /* ------------------------------------------------------------------ */
 /*  Lifecycle telemetry (module scope — runs once per import)          */
@@ -152,6 +152,22 @@ export default class GameScene extends Phaser.Scene {
     // Load saved progress
     await this.loadGame();
 
+    // A progress reset must NEVER take paid purchases with it: re-apply the
+    // premium state stashed by handleResetProgress and persist it immediately
+    // so the fresh save carries it from tick one.
+    if (this.premiumCarryover) {
+      this.state.voidAmplifier = this.premiumCarryover.voidAmplifier;
+      this.state.iapOwned = this.premiumCarryover.iapOwned;
+      this.state.firstPackBonusUsed = this.premiumCarryover.firstPackBonusUsed;
+      this.state.dailyStreak = this.premiumCarryover.dailyStreak;
+      this.state.dailyLastClaimDay = this.premiumCarryover.dailyLastClaimDay;
+      this.state.voidShards = this.premiumCarryover.refundedShards;
+      // Keep the lifetime counter too, so a future reset refunds again.
+      this.state.lifetimePurchasedShards = this.premiumCarryover.refundedShards;
+      this.premiumCarryover = undefined;
+      await this.saveGame();
+    }
+
     // Player run-cycle animations (one per buddy "suit").
     // The run frames live on row 13 of the 8-wide sheet: run01..run04 =
     // frame indices 104..107 (row 13 × 8 cols + column). Weapon variants live on
@@ -229,8 +245,18 @@ export default class GameScene extends Phaser.Scene {
       onBuyShopUpgrade: (id) => this.handleBuyShopUpgrade(id),
       onClaimAchievement: (id) => this.handleClaimAchievement(id),
       onResetProgress: () => this.handleResetProgress(),
+      onHardReset: () => this.handleResetProgress(true),
+      onClaimDaily: (serverDay) => this.handleClaimDaily(serverDay),
+      onOpenDaily: () => { void this.openDailyMenu(); },
+      onBuyIap: (id) => { void this.handleBuyIap(id); },
+      onSnoozeOffer: () => this.handleSnoozeOffer(),
+      onBuyShardPack: (id) => { void this.handleBuyShardPack(id); },
+      onSubscribe: () => { void this.handleSubscribe(); },
     });
     this.ui.createAll();
+
+    // Premium state (subscription check + daily reward) needs the UI up first.
+    void this.initPremium();
 
     // Initial log
     this.ui.addLogMessage({
@@ -256,6 +282,13 @@ export default class GameScene extends Phaser.Scene {
 
   update(_time: number, delta: number): void {
     if (!this.ui) return;
+
+    // Special-offer pill countdown — once a second is plenty.
+    this.offerPillAccum += delta;
+    if (this.offerPillAccum >= 1000) {
+      this.offerPillAccum = 0;
+      this.updateOfferPill();
+    }
 
     // Count down node respawn (real-time, finer than the 1.5s tick).
     this.state.advanceRespawn(delta);
@@ -528,6 +561,7 @@ export default class GameScene extends Phaser.Scene {
         to: levelId,
       });
       haptic('light');
+      this.drainShardAwards();   // includes the "left behind as you fled" toll
       this.ui.refreshForNewLevel();
       this.ui.showTab('explore');
       this.saveGame();
@@ -745,7 +779,31 @@ export default class GameScene extends Phaser.Scene {
     }
   }
 
-  private async handleResetProgress(): Promise<void> {
+  /** Paid/premium state stashed across a reset's scene.restart (see create()). */
+  private premiumCarryover?: {
+    voidAmplifier: boolean;
+    iapOwned: string[];
+    firstPackBonusUsed: boolean;
+    dailyStreak: number;
+    dailyLastClaimDay: number;
+    refundedShards: number;
+  };
+
+  private async handleResetProgress(hard = false): Promise<void> {
+    // Real-money purchases (and the daily streak, which blocks same-day
+    // re-claims) survive the wipe — the scene instance persists across
+    // restart(), so this rides through to the next create(). A HARD reset
+    // (testing tool) skips the carryover: truly back to zero, pay-to-win off.
+    this.premiumCarryover = hard ? undefined : {
+      voidAmplifier: this.state.voidAmplifier,
+      iapOwned: [...this.state.iapOwned],
+      firstPackBonusUsed: this.state.firstPackBonusUsed,
+      dailyStreak: this.state.dailyStreak,
+      dailyLastClaimDay: this.state.dailyLastClaimDay,
+      // PURCHASED shards (RUN-currency packs + bundle contents) always come
+      // back, even if spent — earned shards wipe with the rest of the run.
+      refundedShards: this.state.lifetimePurchasedShards,
+    };
     RundotGameAPI.analytics.recordCustomEvent('progress_reset', {
       level: this.state.currentLevel,
       total_depth: this.state.totalDepth,
@@ -759,6 +817,181 @@ export default class GameScene extends Phaser.Scene {
     }
     // Rebuild from a clean slate — create() runs loadGame() which now finds no save.
     this.scene.restart();
+  }
+
+  /* ================================================================ */
+  /*  Premium: subscription, Void Amplifier, daily rewards             */
+  /* ================================================================ */
+
+  /**
+   * Boot-time premium sync: live RUN PLUS status (never trusted from the save)
+   * and the daily reward check against SERVER time — device clocks are never
+   * consulted, so backdating the clock can't farm streaks.
+   */
+  private async initPremium(): Promise<void> {
+    try {
+      this.state.subActive = await RundotGameAPI.iap.isUserSubscribed('PLUS');
+    } catch (err) {
+      RundotGameAPI.log(`[Premium] subscription check failed: ${err}`);
+    }
+    try {
+      const t = await RundotGameAPI.requestTimeAsync();
+      // Keep a server-clock offset so offer countdowns tick without re-fetching.
+      this.serverTimeOffset = t.serverTime - Date.now();
+      const serverDay = Math.floor(t.serverTime / 86_400_000);
+      if (this.state.dailyRewardAvailable(serverDay)) {
+        // Small delay so the daily modal lands after the welcome-back popup.
+        this.time.delayedCall(800, () => this.ui.showDailyReward(serverDay));
+      }
+    } catch (err) {
+      RundotGameAPI.log(`[Premium] server time failed: ${err}`);
+    }
+  }
+
+  /** Server-clock offset (serverTime − Date.now()); null until the first sync. */
+  private serverTimeOffset: number | null = null;
+  private offerPillAccum = 0;
+
+  /**
+   * Special-offer pill (Terminal Defense pattern): shown on the explore screen
+   * once the core loop has landed (floor 3+), with a countdown to the end of
+   * the SERVER day. Ice-breaker first, then whichever bundle / the subscription
+   * hasn't been bought yet. Tapping it deep-links to the Shop tab.
+   */
+  private updateOfferPill(): void {
+    if (this.serverTimeOffset === null) { this.ui.setOfferPill(null); return; }
+    const s = this.state;
+    const coreLoopLanded = s.highestLevelReached >= 3 || s.currentLevel >= 3;
+    if (!coreLoopLanded) { this.ui.setOfferPill(null); return; }
+    // Tapping the pill snoozes it for an hour — don't nag on every glance.
+    if (Date.now() + this.serverTimeOffset < s.offerSnoozedUntil) { this.ui.setOfferPill(null); return; }
+
+    // Next unpitched offer: ice-breaker → amplifier bundle → deep delver → sub.
+    const nextBundle = IAP_BUNDLES.find((b) => !s.ownsIap(b.id) && s.iapUnlocked(b));
+    const target = nextBundle ? nextBundle.name : !s.subActive ? 'RUN PLUS' : null;
+    if (!target) { this.ui.setOfferPill(null); return; }
+
+    const serverNow = Date.now() + this.serverTimeOffset;
+    const msLeft = 86_400_000 - (serverNow % 86_400_000);
+    const h = Math.floor(msLeft / 3_600_000);
+    const m = Math.floor((msLeft % 3_600_000) / 60_000);
+    this.ui.setOfferPill(`${h}h${String(m).padStart(2, '0')}m`);
+  }
+
+  /** Pill tapped: it already deep-linked to the shop; go quiet for an hour. */
+  private handleSnoozeOffer(): void {
+    if (this.serverTimeOffset === null) return;
+    this.state.offerSnoozedUntil = Date.now() + this.serverTimeOffset + 3_600_000;
+    this.ui.setOfferPill(null);
+    void this.saveGame();
+  }
+
+  /** Calendar button: open the daily menu any time (claim or just view). */
+  private async openDailyMenu(): Promise<void> {
+    if (this.serverTimeOffset === null) {
+      // First open before the boot sync finished (or it failed) — sync now.
+      try {
+        const t = await RundotGameAPI.requestTimeAsync();
+        this.serverTimeOffset = t.serverTime - Date.now();
+      } catch (err) {
+        RundotGameAPI.log(`[Premium] server time failed: ${err}`);
+        return;
+      }
+    }
+    const serverDay = Math.floor((Date.now() + this.serverTimeOffset) / 86_400_000);
+    this.ui.showDailyReward(serverDay);
+  }
+
+  private handleClaimDaily(serverDay: number): { shards: number; streak: number } {
+    const result = this.state.claimDailyReward(serverDay);
+    if (result.shards > 0) {
+      RundotGameAPI.analytics.recordCustomEvent('daily_reward_claimed', {
+        streak: result.streak, shards: result.shards,
+      });
+      this.ui.refreshShopPanel();
+      void this.saveGame();
+    }
+    return result;
+  }
+
+  private async handleBuyIap(id: string): Promise<void> {
+    const def = IAP_BUNDLES.find((b) => b.id === id);
+    if (!def || this.state.ownsIap(id) || !this.state.iapUnlocked(def)) return;
+    try {
+      const res = await RundotGameAPI.iap.spendCurrency(def.id, def.price, {
+        screenName: 'shop',
+        description: def.name,
+      });
+      if (!res.success) {
+        if (res.error !== 'USER_CANCELLED') RundotGameAPI.log(`[Premium] ${id} spend failed: ${res.error}`);
+        return;
+      }
+      this.state.grantIap(def);
+      await this.saveGame();
+      this.ui.refreshShopPanel();
+      const bits = [
+        def.grantsAmplifier ? 'all resource gains ×2 forever' : '',
+        def.shards ? `+${def.shards} Void Shards` : '',
+        def.scrap ? `+${def.scrap} Scrap` : '',
+      ].filter(Boolean).join(' · ');
+      this.ui.addLogMessage({ type: 'event', message: `${def.name}: ${bits}`, color: '#CC88FF' });
+      RundotGameAPI.analytics.recordCustomEvent('iap_bundle_purchased', { id, price: def.price });
+    } catch (err) {
+      RundotGameAPI.log(`[Premium] ${id} purchase error: ${err}`);
+    }
+  }
+
+  private async handleBuyShardPack(id: string): Promise<void> {
+    const pack = SHARD_PACKS.find((p) => p.id === id);
+    if (!pack) return;
+    try {
+      const res = await RundotGameAPI.iap.spendCurrency(pack.id, pack.price, {
+        screenName: 'shop',
+        description: `${pack.shards} Void Shards`,
+      });
+      if (!res.success) {
+        if (res.error !== 'USER_CANCELLED') RundotGameAPI.log(`[Premium] ${id} spend failed: ${res.error}`);
+        return;
+      }
+      const { granted, doubled } = this.state.grantShardPack(pack);
+      await this.saveGame();
+      this.ui.refreshShopPanel();
+      this.ui.addLogMessage({
+        type: 'event',
+        message: doubled
+          ? `FIRST PACK ×2! +${granted} Void Shards`
+          : `+${granted} Void Shards`,
+        color: '#CC88FF',
+      });
+      RundotGameAPI.analytics.recordCustomEvent('shard_pack_purchased', {
+        id, price: pack.price, shards: granted, first_purchase_bonus: doubled ? 1 : 0,
+      });
+    } catch (err) {
+      RundotGameAPI.log(`[Premium] ${id} purchase error: ${err}`);
+    }
+  }
+
+  private async handleSubscribe(): Promise<void> {
+    try {
+      // Already subscribed elsewhere on RUN? Just light the perks up.
+      if (await RundotGameAPI.iap.isUserSubscribed('PLUS')) {
+        this.state.subActive = true;
+        this.ui.refreshShopPanel();
+        return;
+      }
+      const res = await RundotGameAPI.iap.purchaseSubscription('PLUS', 'monthly');
+      if (!res.success) return;
+      this.state.subActive = true;
+      this.ui.refreshShopPanel();
+      this.ui.addLogMessage({
+        type: 'event',
+        message: 'RUN PLUS active — +50% resources, ×2 offline cap, +1 daily shard.',
+        color: '#FFD24A',
+      });
+      RundotGameAPI.analytics.recordCustomEvent('subscription_purchased', { tier: 'PLUS' });
+    } catch (err) {
+      RundotGameAPI.log(`[Premium] subscribe error: ${err}`);
+    }
   }
 
   /* ================================================================ */

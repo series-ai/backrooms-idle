@@ -22,6 +22,8 @@ import {
   FLOOR_BASE_STAGES,
   PETS,
   type AchievementStat,
+  type IapBundleDef,
+  type ShardPackDef,
   getLevel,
   getFloorOre,
   tierSuffix,
@@ -34,7 +36,7 @@ import {
   type EntityDef,
 } from './data/GameData';
 import { MAX_OFFLINE_TICKS, TICK_INTERVAL_MS } from './config';
-import { type Big, D, roundD } from './num';
+import { type Big, D, roundD, fmt } from './num';
 
 /* ------------------------------------------------------------------ */
 /*  Types                                                              */
@@ -80,6 +82,14 @@ export interface SaveData {
   shopUpgrades: Record<string, number>;
   shardMaxedUpgrades: string[];   // run-upgrade ids that have already paid out a shard for maxing
   highestLevelReached: number;    // deepest level index that has paid out a shard for advancing
+  // Monetization (permanent; subscription status is NOT saved — re-checked each boot)
+  voidAmplifier?: boolean;
+  dailyStreak?: number;
+  dailyLastClaimDay?: number;
+  iapOwned?: string[];
+  firstPackBonusUsed?: boolean;
+  offerSnoozedUntil?: number;
+  lifetimePurchasedShards?: number;
   // Achievements (lifetime — never reset on rewind)
   lifetimeResourcesCollected: number;
   lifetimeCritsLanded: number;
@@ -218,6 +228,25 @@ export class GameState {
   highestLevelReached = 0;             // deepest level that has granted its advance shard
   /** Shard-award toasts queued by escape()/buyUpgrade(), drained by the scene. */
   pendingShardEvents: GameEvent[] = [];
+
+  // ---- Monetization (see GameScene premium wiring) ----
+  /** One-time RUN-currency purchase: permanent ×2 on all ore gains. Survives Rewind. */
+  voidAmplifier = false;
+  /** Live RUN PLUS subscription — re-checked from the platform each boot, never saved. */
+  subActive = false;
+  /** Daily reward streak, keyed to SERVER day numbers so device clocks can't cheat it. */
+  dailyStreak = 0;
+  dailyLastClaimDay = 0;   // floor(serverTime / 86,400,000) of the last claim; 0 = never
+  /** One-time RUN-currency bundles owned (ice_breaker / amplifier_bundle / deep_delver). */
+  iapOwned: string[] = [];
+  /** First shard pack purchased pays DOUBLE — burned after one use. */
+  firstPackBonusUsed = false;
+  /** Lifetime Void Shards bought with RUN currency (packs + bundle contents).
+   *  A full reset refunds exactly this — purchased shards always come back,
+   *  even if spent; EARNED shards are progression and wipe with the rest. */
+  lifetimePurchasedShards = 0;
+  /** Special-offer pill snooze: hidden until this SERVER timestamp (ms). Tapping the pill sets it. */
+  offerSnoozedUntil = 0;
 
   // Achievements — lifetime progress + claimed tiers (persist across rewinds)
   lifetimeResourcesCollected = 0;
@@ -704,7 +733,7 @@ export class GameState {
     if (!entity) return;
     const ore = this.floorOre;
     const catMult = this.petCatLevel >= 20 ? 2 : 1;   // Cat Lv 20: ×2 drive-off rewards
-    const gain = Math.round((2 + this.level.danger) * (1 + this.flatYieldBonus)) * catMult;
+    const gain = Math.round((2 + this.level.danger) * (1 + this.flatYieldBonus) * this.premiumYieldMult) * catMult;
     const oreKey = resourceKey(ore.resource, ore.tier);
     this.resources[oreKey] = (this.resources[oreKey] ?? D(0)).add(gain);
     this.stats.resourcesFound += gain;
@@ -776,7 +805,7 @@ export class GameState {
   collectPhantom(): { gain: number; events: GameEvent[] } {
     const events: GameEvent[] = [];
     const ore = this.floorOre;
-    const gain = Math.round((1 + this.level.danger) * (1 + this.flatYieldBonus));
+    const gain = Math.round((1 + this.level.danger) * (1 + this.flatYieldBonus) * this.premiumYieldMult);
     const oreKey = resourceKey(ore.resource, ore.tier);
     this.resources[oreKey] = (this.resources[oreKey] ?? D(0)).add(gain);
     this.stats.resourcesFound += gain;
@@ -1186,12 +1215,77 @@ export class GameState {
     return this.floorBaseYield + this.gearEffect('yield') + this.getVoidLevel('deep_pockets');
   }
 
+  /** Paid multipliers on every ore gain: Void Amplifier ×2, RUN PLUS ×1.5. */
+  get premiumYieldMult(): number {
+    return (this.voidAmplifier ? 2 : 1) * (this.subActive ? 1.5 : 1);
+  }
+
   /** Base max HP/Sanity (the survival stats are dormant; kept for the future entity layer). */
   get baseMaxHealth(): number { return 100; }
   get baseMaxSanity(): number { return 100; }
   /** Effective offline tick cap including Lucid Memory (void). */
   get offlineTickCap(): number {
-    return MAX_OFFLINE_TICKS + this.getVoidLevel('lucid_memory') * 200;
+    // RUN PLUS doubles how long the halls keep working while you're gone.
+    return (MAX_OFFLINE_TICKS + this.getVoidLevel('lucid_memory') * 200) * (this.subActive ? 2 : 1);
+  }
+
+  /* ---- Daily rewards ---- *
+   * 7-day repeating Void Shard streak, driven by SERVER day numbers
+   * (floor(serverTime / 86,400,000)) fetched in GameScene — the device clock
+   * is never consulted. Missing a day resets the streak to day 1. */
+
+  static readonly DAILY_REWARDS = [1, 1, 2, 2, 3, 3, 5];
+
+  dailyRewardAvailable(serverDay: number): boolean {
+    return serverDay > this.dailyLastClaimDay;
+  }
+
+  /** The shard payout the NEXT claim would give (for the modal preview). */
+  nextDailyReward(serverDay: number): { shards: number; streak: number } {
+    const streak = serverDay === this.dailyLastClaimDay + 1 ? this.dailyStreak + 1 : 1;
+    const shards = GameState.DAILY_REWARDS[(streak - 1) % GameState.DAILY_REWARDS.length]
+      + (this.subActive ? 1 : 0);   // RUN PLUS: +1 shard every day
+    return { shards, streak };
+  }
+
+  claimDailyReward(serverDay: number): { shards: number; streak: number } {
+    if (!this.dailyRewardAvailable(serverDay)) return { shards: 0, streak: this.dailyStreak };
+    const { shards, streak } = this.nextDailyReward(serverDay);
+    this.dailyStreak = streak;
+    this.dailyLastClaimDay = serverDay;
+    this.voidShards += shards;
+    return { shards, streak };
+  }
+
+  /* ---- RUN-currency merchandising ---- */
+
+  ownsIap(id: string): boolean {
+    return this.iapOwned.includes(id);
+  }
+
+  /** A bundle is offerable when unowned and its depth-of-spend gate is open. */
+  iapUnlocked(def: IapBundleDef): boolean {
+    return !def.requires || this.ownsIap(def.requires);
+  }
+
+  /** Apply a purchased bundle's contents. Caller has already charged the RUN currency. */
+  grantIap(def: IapBundleDef): void {
+    if (this.ownsIap(def.id)) return;
+    this.iapOwned.push(def.id);
+    this.voidShards += def.shards;
+    this.lifetimePurchasedShards += def.shards;
+    this.scrap += def.scrap;
+    if (def.grantsAmplifier) this.voidAmplifier = true;
+  }
+
+  /** Apply a purchased shard pack; the first pack ever bought pays double. */
+  grantShardPack(pack: ShardPackDef): { granted: number; doubled: boolean } {
+    const doubled = !this.firstPackBonusUsed;
+    this.firstPackBonusUsed = true;
+    const granted = pack.shards * (doubled ? 2 : 1);
+    this.voidShards += granted;
+    this.lifetimePurchasedShards += granted;
+    return { granted, doubled };
   }
 
   /* ---- Consumables ---- */
@@ -1290,6 +1384,7 @@ export class GameState {
       this.tryPetLevelUp('pet_snapshot', events);   // Snapshot grows on quality finds
     }
     gain += this.flatYieldBonus;   // floor base + pack gear + Deep Pockets pay on EVERY break
+    gain = Math.round(gain * this.premiumYieldMult);   // Void Amplifier / RUN PLUS
     if (this.nodeIsEasyAccess) this.stats.easyAccessFinds += 1;   // brittle node mined (independent of grade)
     const oreKey = resourceKey(ore.resource, ore.tier);
     this.resources[oreKey] = (this.resources[oreKey] ?? D(0)).add(gain);   // inventory (uncapped, per-tier pool)
@@ -1329,8 +1424,36 @@ export class GameState {
     return this.canEscape() && !this.unlockedLevels.includes(this.currentLevel + 1);
   }
 
+  /**
+   * Fleeing a monster by switching floors costs resources FROM the floor you
+   * abandoned — the price of running instead of fighting. Sized to roughly 30
+   * seconds of this floor's passive farm rate, so a weak run that grinds for
+   * every find loses 1-2 while a steamroll floor bleeds a real stack. Clamped
+   * to what you actually hold; an empty pocket flees for free.
+   */
+  private fleeEntity(): void {
+    if (!this.entityActive) return;
+    const ore = this.floorOre;
+    const key = resourceKey(ore.resource, ore.tier);
+    const held = this.resources[key] ?? D(0);
+    if (held.lte(0)) return;   // nothing of this floor's to leave behind
+    const integrity = Math.max(1, this.nodeIntegrityMax.toNumber());
+    const gainPerBreak = (1 + this.flatYieldBonus) * this.premiumYieldMult;
+    const perSecond = (this.autoPerSecond / integrity) * gainPerBreak;
+    let loss = D(Math.max(1, Math.round(perSecond * 30)));
+    if (loss.gt(held)) loss = held;
+    this.resources[key] = held.sub(loss);
+    this.pendingShardEvents.push({
+      type: 'entity',
+      message: `−${fmt(loss)} ${RESOURCES[ore.resource].name}${tierSuffix(ore.tier)} left behind as you fled!`,
+      color: '#FF8866',
+      iconKey: ore.resource,
+    });
+  }
+
   escape(): boolean {
     if (!this.canEscape()) return false;
+    this.fleeEntity();   // running from a fight leaves loot behind
     // Save current level's exploration before moving
     this.explorationPerLevel[this.currentLevel] = this.exploration;
     this.currentLevel++;
@@ -1358,6 +1481,7 @@ export class GameState {
   travelTo(levelId: number): boolean {
     if (!this.unlockedLevels.includes(levelId)) return false;
     if (levelId === this.currentLevel) return false;
+    this.fleeEntity();   // running from a fight leaves loot behind
     // Save current level's exploration
     this.explorationPerLevel[this.currentLevel] = this.exploration;
     this.currentLevel = levelId;
@@ -1590,7 +1714,7 @@ export class GameState {
       // Fold in the average quality (+qualityBonus) and mint (+9) bonuses, plus the
       // floor base's flat yield, so offline ≈ live. (Base CONSTRUCTION rolls don't
       // happen offline — stages only advance while playing.)
-      const count = Math.round(cycles * (1 + this.flatYieldBonus + this.qualityChance * this.qualityBonus + 9 * this.mintChance));
+      const count = Math.round(cycles * (1 + this.flatYieldBonus + this.qualityChance * this.qualityBonus + 9 * this.mintChance) * this.premiumYieldMult);
       const oreKey = resourceKey(ore.resource, ore.tier);
       this.resources[oreKey] = (this.resources[oreKey] ?? D(0)).add(count);
       this.stats.resourcesFound += count;
@@ -1796,6 +1920,14 @@ export class GameState {
       shopUpgrades: { ...this.shopUpgrades },
       shardMaxedUpgrades: [...this.shardMaxedUpgrades],
       highestLevelReached: this.highestLevelReached,
+      // Monetization (permanent)
+      voidAmplifier: this.voidAmplifier,
+      dailyStreak: this.dailyStreak,
+      dailyLastClaimDay: this.dailyLastClaimDay,
+      iapOwned: [...this.iapOwned],
+      firstPackBonusUsed: this.firstPackBonusUsed,
+      offerSnoozedUntil: this.offerSnoozedUntil,
+      lifetimePurchasedShards: this.lifetimePurchasedShards,
       // Achievements (lifetime)
       lifetimeResourcesCollected: this.lifetimeResourcesCollected,
       lifetimeCritsLanded: this.lifetimeCritsLanded,
@@ -1900,6 +2032,15 @@ export class GameState {
     // saves don't suddenly re-pay shards for floors already cleared.
     this.highestLevelReached = data.highestLevelReached
       ?? (this.unlockedLevels.length ? Math.max(...this.unlockedLevels) : 0);
+
+    // Monetization (permanent; subActive is re-checked live each boot)
+    this.voidAmplifier = data.voidAmplifier ?? false;
+    this.dailyStreak = data.dailyStreak ?? 0;
+    this.dailyLastClaimDay = data.dailyLastClaimDay ?? 0;
+    this.iapOwned = data.iapOwned ?? [];
+    this.firstPackBonusUsed = data.firstPackBonusUsed ?? false;
+    this.offerSnoozedUntil = data.offerSnoozedUntil ?? 0;
+    this.lifetimePurchasedShards = data.lifetimePurchasedShards ?? 0;
 
     // Achievements (lifetime — never reset)
     this.lifetimeResourcesCollected = data.lifetimeResourcesCollected ?? 0;

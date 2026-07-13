@@ -1,7 +1,7 @@
 import Phaser from 'phaser';
 import RundotGameAPI from '@series-inc/rundot-game-sdk/api';
 import { LAYOUT } from '../config';
-import { UPGRADES, RESOURCES, RESOURCE_ORDER, ORE_SEQUENCE, VOID_UPGRADES, REWIND_MIN_FLOOR, ABILITIES, GEAR, GEAR_SLOTS, GEAR_SLOT_ICONS, GEAR_SLOT_LABELS, GEAR_LEVEL_MAX, gearEffectSummary, ENTITIES, SHOP_UPGRADES, ACHIEVEMENTS, FLOOR_BASE_STAGES, PETS, getTierColor, tierSuffix, getFloorOre, resourceKey, parseResourceKey, resourceKeyName, type UpgradeDef, type ShopUpgradeDef, type AchievementDef, type VoidUpgradeDef, type GearDef, type GearEffect } from '../data/GameData';
+import { UPGRADES, RESOURCES, RESOURCE_ORDER, ORE_SEQUENCE, VOID_UPGRADES, REWIND_MIN_FLOOR, ABILITIES, GEAR, GEAR_SLOTS, GEAR_SLOT_ICONS, GEAR_SLOT_LABELS, GEAR_LEVEL_MAX, gearEffectSummary, ENTITIES, SHOP_UPGRADES, ACHIEVEMENTS, FLOOR_BASE_STAGES, PETS, IAP_BUNDLES, SHARD_PACKS, getTierColor, tierSuffix, getFloorOre, resourceKey, parseResourceKey, resourceKeyName, type UpgradeDef, type ShopUpgradeDef, type AchievementDef, type VoidUpgradeDef, type GearDef, type GearEffect } from '../data/GameData';
 import { fmt, D, type Big } from '../num';
 import type { GameEvent, OfflineSummary, LightingState } from '../GameState';
 import { GameState } from '../GameState';
@@ -144,6 +144,26 @@ function makePillBtn(
 /** Icon native resolution (all icons are 170x170) */
 const ICON_NATIVE = 170;
 
+/**
+ * Width-lerped ROUNDED progress fill. The Graphics sits at the bar's
+ * left-center; each call eases the stored width toward `targetW` and redraws
+ * (skipped when nothing visibly changed). Radius shrinks with tiny widths so
+ * a nearly-empty bar stays a clean pill nub instead of an artifact.
+ */
+function lerpBarFill(g: Phaser.GameObjects.Graphics, targetW: number, h: number, color: number, t: number): void {
+  const holder = g as unknown as Record<string, number | string>;
+  const cur = (holder.__w as number) ?? 0;
+  const w = Phaser.Math.Linear(cur, targetW, t);
+  holder.__w = w;
+  const key = `${Math.round(w * 2)}|${color}|${h}`;
+  if (holder.__barKey === key) return;
+  holder.__barKey = key;
+  g.clear();
+  if (w < 1.5) return;
+  g.fillStyle(color, 1);
+  g.fillRoundedRect(0, -h / 2, w, h, Math.min(9, w / 2, h / 2));
+}
+
 /* ------------------------------------------------------------------ */
 /*  UIManager                                                          */
 /* ------------------------------------------------------------------ */
@@ -172,6 +192,13 @@ export interface UICallbacks {
   onBuyShopUpgrade: (id: string) => void;
   onClaimAchievement: (id: string) => void;
   onResetProgress: () => void;
+  onHardReset: () => void;   // testing: wipe INCLUDING purchases/premium carryover
+  onClaimDaily: (serverDay: number) => { shards: number; streak: number };
+  onOpenDaily: () => void;   // calendar button → open the daily progress menu
+  onBuyIap: (id: string) => void;        // one-time RUN-currency bundles (IAP_BUNDLES)
+  onSnoozeOffer: () => void;             // pill tapped → hide it for an hour
+  onBuyShardPack: (id: string) => void;  // repeatable shard packs (SHARD_PACKS)
+  onSubscribe: () => void;               // RUN PLUS monthly subscription
 }
 
 export class UIManager {
@@ -190,8 +217,9 @@ export class UIManager {
   private levelText!: Phaser.GameObjects.Text;
 
   // Status bars
-  private progBarBg!: Phaser.GameObjects.Rectangle;
-  private progFill!: Phaser.GameObjects.Rectangle;
+  private progBarBg!: Phaser.GameObjects.Graphics;    // rounded track (color shifts when cleared)
+  private progBarHit!: Phaser.GameObjects.Rectangle;  // invisible tap zone (Graphics can't take input)
+  private progFill!: Phaser.GameObjects.Graphics;     // rounded fill, width-lerped via lerpBarFill
   private progLabel!: Phaser.GameObjects.Text;
 
   // Focal "showcase" presentation (replaces the scrolling text log)
@@ -234,7 +262,7 @@ export class UIManager {
   // Phantom collectible: a faint entity that drifts in during DARK phases only.
   private phantomTimer?: Phaser.Time.TimerEvent;
   private activePhantom?: Phaser.GameObjects.Image;
-  private durFill?: Phaser.GameObjects.Rectangle;
+  private durFill?: Phaser.GameObjects.Graphics;
   private durLabel?: Phaser.GameObjects.Text;   // "N to collect" readout on the durability bar
   private durPct?: Phaser.GameObjects.Text;     // percent readout beside the integrity bar
   private teamBox?: Phaser.GameObjects.Graphics;   // "TEAM" fieldset around the pets row
@@ -247,7 +275,7 @@ export class UIManager {
   private lastBaseLoc = -1;     // floor location the base line last showed...
   private lastBaseStage = -1;   // ...and its stage — so a stage-up on THIS floor pops the line
   // Danger layer (explore screen): noise meter + the active-entity takeover
-  private noiseFill?: Phaser.GameObjects.Rectangle;
+  private noiseFill?: Phaser.GameObjects.Graphics;
   private noiseLabel?: Phaser.GameObjects.Text;
   private entityImg?: Phaser.GameObjects.Image;      // entity art over the node (blocks it)
   private entityEmoji?: Phaser.GameObjects.Text;     // emoji fallback when no PNG exists
@@ -264,9 +292,18 @@ export class UIManager {
   private itemsMinScroll = 0;
   private floorCleared = false;                        // tracks the "Cleared!" flash on the counter
   private resBarCard?: Phaser.GameObjects.Graphics;   // bottom resource-bar background card
+  private menuCard?: Phaser.GameObjects.Graphics;     // dark backdrop behind the menu tabs (not explore)
   private resBarIcon?: Phaser.GameObjects.Image;       // current floor's resource icon
   private resBarName?: Phaser.GameObjects.Text;        // current floor's resource name
   private resBarText?: Phaser.GameObjects.Text;        // current floor's resource count
+
+  // Premium (shop tab cards + daily reward modal + explore offer pill)
+  private iapBtns: Map<string, Phaser.GameObjects.Image> = new Map();      // bundle id / 'sub' → buy button
+  private iapStates: Map<string, Phaser.GameObjects.Text> = new Map();     // bundle id / 'sub' → OWNED/locked label
+  private firstPackNote?: Phaser.GameObjects.Text;                         // "first pack pays ×2" banner
+  private dailyModal: Phaser.GameObjects.Container | null = null;
+  private offerPill?: Phaser.GameObjects.Container;
+  private offerPillTimer?: Phaser.GameObjects.Text;
 
   // Tabs
   private activeTab = 'explore';
@@ -870,8 +907,8 @@ export class UIManager {
       [this.bgDark, state === 'dark' ? 1 : 0],
       [this.vignetteOverlay, state === 'dark' ? 0.9 : 0],
       [this.dimOverlay, state === 'dark' ? 0.22 : 0],
-      // The runner casts a contact shadow only while the fluorescents are on.
-      [this.buddyShadow ?? undefined, state === 'bright' ? 0.5 : 0],
+      // (The runner's contact shadow used to fade in here during bright — it
+      // looked bad against the new hall art, so it stays hidden.)
     ];
     for (const [obj, alpha] of targets) {
       if (!obj) continue;
@@ -1030,9 +1067,23 @@ export class UIManager {
       },
     });
 
-    // (The old full-width header/content/footer backing cards are gone — the
-    // sub-panels carry their own dark backgrounds now, and the halls show
-    // through between them like the mockup.)
+    // The explore tab draws its own sub-panels straight on the halls (mockup
+    // style), but the MENU tabs are walls of text — they get a dedicated dark
+    // backdrop (title band + content card) so lists stay readable even when
+    // the bright-phase hall art is glowing behind them. Toggled in showTab.
+    this.menuCard = this.scene.add.graphics().setDepth(3).setVisible(false);
+    const menuW = GAME_WIDTH - 20;
+    const mTop = 8;
+    const mTitleBottom = LAYOUT.CONTENT_TOP_WIDE - 12;
+    this.menuCard.fillStyle(0x0d0c07, 0.85);
+    this.menuCard.lineStyle(2, UI.cardStroke, 1);
+    this.menuCard.fillRoundedRect(10, mTop, menuW, mTitleBottom - mTop, UI.cardRadius);
+    this.menuCard.strokeRoundedRect(10, mTop, menuW, mTitleBottom - mTop, UI.cardRadius);
+    const mcTop = LAYOUT.CONTENT_TOP_WIDE - 4;
+    const mcH = LAYOUT.CONTENT_BOTTOM_WIDE - mcTop + 14;
+    this.menuCard.fillRoundedRect(10, mcTop, menuW, mcH, UI.cardRadius);
+    this.menuCard.strokeRoundedRect(10, mcTop, menuW, mcH, UI.cardRadius);
+
     // Resource-bar card — the FLOOR RESOURCES readout keeps its own box.
     // Only shown on the explore tab (toggled in showTab) since it reflects the
     // resource you're actively collecting.
@@ -1080,6 +1131,12 @@ export class UIManager {
     (statsBtn.getAt(1) as Phaser.GameObjects.Text).setFontSize(15);
     statsBtn.setDepth(30);
 
+    // Daily-progress calendar — tucked under Stats; opens the daily reward
+    // menu in view-or-claim mode any time.
+    const dailyBtn = makePillBtn(this.scene, 78, 72, '📅 DAILY', 120, 34, () => this.cb.onOpenDaily());
+    (dailyBtn.getAt(1) as Phaser.GameObjects.Text).setFontSize(14);
+    dailyBtn.setDepth(30);
+
     // "Hide maxed" toggle — same style as Settings, tucked just beneath it.
     // Only shown on the Upgrades tab (toggled in showTab).
     this.hideMaxedBtn = makePillBtn(this.scene, LAYOUT.GAME_WIDTH - 78, 72, 'HIDE MAXED', 120, 34, () => this.cb.onToggleHideMaxed());
@@ -1109,15 +1166,19 @@ export class UIManager {
     // Mockup-style green banner pill: dark green base, military-green fill
     // creeping across it, rounded green border. Fill is inset 3px so its square
     // corners hide behind the rounded frame.
-    this.progBarBg = this.scene.add.rectangle(BAR_X + BAR_WIDTH / 2, y + BAR_HEIGHT / 2, BAR_WIDTH, BAR_HEIGHT, 0x131c0d)
-      .setDepth(27);
+    this.progBarBg = drawPanel(
+      this.scene.add.graphics({ x: BAR_X + BAR_WIDTH / 2, y: y + BAR_HEIGHT / 2 }),
+      BAR_WIDTH, BAR_HEIGHT, 0x131c0d, 1, 0x131c0d, 12, 1,
+    ).setDepth(27);
     // Once the floor is cleared the bar reads "— DESCEND!" (see updateStatusBars),
-    // and per the mockup that banner IS a button: tap it to head down.
-    this.progBarBg.setInteractive({ useHandCursor: true });
-    this.progBarBg.on('pointerdown', () => {
+    // and per the mockup that banner IS a button: tap it to head down. Graphics
+    // can't take input, so an invisible rect carries the tap.
+    this.progBarHit = this.scene.add.rectangle(BAR_X + BAR_WIDTH / 2, y + BAR_HEIGHT / 2, BAR_WIDTH, BAR_HEIGHT, 0xffffff, 0.001)
+      .setDepth(27).setInteractive({ useHandCursor: true });
+    this.progBarHit.on('pointerdown', () => {
       if (this.state.canEscape()) this.goDeeper();
     });
-    this.progFill = this.scene.add.rectangle(BAR_X + 3, y + 3, 0, BAR_HEIGHT - 6, 0x3f6a2a).setOrigin(0, 0).setDepth(28);
+    this.progFill = this.scene.add.graphics({ x: BAR_X + 3, y: y + BAR_HEIGHT / 2 }).setDepth(28);
     this.progFrame = this.scene.add.graphics({ x: BAR_X + BAR_WIDTH / 2, y: y + BAR_HEIGHT / 2 }).setDepth(29);
     this.progFrame.lineStyle(2, UI.greenStroke, 1)
       .strokeRoundedRect(-BAR_WIDTH / 2, -BAR_HEIGHT / 2, BAR_WIDTH, BAR_HEIGHT, 12);
@@ -1348,8 +1409,10 @@ export class UIManager {
     // Carries a centered "remaining / max" HP readout for transparency.
     const durW = 300;
     const durH = 26;
-    const durBg = this.scene.add.rectangle(cx, iconCy + 200, durW, durH, 0x201709, 1).setDepth(16);
-    this.durFill = this.scene.add.rectangle(cx - durW / 2, iconCy + 200, durW, durH, 0xffcc44).setOrigin(0, 0.5).setDepth(17);
+    const durBg = drawPanel(this.scene.add.graphics({ x: cx, y: iconCy + 200 }),
+      durW, durH, 0x201709, 1, 0x201709, 11, 1).setDepth(16);
+    this.durFill = this.scene.add.graphics({ x: cx - durW / 2, y: iconCy + 200 }).setDepth(17);
+    lerpBarFill(this.durFill, durW, durH, 0xffcc44, 1);
     // Rounded gold frame over the square fill, per the mockup's HP pill.
     const durFrame = this.scene.add.graphics({ x: cx, y: iconCy + 200 }).setDepth(18);
     durFrame.lineStyle(2, 0x8a7434, 1).strokeRoundedRect(-durW / 2 - 3, -durH / 2 - 3, durW + 6, durH + 6, 12);
@@ -1402,10 +1465,9 @@ export class UIManager {
     // ~10px of air under the base box (bottom edge at +302) — the pets/TEAM
     // gap below comes from the showcaseCenterY clamp instead.
     const noiseY = iconCy + 326;
-    const noiseBg = this.scene.add.rectangle(cx, noiseY, noiseW, noiseH, 0x141410, 1)
-      .setDepth(16);
-    this.noiseFill = this.scene.add.rectangle(cx - noiseW / 2, noiseY, 0, noiseH, 0x66aa66)
-      .setOrigin(0, 0.5).setDepth(17);
+    const noiseBg = drawPanel(this.scene.add.graphics({ x: cx, y: noiseY }),
+      noiseW, noiseH, 0x141410, 1, 0x141410, 10, 1).setDepth(16);
+    this.noiseFill = this.scene.add.graphics({ x: cx - noiseW / 2, y: noiseY }).setDepth(17);
     // Rounded pill frame + speaker glyph, per the mockup's noise row.
     const noiseFrame = this.scene.add.graphics({ x: cx, y: noiseY }).setDepth(18);
     noiseFrame.lineStyle(2, UI.boxStroke, 1).strokeRoundedRect(-noiseW / 2 - 3, -noiseH / 2 - 3, noiseW + 6, noiseH + 6, 12);
@@ -1519,6 +1581,28 @@ export class UIManager {
       this.petLvlBadges.set(pet.id, lvlTxt);
     });
     this.refreshPetRow();
+
+    // Special-offer pill (Terminal Defense pattern) — top-left of the explore
+    // content, gently pulsing. GameScene drives visibility + the countdown via
+    // setOfferPill; tapping deep-links to the Shop tab.
+    const offerPill = this.scene.add.container(112, LAYOUT.CONTENT_TOP + 44).setDepth(20).setVisible(false);
+    const offerBg = drawPanel(this.scene.add.graphics(), 176, 58, 0x2a2410, 0.95, UI.gold, 12);
+    const offerHit = this.scene.add.rectangle(0, 0, 176, 58, 0xffffff, 0.001).setInteractive({ useHandCursor: true });
+    offerHit.on('pointerdown', () => {
+      haptic('light');
+      this.showTab('shop');
+      this.cb.onTabChanged('shop');
+      // One tap = one pitch: the pill goes to sleep for an hour, then fades back.
+      this.cb.onSnoozeOffer();
+    });
+    const offerTitle = makeText(this.scene, 0, -12, 'SPECIAL OFFER', 14, UI.goldCss, { fontStyle: 'bold' }).setOrigin(0.5);
+    this.offerPillTimer = makeText(this.scene, 0, 12, '', 12, '#D8D2C0', { fontStyle: 'bold' }).setOrigin(0.5);
+    offerPill.add([offerBg, offerHit, offerTitle, this.offerPillTimer]);
+    panel.add(offerPill);
+    this.offerPill = offerPill;
+    this.scene.tweens.add({
+      targets: offerPill, scale: { from: 1, to: 1.05 }, duration: 700, yoyo: true, repeat: -1, ease: 'Sine.easeInOut',
+    });
 
     this.panels.set('explore', panel);
 
@@ -2745,7 +2829,83 @@ export class UIManager {
       13, '#8888AA').setOrigin(0.5, 0);
     scrollContainer.add(earnInfo);
 
-    const firstCardY = headerY + 70;
+    // ---- Premium section (real money / RUN currency — above the shard grid) ----
+    // Terminal Defense playbook: bundles up top (ice-breaker cheap + colored,
+    // Deep Delver gated), then the six shard packs with a first-purchase ×2
+    // banner, then the subscription.
+    const premW = LAYOUT.GAME_WIDTH - 60;
+    const premH = 96;
+    const premTop = headerY + 70;
+
+    const buildWideCard = (
+      id: string, y: number, title: string, titleColor: string, desc: string,
+      btnLabel: string, stroke: number, onBuy: () => void,
+    ) => {
+      const card = drawPanel(this.scene.add.graphics({ x: cx, y }), premW, premH, 0x1a1410, 0.95, stroke, 14)
+        .setAlpha(0.9);
+      const name = makeText(this.scene, cx - premW / 2 + 24, y - 28, title, 18, titleColor, { fontStyle: 'bold' })
+        .setOrigin(0, 0.5);
+      const info = makeText(this.scene, cx - premW / 2 + 24, y + 10, desc, 13, '#D8D2C0', {
+        wordWrap: { width: premW - 230 },
+      }).setOrigin(0, 0.5);
+      const btn = this.scene.add.image(cx + premW / 2 - 100, y, 'upg_btn_grad')
+        .setDisplaySize(168, 50).setInteractive({ useHandCursor: true });
+      btn.on('pointerup', (p: Phaser.Input.Pointer) => {
+        if (!this.shopDragMoved && this.inWideContent(p)) onBuy();
+      });
+      const btnTxt = makeText(this.scene, btn.x, y, btnLabel, 14, '#FFFFFF', { fontStyle: 'bold' }).setOrigin(0.5);
+      const stateLabel = makeText(this.scene, btn.x, y, '', 13, UI.goldCss, { fontStyle: 'bold', align: 'center', wordWrap: { width: 190 } })
+        .setOrigin(0.5).setVisible(false);
+      scrollContainer.add([card, name, info, btn, btnTxt, stateLabel]);
+      (btn as unknown as Record<string, Phaser.GameObjects.Text>).__label = btnTxt;
+      this.iapBtns.set(id, btn);
+      this.iapStates.set(id, stateLabel);
+    };
+
+    // Bundle cards — the ice-breaker wears green (the "different-colored item").
+    IAP_BUNDLES.forEach((b, i) => {
+      buildWideCard(b.id, premTop + premH / 2 + i * (premH + 10),
+        `${b.icon} ${b.name}`, b.iceBreaker ? '#9FD06A' : b.id === 'deep_delver' ? '#FFB84A' : '#CC88FF',
+        b.desc, `${b.price} RUN — BUY`, b.iceBreaker ? UI.greenStroke : UI.gold,
+        () => this.cb.onBuyIap(b.id));
+    });
+    const bundlesBottom = premTop + IAP_BUNDLES.length * (premH + 10);
+
+    // Shard packs — 2×3 compact grid with the first-purchase ×2 banner above.
+    this.firstPackNote = makeText(this.scene, cx, bundlesBottom + 8,
+      '★ FIRST SHARD PACK PAYS DOUBLE ★', 15, UI.goldCss, { fontStyle: 'bold' }).setOrigin(0.5, 0);
+    scrollContainer.add(this.firstPackNote);
+    const packH = 118;
+    const packRowH = 128;
+    const packTop = bundlesBottom + 36;
+    SHARD_PACKS.forEach((pack, i) => {
+      const px = UIManager.UPG_GRID_X + (i % 2) * UIManager.UPG_COL_W + UIManager.UPG_CARD_CX;
+      const py = packTop + Math.floor(i / 2) * packRowH + packH / 2;
+      const card = drawPanel(this.scene.add.graphics({ x: px, y: py }),
+        UIManager.UPG_CARD_W - 8, packH, 0x1a1420, 0.95, 0x6a4a8a, 12);
+      const icon = this.createIcon(px - UIManager.UPG_CARD_W / 2 + 40, py - 22, 'void_shard', 56);
+      const count = makeText(this.scene, px - UIManager.UPG_CARD_W / 2 + 74, py - 22,
+        `${pack.shards} SHARDS`, 17, '#CC88FF', { fontStyle: 'bold' }).setOrigin(0, 0.5);
+      const bonus = makeText(this.scene, px + UIManager.UPG_CARD_W / 2 - 20, py - 46,
+        pack.bonusPct > 0 ? `+${pack.bonusPct}%` : '', 13, UI.goldCss, { fontStyle: 'bold' }).setOrigin(1, 0.5);
+      const btn = this.scene.add.image(px, py + 30, 'upg_btn_grad')
+        .setDisplaySize(UIManager.UPG_CARD_W - 60, 44).setInteractive({ useHandCursor: true });
+      btn.on('pointerup', (p: Phaser.Input.Pointer) => {
+        if (!this.shopDragMoved && this.inWideContent(p)) this.cb.onBuyShardPack(pack.id);
+      });
+      const btnTxt = makeText(this.scene, px, py + 30, `${pack.price} RUN`, 14, '#FFFFFF', { fontStyle: 'bold' }).setOrigin(0.5);
+      scrollContainer.add([card, count, bonus, btn, btnTxt]);
+      if (icon) scrollContainer.add(icon);
+    });
+    const packsBottom = packTop + Math.ceil(SHARD_PACKS.length / 2) * packRowH;
+
+    // Subscription card, last of the premium section.
+    buildWideCard('sub', packsBottom + 12 + premH / 2, '★ RUN PLUS',
+      UI.goldCss, '+50% resources · ×2 offline cap · +1 daily shard. Monthly subscription.',
+      'SUBSCRIBE', UI.gold, () => this.cb.onSubscribe());
+    this.renderPremiumCards();
+
+    const firstCardY = packsBottom + 12 + premH + 24;
 
     for (let i = 0; i < SHOP_UPGRADES.length; i++) {
       const sup = SHOP_UPGRADES[i];
@@ -2868,7 +3028,30 @@ export class UIManager {
   refreshShopPanel(): void {
     this.shopShardLabel.setText(`Void Shards: ${this.state.voidShards}`);
     this.centerShardHeader(this.shopShardIcon, this.shopShardLabel, LAYOUT.CENTER_X);
+    this.renderPremiumCards();
     for (const sup of SHOP_UPGRADES) this.renderShopRow(sup);
+  }
+
+  /** Sync every premium card: buyable / locked (depth of spend) / owned. */
+  private renderPremiumCards(): void {
+    const syncCard = (id: string, done: boolean, doneText: string, locked = false, lockText = '') => {
+      const btn = this.iapBtns.get(id);
+      const buyable = !done && !locked;
+      btn?.setVisible(buyable);
+      if (btn?.input) btn.input.enabled = buyable;
+      (btn as unknown as Record<string, Phaser.GameObjects.Text> | undefined)?.__label?.setVisible(buyable);
+      const label = this.iapStates.get(id);
+      if (done) label?.setText(doneText).setColor(UI.goldCss).setVisible(true);
+      else if (locked) label?.setText(lockText).setColor('#888372').setVisible(true);
+      else label?.setVisible(false);
+    };
+    for (const b of IAP_BUNDLES) {
+      const gate = b.requires ? IAP_BUNDLES.find((o) => o.id === b.requires) : undefined;
+      syncCard(b.id, this.state.ownsIap(b.id), 'OWNED',
+        !this.state.iapUnlocked(b), gate ? `🔒 Unlocks after\n${gate.name}` : '🔒 Locked');
+    }
+    syncCard('sub', this.state.subActive, 'ACTIVE — thank you!');
+    this.firstPackNote?.setVisible(!this.state.firstPackBonusUsed);
   }
 
   /* ---- Achievements panel (cards + claim buttons; mirrors the shop panel) ---- */
@@ -3098,6 +3281,7 @@ export class UIManager {
     // The bottom resource readout reflects the resource you're actively
     // collecting, so it only belongs on the explore page.
     const onExplore = tab === 'explore';
+    this.menuCard?.setVisible(!onExplore);
     this.resBarCard?.setVisible(onExplore);
     this.resBarName?.setVisible(onExplore);
     this.resBarText?.setVisible(onExplore);
@@ -3114,6 +3298,8 @@ export class UIManager {
       .setY(onExplore ? 42 : (8 + (cTop - 12)) / 2);
     this.depthText.setVisible(onExplore);
     this.progBarBg.setVisible(onExplore);
+    this.progBarHit.setVisible(onExplore);
+    if (this.progBarHit.input) this.progBarHit.input.enabled = onExplore;
     this.progFill.setVisible(onExplore);
     this.progFrame?.setVisible(onExplore);
     this.progLabel.setVisible(onExplore);
@@ -3215,20 +3401,18 @@ export class UIManager {
     // Everything here is explore-screen content (exploration bar, node Integrity,
     // floor arrows). Other tabs show only the menu title — see showTab.
     if (this.activeTab !== 'explore') return;
-    const { BAR_WIDTH, BAR_X } = LAYOUT;
+    const { BAR_WIDTH } = LAYOUT;
     const s = this.state;
     const ore = s.floorOre;
     const oreName = (RESOURCES[ore.resource]?.name ?? ore.resource) + tierSuffix(ore.tier);
     const done = s.exploration >= ore.required;
 
     const progW = (BAR_WIDTH - 6) * Math.max(0, s.explorationPct / 100);
-    this.progFill.width = Phaser.Math.Linear(this.progFill.width, progW, 0.15);
-    this.progFill.x = BAR_X + 3;
     this.progLabel.setText(done ? `${oreName} — DESCEND!` : `Exploring for ${oreName}`);
-    // Cleared floor: the whole banner lights up green (and progBarBg's
-    // pointerdown sends you down).
-    this.progBarBg.setFillStyle(done ? 0x2c4a1e : 0x131c0d);
-    this.progFill.setFillStyle(done ? 0x3f6a2a : 0x2f5220);
+    // Cleared floor: the whole banner lights up green (and progBarHit's
+    // pointerdown sends you down). Track + fill are both rounded.
+    drawPanel(this.progBarBg, BAR_WIDTH, LAYOUT.BAR_HEIGHT, done ? 0x2c4a1e : 0x131c0d, 1, done ? 0x2c4a1e : 0x131c0d, 12, 1);
+    lerpBarFill(this.progFill, progW, LAYOUT.BAR_HEIGHT - 6, done ? 0x3f6a2a : 0x2f5220, 0.15);
     this.progLabel.setColor(done ? '#EAF6D8' : '#D6E8C0');
     // Counter shows N / required while exploring; on clearing it flashes
     // "Cleared!" once, then hides.
@@ -3251,8 +3435,8 @@ export class UIManager {
     const remaining = integ.sub(s.nodeDamage).max(0);
     const remainPct = Math.max(0, Math.min(1, remaining.div(integ).toNumber()));
     if (this.durFill) {
-      this.durFill.width = Phaser.Math.Linear(this.durFill.width, 300 * remainPct, 0.25);
-      this.durFill.setFillStyle(remainPct > 0.5 ? 0xffcc44 : remainPct > 0.25 ? 0xff9933 : 0xff5544);
+      lerpBarFill(this.durFill, 300 * remainPct, 26,
+        remainPct > 0.5 ? 0xffcc44 : remainPct > 0.25 ? 0xff9933 : 0xff5544, 0.25);
     }
     // Explicit HP readout. During respawn this naturally reads "0 / max".
     if (this.durLabel) {
@@ -3328,8 +3512,8 @@ export class UIManager {
     // something has already found you.
     if (this.noiseFill && this.noiseLabel) {
       const pct = s.entityActive ? 1 : s.noise / 100;
-      this.noiseFill.width = Phaser.Math.Linear(this.noiseFill.width, 300 * pct, 0.25);
-      this.noiseFill.setFillStyle(s.entityActive ? 0xff4444 : pct > 0.75 ? 0xff8844 : pct > 0.4 ? 0xd8c04a : 0x66aa66);
+      lerpBarFill(this.noiseFill, 300 * pct, 22,
+        s.entityActive ? 0xff4444 : pct > 0.75 ? 0xff8844 : pct > 0.4 ? 0xd8c04a : 0x66aa66, 0.25);
       this.noiseLabel.setText(s.entityActive ? '!!! FOUND !!!'
         : `Noise ${Math.floor(s.noise)}%${s.lighting === 'dark' ? ' ×1.5' : ''}`);
     }
@@ -3693,53 +3877,42 @@ export class UIManager {
 
   showWelcomeBack(summary: OfflineSummary): void {
     const { GAME_WIDTH, GAME_HEIGHT } = LAYOUT;
+    const cx = GAME_WIDTH / 2;
+    const cy = GAME_HEIGHT / 2;
 
-    // Dim overlay
-    const overlay = this.scene.add.rectangle(
-      GAME_WIDTH / 2, GAME_HEIGHT / 2,
-      GAME_WIDTH, GAME_HEIGHT,
-      0x000000, 0.7,
-    ).setDepth(300).setInteractive();
-
-    // Panel
     const panelW = 520;
-    const panelH = 340;
-    const panel = this.scene.add.rectangle(
-      GAME_WIDTH / 2, GAME_HEIGHT / 2,
-      panelW, panelH, 0x1a1a1a, 0.95,
-    ).setDepth(301).setStrokeStyle(2, 0x555555);
+    const panelH = 360;
+    const top = cy - panelH / 2;
 
-    // Title
-    const title = makeText(this.scene, GAME_WIDTH / 2, GAME_HEIGHT / 2 - 120,
-      'WELCOME BACK', 28, '#FFD700', { fontStyle: 'bold' },
-    ).setOrigin(0.5).setDepth(302);
+    const modal = this.scene.add.container(0, 0).setDepth(300);
+    modal.add(this.scene.add.rectangle(cx, cy, GAME_WIDTH, GAME_HEIGHT, 0x000000, 0.72).setInteractive());
+    modal.add(drawPanel(this.scene.add.graphics({ x: cx, y: cy }), panelW, panelH, 0x141410, 0.98, UI.gold, 18));
 
-    // Time away
+    const title = makeText(this.scene, cx, top + 44, 'WELCOME BACK', 30, UI.goldCss, { fontStyle: 'bold' })
+      .setOrigin(0.5);
+    title.setShadow(0, 3, '#000000', 6, true, true);
+    modal.add(title);
+    modal.add(this.scene.add.rectangle(cx, top + 78, panelW - 48, 1, 0x444438));
+
     const timeStr = summary.minutes >= 60
       ? `${Math.floor(summary.minutes / 60)}h ${summary.minutes % 60}m`
       : `${summary.minutes}m`;
-    const timeTxt = makeText(this.scene, GAME_WIDTH / 2, GAME_HEIGHT / 2 - 70,
-      `You were away for ${timeStr}`, 20, '#AAAAAA',
-    ).setOrigin(0.5).setDepth(302);
+    modal.add(makeText(this.scene, cx, top + 116, `You were away for ${timeStr}`, 18, '#AAA692')
+      .setOrigin(0.5));
 
-    // Stats
-    const statsTxt = makeText(this.scene, GAME_WIDTH / 2, GAME_HEIGHT / 2 - 20,
-      `Resources found: ${summary.resourcesFound}`, 22, '#CCCCCC', { align: 'center' },
-    ).setOrigin(0.5).setDepth(302);
+    // The haul, boxed like the base-status panel on the explore screen.
+    modal.add(drawPanel(this.scene.add.graphics({ x: cx, y: top + 186 }), panelW - 88, 76, UI.boxFill, 0.85, UI.boxStroke, 12));
+    modal.add(makeText(this.scene, cx, top + 172, 'RESOURCES FOUND', 13, '#888372', { fontStyle: 'bold' })
+      .setOrigin(0.5));
+    modal.add(makeText(this.scene, cx, top + 200, `${summary.resourcesFound}`, 26, '#FFD700', { fontStyle: 'bold' })
+      .setOrigin(0.5));
 
-    // Dismiss button
-    const dismissBtn = makeBtn(this.scene, GAME_WIDTH / 2, GAME_HEIGHT / 2 + 100,
-      'CONTINUE', 200, 50, 0x336633, () => {
-        overlay.destroy();
-        panel.destroy();
-        title.destroy();
-        timeTxt.destroy();
-        statsTxt.destroy();
-        dismissBtn.destroy();
-        RundotGameAPI.analytics.recordCustomEvent('welcome_back_dismissed');
-      },
-    );
-    dismissBtn.setDepth(302);
+    const dismissBtn = makePillBtn(this.scene, cx, top + panelH - 56, 'CONTINUE', 220, 56, () => {
+      modal.destroy(true);
+      RundotGameAPI.analytics.recordCustomEvent('welcome_back_dismissed');
+    }, UI.greenFill, UI.greenStroke);
+    (dismissBtn.getAt(1) as Phaser.GameObjects.Text).setFontSize(20).setColor('#D6E8C0');
+    modal.add(dismissBtn);
   }
 
   /* ---- Settings modal ---- */
@@ -3762,79 +3935,107 @@ export class UIManager {
     modal.add(overlay);
 
     const panelW = 560;
-    const panelH = 600;
+    const panelH = 656;
     const top = cy - panelH / 2;
-    const panel = this.scene.add.rectangle(cx, cy, panelW, panelH, 0x141414, 0.98)
-      .setStrokeStyle(2, 0x555555).setInteractive();
-    modal.add(panel);
+    modal.add(drawPanel(this.scene.add.graphics({ x: cx, y: cy }), panelW, panelH, 0x141410, 0.98, UI.gold, 18));
+    // Invisible input blocker over the panel body (Graphics aren't interactive).
+    modal.add(this.scene.add.rectangle(cx, cy, panelW, panelH, 0xffffff, 0.001).setInteractive());
 
-    modal.add(makeText(this.scene, cx, top + 34, 'SETTINGS', 30, '#FFFFFF', { fontStyle: 'bold' }).setOrigin(0.5));
+    const title = makeText(this.scene, cx, top + 40, 'SETTINGS', 30, UI.goldCss, { fontStyle: 'bold' }).setOrigin(0.5);
+    title.setShadow(0, 3, '#000000', 6, true, true);
+    modal.add(title);
 
     // Close (X) — top-right corner of the panel.
-    modal.add(makeBtn(this.scene, cx + panelW / 2 - 32, top + 32, '✕', 40, 40, 0x442222, () => this.closeSettings()));
+    modal.add(makePillBtn(this.scene, cx + panelW / 2 - 40, top + 38, '✕', 44, 44, () => this.closeSettings(), 0x2a1412, 0x884444));
 
-    modal.add(this.scene.add.rectangle(cx, top + 66, panelW - 48, 1, 0x444444));
+    modal.add(this.scene.add.rectangle(cx, top + 72, panelW - 48, 1, 0x444438));
 
     // ---- Credits / version ----
-    modal.add(makeText(this.scene, cx, top + 92, 'Backrooms Escape Idle', 22, '#FFD700', { fontStyle: 'bold' }).setOrigin(0.5));
-    modal.add(makeText(this.scene, cx, top + 122, 'Version 1.0.0', 16, '#AAAAAA').setOrigin(0.5));
-    modal.add(makeText(this.scene, cx, top + 150, 'Created by cbarker', 14, '#888888').setOrigin(0.5));
+    modal.add(makeText(this.scene, cx, top + 98, 'Backrooms Escape Idle', 22, '#EDE4CF', { fontStyle: 'bold' }).setOrigin(0.5));
+    modal.add(makeText(this.scene, cx, top + 128, 'Version 1.0.0', 16, '#AAA692').setOrigin(0.5));
+    modal.add(makeText(this.scene, cx, top + 156, 'Created by cbarker', 14, '#888372').setOrigin(0.5));
 
-    modal.add(this.scene.add.rectangle(cx, top + 186, panelW - 48, 1, 0x444444));
+    modal.add(this.scene.add.rectangle(cx, top + 192, panelW - 48, 1, 0x444438));
 
     // ---- Haptics ----
-    modal.add(makeText(this.scene, cx, top + 214, 'HAPTICS', 20, '#88CCFF', { fontStyle: 'bold' }).setOrigin(0.5));
-    modal.add(makeText(this.scene, cx, top + 244, 'Vibration on taps, hits and button presses.', 14, '#999999', {
+    modal.add(makeText(this.scene, cx, top + 220, 'HAPTICS', 20, UI.goldCss, { fontStyle: 'bold' }).setOrigin(0.5));
+    modal.add(makeText(this.scene, cx, top + 250, 'Vibration on taps, hits and button presses.', 14, '#888372', {
       align: 'center', wordWrap: { width: panelW - 80 },
     }).setOrigin(0.5));
-    const hapticsBtn = makeBtn(this.scene, cx, top + 292, '', 220, 48, 0x2a2a2a, () => {
+    const hapticsBtn = makePillBtn(this.scene, cx, top + 298, '', 220, 48, () => {
       this.cb.onToggleHaptics();
       paintHapticsBtn();
     });
     const paintHapticsBtn = () => {
       const on = this.state.hapticsEnabled;
-      (hapticsBtn.getAt(0) as Phaser.GameObjects.Rectangle)
-        .setFillStyle(on ? 0x336633 : 0x333333)
-        .setStrokeStyle(2, on ? 0x66aa66 : 0x555555);
-      (hapticsBtn.getAt(1) as Phaser.GameObjects.Text).setText(on ? 'HAPTICS: ON' : 'HAPTICS: OFF');
+      drawPanel(hapticsBtn.getAt(0) as Phaser.GameObjects.Graphics, 220, 48,
+        on ? UI.greenFill : UI.btnFill, 1, on ? UI.greenStroke : UI.btnStroke, 14);
+      (hapticsBtn.getAt(1) as Phaser.GameObjects.Text)
+        .setText(on ? 'HAPTICS: ON' : 'HAPTICS: OFF')
+        .setColor(on ? '#D6E8C0' : '#E8E2CF');
     };
     paintHapticsBtn();
     modal.add(hapticsBtn);
 
-    modal.add(this.scene.add.rectangle(cx, top + 330, panelW - 48, 1, 0x444444));
+    modal.add(this.scene.add.rectangle(cx, top + 336, panelW - 48, 1, 0x444438));
 
     // ---- Reset progress ----
-    modal.add(makeText(this.scene, cx, top + 358, 'RESET PROGRESS', 20, '#FF8888', { fontStyle: 'bold' }).setOrigin(0.5));
-    modal.add(makeText(this.scene, cx, top + 388, 'Permanently erase your save and start over.', 14, '#999999', {
+    modal.add(makeText(this.scene, cx, top + 364, 'RESET PROGRESS', 20, '#FF8888', { fontStyle: 'bold' }).setOrigin(0.5));
+    modal.add(makeText(this.scene, cx, top + 394, 'Permanently erase your save and start over.', 14, '#888372', {
+      align: 'center', wordWrap: { width: panelW - 80 },
+    }).setOrigin(0.5));
+    // What a reset does NOT take from you — paid goods and shard investment.
+    modal.add(makeText(this.scene, cx, top + 430,
+      '✓ Purchases & subscription are kept\n✓ All PURCHASED Void Shards refunded — even spent ones', 14, '#9FD06A', {
       align: 'center', wordWrap: { width: panelW - 80 },
     }).setOrigin(0.5));
 
     // Confirmation row — hidden until RESET is tapped.
     const confirmGroup = this.scene.add.container(0, 0).setVisible(false);
-    confirmGroup.add(makeText(this.scene, cx, top + 422, 'Erase everything? This cannot be undone.', 15, '#FFAAAA', {
+    confirmGroup.add(makeText(this.scene, cx, top + 476, 'Erase everything? This cannot be undone.', 15, '#FFAAAA', {
       align: 'center', fontStyle: 'bold',
     }).setOrigin(0.5));
-    const yesBtn = makeBtn(this.scene, cx - 72, top + 458, 'YES, WIPE', 132, 44, 0x882222, () => {
+    const yesBtn = makePillBtn(this.scene, cx - 72, top + 512, 'YES, WIPE', 132, 44, () => {
       this.closeSettings();
       this.cb.onResetProgress();
-    });
-    (yesBtn.getAt(0) as Phaser.GameObjects.Rectangle).setStrokeStyle(2, 0xcc4444);
-    const noBtn = makeBtn(this.scene, cx + 72, top + 458, 'CANCEL', 132, 44, 0x333333, () => {
+    }, 0x3a1210, 0xcc4444);
+    const noBtn = makePillBtn(this.scene, cx + 72, top + 512, 'CANCEL', 132, 44, () => {
       confirmGroup.setVisible(false);
       resetBtn.setVisible(true);
     });
+    (yesBtn.getAt(1) as Phaser.GameObjects.Text).setFontSize(16);
+    (noBtn.getAt(1) as Phaser.GameObjects.Text).setFontSize(16);
     confirmGroup.add([yesBtn, noBtn]);
 
-    const resetBtn = makeBtn(this.scene, cx, top + 444, 'RESET', 220, 48, 0x662222, () => {
+    const resetBtn = makePillBtn(this.scene, cx, top + 498, 'RESET', 220, 48, () => {
       resetBtn.setVisible(false);
       confirmGroup.setVisible(true);
-    });
-    (resetBtn.getAt(0) as Phaser.GameObjects.Rectangle).setStrokeStyle(2, 0xaa4444);
+    }, 0x2a1210, 0xaa4444);
     modal.add(resetBtn);
     modal.add(confirmGroup);
 
+    // HARD RESET — testing tool: wipes purchases/premium too (no carryover),
+    // so the game can be tested without pay-to-win boosts. Tap-again confirm.
+    const hardBtn = makePillBtn(this.scene, cx, top + 556, 'HARD RESET (testing) — wipes purchases too', 420, 36, () => {
+      const txt = hardBtn.getAt(1) as Phaser.GameObjects.Text;
+      if ((hardBtn as unknown as Record<string, boolean>).__armed) {
+        this.closeSettings();
+        this.cb.onHardReset();
+      } else {
+        (hardBtn as unknown as Record<string, boolean>).__armed = true;
+        txt.setText('SURE? Everything goes, even purchases.').setColor('#FF9966');
+        this.scene.time.delayedCall(2500, () => {
+          if (!hardBtn.active) return;
+          (hardBtn as unknown as Record<string, boolean>).__armed = false;
+          txt.setText('HARD RESET (testing) — wipes purchases too').setColor('#B87878');
+        });
+      }
+    }, 0x1a0d0c, 0x664040);
+    (hardBtn.getAt(1) as Phaser.GameObjects.Text).setFontSize(13).setColor('#B87878');
+    modal.add(hardBtn);
+
     // ---- Close (bottom) ----
-    modal.add(makeBtn(this.scene, cx, top + panelH - 36, 'CLOSE', 200, 46, 0x2a2a2a, () => this.closeSettings()));
+    modal.add(makePillBtn(this.scene, cx, top + panelH - 44, 'CLOSE', 200, 48, () => this.closeSettings()));
 
     this.settingsModal = modal;
   }
@@ -3912,13 +4113,17 @@ export class UIManager {
     const modal = this.scene.add.container(0, 0).setDepth(310);
     const overlay = this.scene.add.rectangle(cx, cy, GAME_WIDTH, GAME_HEIGHT, 0x000000, 0.72).setInteractive();
     modal.add(overlay);
-    const panel = this.scene.add.rectangle(cx, cy, panelW, panelH, 0x141414, 0.98)
-      .setStrokeStyle(2, 0x555555).setInteractive();
+    modal.add(drawPanel(this.scene.add.graphics({ x: cx, y: cy }), panelW, panelH, 0x141410, 0.98, UI.gold, 18));
+    // Invisible rect over the panel: input blocker AND the drag-scroll surface
+    // (Graphics aren't interactive).
+    const panel = this.scene.add.rectangle(cx, cy, panelW, panelH, 0xffffff, 0.001).setInteractive();
     modal.add(panel);
 
-    modal.add(makeText(this.scene, cx, top + 34, 'STATS', 30, '#FFFFFF', { fontStyle: 'bold' }).setOrigin(0.5));
-    modal.add(makeBtn(this.scene, cx + panelW / 2 - 32, top + 32, '✕', 40, 40, 0x442222, () => this.closeStats()));
-    modal.add(this.scene.add.rectangle(cx, top + 66, panelW - 48, 1, 0x444444));
+    const statsTitle = makeText(this.scene, cx, top + 40, 'STATS', 30, UI.goldCss, { fontStyle: 'bold' }).setOrigin(0.5);
+    statsTitle.setShadow(0, 3, '#000000', 6, true, true);
+    modal.add(statsTitle);
+    modal.add(makePillBtn(this.scene, cx + panelW / 2 - 40, top + 38, '✕', 44, 44, () => this.closeStats(), 0x2a1412, 0x884444));
+    modal.add(this.scene.add.rectangle(cx, top + 72, panelW - 48, 1, 0x444438));
 
     // Rows live in a scroll container, clipped to the region between the divider
     // and the CLOSE button so nothing ever bleeds over either.
@@ -3955,7 +4160,7 @@ export class UIManager {
       panel.on('pointerout', () => { dragging = false; });
     }
 
-    modal.add(makeBtn(this.scene, cx, top + panelH - 36, 'CLOSE', 200, 46, 0x2a2a2a, () => this.closeStats()));
+    modal.add(makePillBtn(this.scene, cx, top + panelH - 44, 'CLOSE', 200, 48, () => this.closeStats()));
     this.statsModal = modal;
   }
 
@@ -3963,6 +4168,103 @@ export class UIManager {
     if (!this.statsModal) return;
     this.statsModal.destroy(true);
     this.statsModal = null;
+  }
+
+  /* ---- Daily reward modal ---- *
+   * Popped by GameScene.initPremium when the SERVER day has rolled past the
+   * last claim. Shows the streak position and the shard payout; claiming goes
+   * through cb.onClaimDaily so the scene owns the state change + save. */
+
+  showDailyReward(serverDay: number): void {
+    if (this.dailyModal) return;
+    haptic('light');
+    const { GAME_WIDTH, GAME_HEIGHT } = LAYOUT;
+    const cx = GAME_WIDTH / 2;
+    const cy = GAME_HEIGHT / 2;
+    // Claimable → preview the pending claim; already claimed (calendar button)
+    // → show today as banked and where the streak stands.
+    const available = this.state.dailyRewardAvailable(serverDay);
+    const preview = available
+      ? this.state.nextDailyReward(serverDay)
+      : { streak: Math.max(1, this.state.dailyStreak), shards: 0 };
+
+    const panelW = 520;
+    const panelH = 420;
+    const top = cy - panelH / 2;
+
+    const modal = this.scene.add.container(0, 0).setDepth(310);
+    modal.add(this.scene.add.rectangle(cx, cy, GAME_WIDTH, GAME_HEIGHT, 0x000000, 0.72).setInteractive());
+    modal.add(drawPanel(this.scene.add.graphics({ x: cx, y: cy }), panelW, panelH, 0x141410, 0.98, UI.gold, 18));
+
+    const dailyTitle = makeText(this.scene, cx, top + 40, 'DAILY REWARD', 30, UI.goldCss, { fontStyle: 'bold' }).setOrigin(0.5);
+    dailyTitle.setShadow(0, 3, '#000000', 6, true, true);
+    modal.add(dailyTitle);
+    modal.add(makeText(this.scene, cx, top + 76, `Day ${preview.streak} streak`, 16, '#AAA692', { fontStyle: 'bold' }).setOrigin(0.5));
+    modal.add(this.scene.add.rectangle(cx, top + 98, panelW - 48, 1, 0x444438));
+
+    // The 7-day track: today's slot glows gold, claimed days dim green.
+    const track = GameState.DAILY_REWARDS;
+    const slotW = 60;
+    const trackX = cx - ((track.length - 1) * slotW) / 2;
+    const todayIdx = (preview.streak - 1) % track.length;
+    for (let i = 0; i < track.length; i++) {
+      const sx = trackX + i * slotW;
+      const isToday = i === todayIdx && available;
+      const done = i < todayIdx || (i === todayIdx && !available);
+      modal.add(drawPanel(this.scene.add.graphics({ x: sx, y: top + 148 }), 52, 64,
+        isToday ? 0x39310f : 0x1a1912, 1, isToday ? UI.gold : done ? 0x3f6a2a : UI.boxStroke, 10));
+      modal.add(makeText(this.scene, sx, top + 134, `D${i + 1}`, 11, done ? '#7CA860' : isToday ? UI.goldCss : '#888372').setOrigin(0.5));
+      modal.add(makeText(this.scene, sx, top + 158, `${track[i]}`, 18, done ? '#7CA860' : isToday ? '#FFE28A' : '#B8B2A0', { fontStyle: 'bold' }).setOrigin(0.5));
+    }
+
+    if (available) {
+      const shardIcon = this.createIcon(cx - 60, top + 246, 'void_shard', 84);
+      if (shardIcon) modal.add(shardIcon);
+      modal.add(makeText(this.scene, cx - 14, top + 246, `+${preview.shards}`, 44, '#CC88FF', { fontStyle: 'bold' })
+        .setOrigin(0, 0.5));
+      if (this.state.subActive) {
+        modal.add(makeText(this.scene, cx, top + 292, 'includes +1 RUN PLUS bonus shard', 13, UI.goldCss).setOrigin(0.5));
+      }
+      const claimBtn = makePillBtn(this.scene, cx, top + panelH - 56, 'CLAIM', 220, 56, () => {
+        const result = this.cb.onClaimDaily(serverDay);
+        if (result.shards <= 0) { this.closeDailyReward(); return; }
+        haptic('success');
+        claimBtn.disableInteractive();
+        (claimBtn.getAt(1) as Phaser.GameObjects.Text).setText(`+${result.shards} CLAIMED!`).setColor('#7CFF7C');
+        this.scene.time.delayedCall(900, () => this.closeDailyReward());
+      }, UI.greenFill, UI.greenStroke);
+      (claimBtn.getAt(1) as Phaser.GameObjects.Text).setFontSize(20).setColor('#D6E8C0');
+      modal.add(claimBtn);
+    } else {
+      // Calendar view: today's shards are already banked.
+      modal.add(makeText(this.scene, cx, top + 246, '✓ Claimed today', 24, '#9FD06A', { fontStyle: 'bold' })
+        .setOrigin(0.5));
+      modal.add(makeText(this.scene, cx, top + 284, 'Come back tomorrow to keep the streak alive.', 14, '#AAA692')
+        .setOrigin(0.5));
+      const closeBtn = makePillBtn(this.scene, cx, top + panelH - 56, 'CLOSE', 220, 56, () => this.closeDailyReward());
+      (closeBtn.getAt(1) as Phaser.GameObjects.Text).setFontSize(20);
+      modal.add(closeBtn);
+    }
+
+    this.dailyModal = modal;
+  }
+
+  private closeDailyReward(): void {
+    if (!this.dailyModal) return;
+    this.dailyModal.destroy(true);
+    this.dailyModal = null;
+  }
+
+  /** Show/refresh the explore-screen special-offer pill; null hides it.
+   *  Reappearing after a hide (e.g. snooze expiry) fades back in gently. */
+  setOfferPill(countdown: string | null): void {
+    if (!this.offerPill) return;
+    if (!countdown) { this.offerPill.setVisible(false); return; }
+    if (!this.offerPill.visible) {
+      this.offerPill.setAlpha(0).setVisible(true);
+      this.scene.tweens.add({ targets: this.offerPill, alpha: 1, duration: 1200, ease: 'Sine.easeIn' });
+    }
+    this.offerPillTimer?.setText(`ends in ${countdown}`);
   }
 
   /* ---- Pets (explore bottom-left row + popup) ---- */
