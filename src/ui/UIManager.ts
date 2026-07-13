@@ -301,12 +301,15 @@ export class UIManager {
   private iapBtns: Map<string, Phaser.GameObjects.Image> = new Map();      // bundle id / 'sub' → buy button
   private iapStates: Map<string, Phaser.GameObjects.Text> = new Map();     // bundle id / 'sub' → OWNED/locked label
   private firstPackNote?: Phaser.GameObjects.Text;                         // "first pack pays ×2" banner
+  private runBalanceLabel?: Phaser.GameObjects.Text;                       // player's RUN hard-currency balance
   private dailyModal: Phaser.GameObjects.Container | null = null;
   private offerPill?: Phaser.GameObjects.Container;
   private offerPillTimer?: Phaser.GameObjects.Text;
 
   // Tabs
   private activeTab = 'explore';
+  /** Read-only view of the active tab (GameScene polls it for shop-only work). */
+  get currentTab(): string { return this.activeTab; }
   private panels: Map<string, Phaser.GameObjects.Container> = new Map();
   private tabBGs: Map<string, Phaser.GameObjects.Rectangle> = new Map();
   private tabActiveImgs: Map<string, Phaser.GameObjects.Graphics> = new Map();   // gold highlight pane on the active tab
@@ -2835,7 +2838,13 @@ export class UIManager {
     // banner, then the subscription.
     const premW = LAYOUT.GAME_WIDTH - 60;
     const premH = 96;
-    const premTop = headerY + 70;
+    // RUN wallet readout — refreshed by GameScene (setRunBalance) whenever the
+    // shop opens or a purchase settles, so players see what they can afford.
+    this.runBalanceLabel = makeText(this.scene, cx, headerY + 60, 'RUN balance: …', 16, UI.goldCss, {
+      fontStyle: 'bold',
+    }).setOrigin(0.5, 0);
+    scrollContainer.add(this.runBalanceLabel);
+    const premTop = headerY + 96;
 
     const buildWideCard = (
       id: string, y: number, title: string, titleColor: string, desc: string,
@@ -4253,6 +4262,11 @@ export class UIManager {
     if (!this.dailyModal) return;
     this.dailyModal.destroy(true);
     this.dailyModal = null;
+  }
+
+  /** Update the shop's RUN hard-currency readout (null = fetch failed). */
+  setRunBalance(balance: number | null): void {
+    this.runBalanceLabel?.setText(balance === null ? 'RUN balance: unavailable' : `RUN balance: ${balance.toLocaleString()}`);
   }
 
   /** Show/refresh the explore-screen special-offer pill; null hides it.

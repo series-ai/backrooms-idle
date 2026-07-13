@@ -75,6 +75,13 @@ async function bootstrap(): Promise<void> {
     };
 
     new Phaser.Game(config);
+
+    // Dev console handle. In the local mock environment the IAP wallet is
+    // in-memory, so from the browser console you can e.g.:
+    //   RUN.iap.hardCurrency = 99999   // set mock RUN balance (mock only)
+    //   await RUN.iap.openStore()      // mock store: +100 per call
+    (globalThis as Record<string, unknown>).RUN = RundotGameAPI;
+
     RundotGameAPI.analytics.recordCustomEvent('game_loaded');
     RundotGameAPI.log('[Main] Backrooms Idle started');
   } catch (error) {

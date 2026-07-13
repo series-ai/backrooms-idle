@@ -283,11 +283,14 @@ export default class GameScene extends Phaser.Scene {
   update(_time: number, delta: number): void {
     if (!this.ui) return;
 
-    // Special-offer pill countdown — once a second is plenty.
+    // Special-offer pill countdown — once a second is plenty. The same beat
+    // re-syncs the shop's RUN wallet readout while that tab is open (catches
+    // console-driven balance changes during local testing).
     this.offerPillAccum += delta;
     if (this.offerPillAccum >= 1000) {
       this.offerPillAccum = 0;
       this.updateOfferPill();
+      if (this.ui.currentTab === 'shop') void this.refreshRunBalance();
     }
 
     // Count down node respawn (real-time, finer than the 1.5s tick).
@@ -571,6 +574,8 @@ export default class GameScene extends Phaser.Scene {
   private handleTabChanged(tab: string): void {
     RundotGameAPI.analytics.recordCustomEvent('tab_switched', { tab });
     haptic('light');
+    // Opening the shop re-syncs the RUN wallet readout.
+    if (tab === 'shop') void this.refreshRunBalance();
   }
 
   private handleRewind(): void {
@@ -834,6 +839,7 @@ export default class GameScene extends Phaser.Scene {
     } catch (err) {
       RundotGameAPI.log(`[Premium] subscription check failed: ${err}`);
     }
+    void this.refreshRunBalance();
     try {
       const t = await RundotGameAPI.requestTimeAsync();
       // Keep a server-clock offset so offer countdowns tick without re-fetching.
@@ -886,6 +892,26 @@ export default class GameScene extends Phaser.Scene {
     void this.saveGame();
   }
 
+  /** Refresh the shop's RUN wallet readout (best-effort; shows a dash on failure). */
+  private async refreshRunBalance(): Promise<void> {
+    try {
+      this.ui.setRunBalance(await RundotGameAPI.iap.getHardCurrencyBalance());
+    } catch (err) {
+      RundotGameAPI.log(`[Premium] balance fetch failed: ${err}`);
+      this.ui.setRunBalance(null);
+    }
+  }
+
+  /** Purchase failed for a real reason (not a user cancel) — say so on screen. */
+  private toastPurchaseFailure(what: string, error: string | undefined): void {
+    RundotGameAPI.log(`[Premium] ${what} failed: ${error}`);
+    this.ui.addLogMessage({
+      type: 'event',
+      message: `Purchase failed: ${error ?? 'unknown error'}`,
+      color: '#FF6666',
+    });
+  }
+
   /** Calendar button: open the daily menu any time (claim or just view). */
   private async openDailyMenu(): Promise<void> {
     if (this.serverTimeOffset === null) {
@@ -922,8 +948,9 @@ export default class GameScene extends Phaser.Scene {
         screenName: 'shop',
         description: def.name,
       });
+      void this.refreshRunBalance();
       if (!res.success) {
-        if (res.error !== 'USER_CANCELLED') RundotGameAPI.log(`[Premium] ${id} spend failed: ${res.error}`);
+        if (res.error !== 'USER_CANCELLED') this.toastPurchaseFailure(id, res.error);
         return;
       }
       this.state.grantIap(def);
@@ -949,8 +976,9 @@ export default class GameScene extends Phaser.Scene {
         screenName: 'shop',
         description: `${pack.shards} Void Shards`,
       });
+      void this.refreshRunBalance();
       if (!res.success) {
-        if (res.error !== 'USER_CANCELLED') RundotGameAPI.log(`[Premium] ${id} spend failed: ${res.error}`);
+        if (res.error !== 'USER_CANCELLED') this.toastPurchaseFailure(id, res.error);
         return;
       }
       const { granted, doubled } = this.state.grantShardPack(pack);
