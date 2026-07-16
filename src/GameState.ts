@@ -287,7 +287,7 @@ export class GameState {
 
   // Preferences
   autoEscape = true;
-  hideMaxedUpgrades = false;
+  hideMaxedUpgrades = true;   // maxed upgrades hidden by default; toggle shows them
   hapticsEnabled = true;
 
   constructor() {
@@ -2090,7 +2090,7 @@ export class GameState {
 
     // Preferences
     this.autoEscape = data.autoEscape ?? true;
-    this.hideMaxedUpgrades = data.hideMaxedUpgrades ?? false;
+    this.hideMaxedUpgrades = data.hideMaxedUpgrades ?? true;
     this.hapticsEnabled = data.hapticsEnabled ?? true;
 
     // Recalculate max HP/Sanity from both void and run upgrades

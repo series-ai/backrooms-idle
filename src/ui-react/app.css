@@ -1,0 +1,957 @@
+/* Component styles — every value references tokens.css. */
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body { height: 100%; }
+
+body {
+  /* position:fixed locks the page to the VISUAL viewport — no browser-toolbar
+     phantom space, no rubber-banding. The game never page-scrolls; inner
+     lists scroll themselves. */
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  background: var(--c-bg) url('/background_default.png') center / cover no-repeat fixed;
+  font-family: var(--font);
+  color: var(--c-text);
+  overscroll-behavior: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* Readability scrim — lives INSIDE #app so it stacks ABOVE the lighting
+   layers (which are z:-1 children of #app) in every mode: default, bright,
+   and dark all get the same 0.55 dim. UI content stacks above it. */
+#app::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  pointer-events: none;
+  z-index: 0;
+}
+
+#app { position: relative; z-index: 1; height: 100%; }
+.app { position: relative; z-index: 1; }
+
+/* Game images are never saveable/draggable — long-press must not open the
+   mobile save-image sheet. Buttons handle all input; images pass through. */
+img {
+  -webkit-user-drag: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  pointer-events: none;
+}
+
+/* Lighting layers under the scrim: bright/dark halls fade over the default. */
+.bg-layer {
+  position: fixed; inset: 0;
+  background-position: center;
+  background-size: cover;
+  pointer-events: none;
+  z-index: -1;
+  transition: opacity 1600ms ease-in-out;
+}
+.bg-bright { background-image: url('/background_bright.png'); }
+.bg-dark { background-image: url('/background_dark.png'); }
+
+/* Runner sprite — sheet geometry (128px frames, 8 cols; run = frames 104-107,
+   i.e. row 13). These are asset-intrinsic constants, not layout values. */
+.runner {
+  /* Sheet is 8 cols of square frames; ALL geometry derives from --frame, so
+     resizing the sprite = changing this one var (background-size rescales the
+     sheet to match). Run cycle = row 13.
+     Measured pixel bounds: the character occupies y 60-128 of each 128px
+     frame (bottom ~53%) — the display box crops the transparent upper air
+     (13 + 0.45 frame offset) so the layout box hugs the visible pixels:
+     no phantom gap above him. */
+  --frame: clamp(9rem, 22dvh, 12rem);
+  width: var(--frame);
+  height: calc(var(--frame) * 0.55);
+  margin: 0 auto;
+  background-repeat: no-repeat;
+  background-size: calc(8 * var(--frame)) auto;
+  background-position: 0 calc(-1 * (var(--row, 13) + 0.45) * var(--frame));
+  image-rendering: pixelated;
+  animation: runner-cycle 0.9s steps(4) infinite;
+}
+
+@keyframes runner-cycle {
+  from { background-position-x: 0; }
+  to { background-position-x: calc(-4 * var(--frame)); }
+}
+.runner-wrap {
+  position: relative;   /* the pill overlays the sprite, inside our bounds */
+  background: none; border: none;
+  display: grid; justify-items: center;
+  margin: 0 auto;
+}
+/* Hype runs FAST. */
+.runner-hyped { animation-duration: 0.4s; }
+/* Tap-to-chat: 3-frame chat cycle (sheet row 10, set via --row). */
+.runner-chat { animation: chat-cycle 1.1s steps(3) infinite; }
+@keyframes chat-cycle {
+  from { background-position-x: 0; }
+  to { background-position-x: calc(-3 * var(--frame)); }
+}
+.hype-pill {
+  position: absolute;
+  top: 100%; left: 50%;
+  translate: -50% -40%;   /* just below his feet; may overlap flavor text */
+  z-index: 2;
+  padding: var(--sp-1) var(--sp-3);
+  background: rgba(0, 0, 0, 0.92);
+  border: var(--border) solid var(--c-gold);
+  border-radius: var(--radius-pill);
+  color: var(--c-gold);
+  font: 700 var(--fs-caption) var(--font);
+  animation: hype-bounce 0.42s ease-in-out infinite alternate;
+}
+/* One-shot on activation: floats up and fades out, then stays invisible. */
+.hype-fading { animation: hype-fade 0.9s ease-out forwards; }
+@keyframes hype-fade {
+  from { opacity: 1; transform: translateY(0) scale(1); }
+  to { opacity: 0; transform: translateY(calc(-4 * var(--sp-2))) scale(1.3); }
+}
+@keyframes hype-bounce {
+  from { transform: translateY(0); }
+  to { transform: translateY(calc(-1 * var(--sp-1))); }
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  height: 100%;
+  max-width: var(--layout-max);
+  margin: 0 auto;
+  /* Tab bar sits at the very bottom — its buttons are tall enough to clear a
+     home indicator; no reserved gutter below them. */
+  padding: calc(var(--safe-top) + var(--sp-2)) var(--sp-3) var(--sp-1);
+}
+
+.card {
+  background: var(--c-card);
+  border: var(--border) solid var(--c-stroke);
+  border-radius: var(--radius);
+}
+
+/* ---- Header ---- */
+.header {
+  display: flex; align-items: center; justify-content: space-between;
+  text-align: center; padding: var(--sp-1) var(--sp-2); gap: var(--sp-2);
+}
+/* min-width:0 is the critical part — without it a flex child refuses to
+   shrink below its content width and shoves its siblings. */
+.header-center { flex: 1; min-width: 0; }
+.header-btn {
+  min-height: var(--tap-min); min-width: var(--tap-min);
+  padding: 0 var(--sp-2);
+  background: #1b1a12;
+  border: var(--border) solid var(--c-stroke);
+  border-radius: var(--radius);
+  color: var(--c-text);
+  font: 700 var(--fs-caption) var(--font);
+}
+.header-btn-ghost { visibility: hidden; }
+/* Header buttons sit in a single row — a stacked column doubled the header's
+   height on phones. */
+.header-col { display: flex; gap: var(--sp-1); }
+.header-title {
+  font-size: var(--fs-title);
+  font-weight: 700;
+  color: var(--c-parchment);
+  text-shadow: 0 3px 6px rgba(0, 0, 0, 0.9);
+}
+.header-floor { font-size: var(--fs-caption); font-weight: 700; color: #8888cc; }
+
+/* ---- Descend banner ---- */
+.descend {
+  position: relative;
+  overflow: hidden;
+  height: var(--banner-h);
+  border: var(--border) solid var(--c-green-stroke);
+  border-radius: var(--radius-pill);
+  background: var(--c-green-track);
+  font: 700 var(--fs-caption) var(--font);
+  color: #d6e8c0;
+  transition: height 300ms ease;
+}
+/* Always a thin strip — no text lives in this bar. */
+.descend-slim { height: clamp(0.5rem, 1.2dvh, 0.75rem); }
+.descend-fill {
+  position: absolute; inset: 0 auto 0 0;
+  background: var(--c-green-fill);
+  transition: width 400ms ease;
+}
+/* Ready: full and pulsing — tap it (or the ▶ card) to descend. */
+.descend-ready { animation: descend-glow 1s ease-in-out infinite alternate; }
+@keyframes descend-glow {
+  from { border-color: var(--c-green-stroke); }
+  to { border-color: #b8e080; box-shadow: 0 0 8px rgba(143, 174, 94, 0.7); }
+}
+
+/* ---- Content region ----
+   The explore screen is a STAGE: it always fits the viewport whole, no
+   scrolling — its pieces compress with screen height instead. Scrolling is
+   for list screens only. */
+.content { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.content-scroll { overflow-y: auto; }
+.content-stage { overflow: hidden; }
+
+.explore {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  flex: 1;
+  min-height: 0;
+  gap: clamp(var(--sp-1), 1dvh, var(--sp-3));
+}
+
+.flavor {
+  /* FIXED height (exactly 2 caption lines), clamped — the status text can
+     never resize or shift the layout, no matter how long the message is. */
+  height: calc(var(--fs-caption) * 2.8);
+  text-align: center;
+  font-size: var(--fs-caption);
+  line-height: 1.4;
+  font-weight: 700;
+  text-shadow: 0 2px 4px rgba(0, 0, 0, 0.9);
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+/* The stage row absorbs leftover height; the node ART shrinks under pressure
+   so the fixed-size elements below (bars, base, noise, team) ALWAYS fit —
+   nothing gets clipped on short screens. */
+.stage-row { display: flex; align-items: stretch; gap: var(--sp-2); flex: 1; min-height: 0; }
+
+/* Icon + arrow only — thin columns; the tap target is the full card height. */
+.nav-card {
+  flex: 0 0 var(--tap-min);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-1);
+  background: var(--c-box);
+  border: var(--border) solid var(--c-stroke);
+  border-radius: var(--radius);
+  color: var(--c-text);
+}
+.nav-card:disabled { opacity: 0.4; }
+/* Fill the row's height up to a 400px cap, centered when capped. */
+.nav-card { height: 100%; max-height: 25rem; align-self: center; min-height: calc(2 * var(--tap-min)); }
+/* NEW floor ready: the whole descend button goes green until you've gone down;
+   it re-arms each time the next floor's exploration completes. */
+.nav-ready {
+  background: var(--c-green-deep);
+  border-color: var(--c-green-stroke);
+  animation: descend-glow 1s ease-in-out infinite alternate;
+}
+.nav-ready .nav-tri { color: #b8e080; }
+.nav-icon { width: var(--sp-6); height: var(--sp-6); object-fit: contain; }
+.nav-tri { color: var(--c-green); font-size: var(--fs-heading); font-weight: 700; }
+
+.node {
+  position: relative;   /* anchors floating damage numbers */
+  flex: 2.2;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2);
+  background: transparent;
+  border: none;
+  touch-action: manipulation;
+}
+/* Art wrapper: takes ALL leftover column height. The icon absolutely fills
+   it with object-fit: contain — mathematically incapable of cropping or
+   overflowing, on any browser, at any size. (height:100% in a shrinkable
+   flex chain resolves to auto on mobile browsers and overflowed — never
+   size stage art with percentage heights.) */
+.node-art {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  max-width: min(70vw, 18rem);
+  align-self: center;
+}
+.node-icon {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  filter: drop-shadow(0 6px 12px rgba(0,0,0,0.7));
+}
+.node-entity { color: var(--c-danger); font-weight: 700; font-size: var(--fs-body); }
+/* Emoji fallback when an entity has no PNG art — same absolute fill. */
+span.entity-icon { display: grid; place-items: center; font-size: calc(var(--fs-display) * 2); }
+
+/* Node hit — ported from the Phaser build: quick squash + DAMPED rotational
+   wobble (-5° → 3° → -1.5° → 0), each swing smaller, settling upright. */
+.node-pop { animation: node-pop 320ms ease-in-out; }
+@keyframes node-pop {
+  0% { transform: scale(0.93) rotate(0deg); }
+  25% { transform: scale(0.96) rotate(-5deg); }
+  50% { transform: scale(1.02) rotate(3deg); }
+  75% { transform: scale(1.005) rotate(-1.5deg); }
+  100% { transform: scale(1) rotate(0deg); }
+}
+
+/* Floating damage numbers — rise and fade above the node art. */
+.float-hit {
+  position: absolute;
+  top: 30%;
+  transform: translateX(-50%);
+  font: 700 var(--fs-emphasis) var(--font);
+  color: #fff;
+  text-shadow: 0 2px 4px rgba(0, 0, 0, 0.9);
+  pointer-events: none;
+  animation: float-up 0.8s ease-out forwards;
+  z-index: 2;
+}
+.float-crit { color: var(--c-gold); font-size: var(--fs-heading); }
+.float-super { color: var(--c-purple); font-size: var(--fs-title); }
+@keyframes float-up {
+  from { opacity: 1; translate: 0 0; }
+  to { opacity: 0; translate: 0 calc(-8 * var(--sp-unit) * 4); }
+}
+
+/* Moth collectible — drifts right-to-left across the stage on a wavy path. */
+.moth {
+  position: absolute;
+  left: 0;
+  z-index: 6;
+  width: calc(2 * var(--tap-min));
+  height: calc(2 * var(--tap-min));
+  background: none; border: none;
+  animation: moth-fly linear forwards;   /* duration set inline per flight */
+  pointer-events: auto;
+}
+.moth-img {
+  width: 100%; height: 100%;
+  object-fit: contain;
+  animation: moth-waver 1.1s ease-in-out infinite alternate;
+}
+@keyframes moth-fly {
+  from { left: 100%; }
+  to { left: -12%; }
+}
+@keyframes moth-waver {
+  from { transform: translateY(0) rotate(-8deg); }
+  to { transform: translateY(calc(-6 * var(--sp-unit))) rotate(8deg); }
+}
+
+/* ---- Bars ---- */
+.bar {
+  position: relative;
+  width: 100%;
+  height: var(--bar-h);
+  border-radius: var(--radius-pill);
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.bar-amber { background: var(--c-amber-deep); border: var(--border) solid #8a7434; }
+.bar-noise { background: #141410; border: var(--border) solid var(--c-stroke-dim); }
+.bar-entity { background: #1a0a1a; border: var(--border) solid #663366; }
+.bar-slim { height: clamp(0.5rem, 1.2dvh, 0.75rem); flex: 0 0 auto; }
+.bar-fill { position: absolute; inset: 0 auto 0 0; transition: width 300ms ease; }
+.bar-fill-amber { background: var(--c-amber); }
+.bar-fill-green { background: #66aa66; }
+.bar-fill-hot { background: #ff8844; }
+.bar-fill-danger { background: #ff4444; }
+.bar-text {
+  position: relative;
+  font-size: var(--fs-micro);
+  font-weight: 700;
+  color: #fff;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
+}
+
+/* Chip row: offer left, base right — one slim line at the stage top. */
+.chip-row { display: flex; justify-content: space-between; align-items: center; }
+.chip-group { display: flex; gap: var(--sp-1); align-items: center; }
+.base-chip {
+  padding: var(--sp-1) var(--sp-3);
+  background: var(--c-box);
+  border: var(--border) solid var(--c-stroke-dim);
+  border-radius: var(--radius-pill);
+  color: var(--c-gold);
+  font: 700 var(--fs-caption) var(--font);
+}
+/* Pet chips: icon-only; tap for the pet's buff details. */
+.pet-chip {
+  min-width: var(--tap-min);
+  min-height: 1.75rem;
+  padding: 0 var(--sp-1);
+  background: var(--c-box);
+  border: var(--border) solid #6a5a2a;
+  border-radius: var(--radius-pill);
+  font-size: var(--fs-body);
+  display: grid;
+  place-items: center;
+}
+.pet-chip-icon { width: 1.5rem; height: 1.5rem; object-fit: contain; }
+.modal-pet-icon { width: 4rem; height: 4rem; object-fit: contain; margin: 0 auto; font-size: var(--fs-display); }
+
+.noise-row { display: flex; align-items: center; gap: var(--sp-2); }
+.noise-spk { font-size: var(--fs-caption); }
+.noise-row .bar { flex: 1; }
+
+
+/* ---- Resource bar ---- */
+.resource-bar {
+  display: flex; align-items: center; justify-content: center; gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+}
+.resource-icon { width: var(--sp-6); height: var(--sp-6); object-fit: contain; }
+.resource-name { font-size: var(--fs-body); font-weight: 700; color: var(--c-text); }
+.resource-count { font-size: var(--fs-emphasis); font-weight: 700; color: var(--c-gold); }
+
+/* ---- Tab bar ---- */
+.tabs { display: flex; flex-wrap: wrap; gap: var(--sp-1); }
+.tab {
+  flex: 1 1 22%;
+  display: flex; align-items: center; justify-content: center; gap: var(--sp-1);
+  min-height: var(--tap-min);
+  background: rgba(24, 23, 16, 0.95);
+  border: var(--border) solid var(--c-stroke-dim);
+  border-radius: var(--radius);
+  color: var(--c-text-faint);
+  font: 700 var(--fs-caption) var(--font);
+}
+.tab-active { background: rgba(58, 49, 15, 0.85); border-color: var(--c-gold); color: var(--c-gold-soft); }
+.tab { position: relative; }
+/* Red notification pip — something is waiting on this tab. */
+.tab-pip {
+  position: absolute;
+  top: calc(-1 * var(--sp-1));
+  right: calc(-1 * var(--sp-1));
+  min-width: 1.125rem;
+  height: 1.125rem;
+  display: grid; place-items: center;
+  background: #ff3030;
+  border: var(--border) solid #000;
+  border-radius: var(--radius-pill);
+  color: #fff;
+  font: 700 var(--fs-micro) var(--font);
+}
+.tab-icon { width: var(--sp-5); height: var(--sp-5); object-fit: contain; }
+
+/* ---- Stubs & modals ---- */
+.stub { margin: auto; padding: var(--sp-5); text-align: center; display: grid; gap: var(--sp-3); }
+.stub-title { font-size: var(--fs-heading); color: var(--c-gold); font-weight: 700; }
+.stub-dim { color: var(--c-text-dim); font-size: var(--fs-caption); }
+
+.modal-overlay {
+  position: fixed; inset: 0; z-index: 10;
+  background: rgba(0, 0, 0, 0.72);
+  display: grid; place-items: center;
+  padding: var(--sp-4);
+}
+.modal {
+  background: var(--c-card-solid);
+  border-color: var(--c-gold);
+  width: 100%; max-width: var(--layout-max);
+  padding: var(--sp-5);
+  display: grid; gap: var(--sp-3); text-align: center;
+}
+.modal-title { font-size: var(--fs-title); color: var(--c-gold); text-shadow: 0 3px 6px rgba(0,0,0,0.9); }
+.modal-dim { color: var(--c-text-dim); font-size: var(--fs-body); }
+.modal-stat {
+  display: grid; gap: var(--sp-1);
+  background: var(--c-box);
+  border: var(--border) solid var(--c-stroke-dim);
+  border-radius: var(--radius-sm);
+  padding: var(--sp-3);
+}
+.modal-stat-label { font-size: var(--fs-caption); color: var(--c-text-faint); font-weight: 700; }
+.modal-stat-value { font-size: var(--fs-display); color: #ffd700; font-weight: 700; }
+
+.btn {
+  min-height: var(--tap-min);
+  border-radius: var(--radius);
+  border: var(--border) solid var(--c-stroke);
+  background: #1b1a12;
+  color: #e8e2cf;
+  font: 700 var(--fs-emphasis) var(--font);
+  padding: 0 var(--sp-5);
+}
+.btn-green { background: var(--c-green-deep); border-color: var(--c-green-stroke); color: #d6e8c0; }
+.btn-small { align-self: flex-end; font-size: var(--fs-caption); padding: 0 var(--sp-3); }
+/* Disabled = the BUTTON grays out, the content stays fully readable —
+   players need to read exactly what's required to unlock/afford it. */
+.btn:disabled { opacity: 1; }
+.btn-buy:disabled {
+  background: #26242e;
+  border-color: #45435a;
+  color: var(--c-text-dim);
+}
+.btn-buy {
+  display: flex; align-items: center; justify-content: center; gap: var(--sp-2);
+  width: 100%;
+  background: linear-gradient(#8a7bff, #5440c8);
+  border-color: rgba(168, 155, 255, 0.9);
+  color: #fff;
+  font-size: var(--fs-body);
+}
+.btn-gold { background: linear-gradient(#8a6a1a, #5c4610); border-color: var(--c-gold); }
+
+/* ---- Toast ---- */
+.toast {
+  position: fixed;
+  left: 50%; transform: translateX(-50%);
+  bottom: calc(var(--safe-bottom) + var(--sp-6) * 2);
+  z-index: 20;
+  background: rgba(0, 0, 0, 0.88);
+  border: var(--border) solid var(--c-stroke);
+  border-radius: var(--radius);
+  padding: var(--sp-2) var(--sp-4);
+  font-size: var(--fs-body); font-weight: 700;
+  max-width: calc(100% - var(--sp-6));
+  text-align: center;
+}
+
+/* ---- List screens (upgrades / shop) ---- */
+.list { display: flex; flex-direction: column; gap: var(--sp-1); padding-bottom: var(--sp-4); }
+.row-card {
+  display: grid; gap: var(--sp-2);
+  background: var(--c-card);
+  border: var(--border) solid var(--c-stroke-dim);
+  border-radius: var(--radius);
+  padding: var(--sp-3);
+}
+.row-card-maxed { opacity: 0.55; }
+.row-head { display: flex; align-items: center; gap: var(--sp-2); }
+.row-icon { width: var(--sp-6); height: var(--sp-6); object-fit: contain; font-size: var(--fs-heading); }
+.row-name { flex: 1; font-size: var(--fs-emphasis); font-weight: 700; color: var(--c-parchment); }
+.row-lvl { font-size: var(--fs-caption); color: #c8a8ff; font-weight: 700; }
+.row-desc { font-size: var(--fs-body); color: var(--c-text-dim); }
+.row-maxed { text-align: center; font-weight: 700; color: #c8a8ff; padding: var(--sp-2); }
+.row-locked { text-align: center; color: var(--c-text-faint); font-size: var(--fs-body); padding: var(--sp-2); }
+.row-cost-icon { width: var(--sp-5); height: var(--sp-5); object-fit: contain; }
+
+/* ---- Shop ---- */
+.shop-header {
+  display: flex; justify-content: space-between; align-items: center; gap: var(--sp-2);
+  font-size: var(--fs-body);
+}
+.shop-shards { display: flex; align-items: center; gap: var(--sp-1); color: var(--c-purple); font-weight: 700; }
+.shop-run { color: var(--c-gold); font-weight: 700; }
+.premium-card { border-color: var(--c-gold); }
+.premium-ice { border-color: var(--c-green-stroke); }
+.name-purple { color: var(--c-purple); }
+.name-green { color: #9fd06a; }
+.name-gold { color: var(--c-gold); }
+.pack-note { text-align: center; color: var(--c-gold); font-weight: 700; font-size: var(--fs-body); }
+.pack-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-2); }
+.pack-card { border-color: #6a4a8a; }
+.pack-head { display: flex; align-items: center; gap: var(--sp-1); font-weight: 700; font-size: var(--fs-body); }
+.pack-bonus { margin-left: auto; color: var(--c-gold); font-size: var(--fs-caption); }
+
+/* ---- Daily reward ---- */
+.daily-track { display: flex; gap: var(--sp-1); justify-content: center; }
+.daily-slot {
+  display: grid; gap: var(--sp-1); place-items: center;
+  min-width: var(--sp-6); padding: var(--sp-1);
+  background: rgba(26, 25, 18, 1);
+  border: var(--border) solid var(--c-stroke-dim);
+  border-radius: var(--radius-sm);
+}
+.daily-today { background: rgba(58, 49, 15, 1); border-color: var(--c-gold); }
+.daily-done { border-color: var(--c-green-fill); color: #7ca860; }
+.daily-day { font-size: var(--fs-caption); color: var(--c-text-faint); }
+.daily-today .daily-day { color: var(--c-gold); }
+.daily-amt { font-size: var(--fs-emphasis); font-weight: 700; }
+.daily-payout { font-size: var(--fs-display); font-weight: 700; color: var(--c-purple); }
+.daily-claimed { font-size: var(--fs-heading); font-weight: 700; color: #9fd06a; }
+
+/* ---- Gear / items / void ---- */
+.btn-row { display: flex; gap: var(--sp-2); }
+.btn-row .btn { flex: 1; padding: 0 var(--sp-2); font-size: var(--fs-body); }
+.btn-danger { background: #2a1210; border-color: #aa4444; color: #ffaaaa; }
+.btn-armed { border-color: var(--c-danger); color: var(--c-danger); }
+.item-row { grid-template-columns: auto 1fr auto auto; display: grid; align-items: center; gap: var(--sp-2); }
+
+/* ---- Offer pill ----
+   IN FLOW at the top of the explore stage — a slim one-line chip. Overlays
+   kept covering game elements on small screens; nothing floats anymore. */
+.offer-pill {
+  align-self: center;
+  /* Pulse grows INWARD (right/down) — the left edge never crosses the stage
+     boundary, so nothing gets clipped. */
+  transform-origin: left center;
+  display: flex; align-items: center; gap: var(--sp-1);
+  padding: var(--sp-1) var(--sp-3);
+  background: rgba(42, 36, 16, 0.95);
+  border: var(--border) solid var(--c-gold);
+  border-radius: var(--radius-pill);
+  animation: offer-pulse 1.4s ease-in-out infinite;
+}
+.offer-title { color: var(--c-gold); font-weight: 700; font-size: var(--fs-caption); }
+.offer-timer { color: var(--c-text); font-size: var(--fs-caption); }
+@keyframes offer-pulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.05); }
+}
+
+/* ---- Modals: sections & stat rows ---- */
+.modal-scroll { max-height: calc(100dvh - var(--sp-6) * 2); overflow-y: auto; }
+.modal-section { font-size: var(--fs-heading); color: var(--c-gold); margin-top: var(--sp-2); }
+.modal-section-danger { color: #ff8888; }
+.modal-keep { color: #9fd06a; font-size: var(--fs-body); line-height: 1.5; }
+.btn-small-text { font-size: var(--fs-caption); color: #b87878; }
+.stat-rows { display: grid; gap: var(--sp-2); text-align: left; }
+.stat-row { display: flex; justify-content: space-between; gap: var(--sp-3); }
+.stat-label { color: var(--c-text-dim); font-size: var(--fs-body); }
+.stat-value { color: var(--c-parchment); font-weight: 700; font-size: var(--fs-body); text-align: right; }
+
+/* ---- Phantom (dark phases): faint entity — tap to stare it down. ---- */
+.phantom {
+  position: absolute;
+  z-index: 6;
+  width: calc(3 * var(--tap-min));
+  height: calc(3 * var(--tap-min));
+  background: none; border: none;
+  animation: phantom-fade 6s ease-in-out forwards;
+}
+.phantom-img { width: 100%; height: 100%; object-fit: contain; filter: grayscale(0.6) brightness(1.4); }
+span.phantom-img { display: grid; place-items: center; font-size: var(--fs-display); }
+@keyframes phantom-fade {
+  0% { opacity: 0; }
+  20% { opacity: 0.55; }
+  80% { opacity: 0.55; }
+  100% { opacity: 0; }
+}
+
+/* ---- Dust motes (bright phases) — hanging in the light, not snowing.
+   Each mote hovers near its own spot: a slow diagonal drift with sway and a
+   twinkle, then fades and repeats. ---- */
+.dust { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+.mote {
+  position: absolute;
+  width: 0.25rem; height: 0.25rem;
+  border-radius: var(--radius-pill);
+  background: rgba(255, 242, 192, 0.75);
+  opacity: 0;
+  animation: mote-float ease-in-out infinite;
+}
+.mote-0 { left: 14%; top: 22%; animation-duration: 8s; animation-delay: 0s; }
+.mote-1 { left: 32%; top: 55%; animation-duration: 11s; animation-delay: 2.2s; }
+.mote-2 { left: 47%; top: 30%; animation-duration: 9s; animation-delay: 4.5s; }
+.mote-3 { left: 61%; top: 62%; animation-duration: 12s; animation-delay: 1.1s; }
+.mote-4 { left: 76%; top: 40%; animation-duration: 10s; animation-delay: 3.4s; }
+.mote-5 { left: 88%; top: 25%; animation-duration: 13s; animation-delay: 5.6s; }
+@keyframes mote-float {
+  0% { transform: translate(0, 0); opacity: 0; }
+  20% { opacity: 0.8; }
+  40% { transform: translate(0.5rem, -0.4rem); }
+  55% { opacity: 0.35; }
+  70% { transform: translate(-0.3rem, -1rem); opacity: 0.7; }
+  100% { transform: translate(0.4rem, -1.6rem); opacity: 0; }
+}
+
+/* ---- Companion runners: smaller, a step behind the leader. ---- */
+.runner-line { display: flex; align-items: flex-end; justify-content: center; gap: var(--sp-1); }
+.runner-companion {
+  --frame: clamp(5.5rem, 13dvh, 7rem);
+  opacity: 0.9;
+}
+
+/* ---- Web presentation ----
+   On wide screens the play column is a DELIBERATE framed stage, not a phone
+   layout floating in a void: visible edges, its own backdrop, and the halls
+   art vignetting away beside it. */
+@media (min-width: 768px) {
+  .app {
+    border-inline: var(--border) solid var(--c-stroke);
+    background: rgba(13, 12, 7, 0.45);
+    box-shadow: 0 0 60px rgba(0, 0, 0, 0.8);
+    padding-inline: var(--sp-5);
+  }
+}
+
+/* ---- FitText: one line, shrinks via transform, layout box never moves. ---- */
+.fit-text {
+  max-width: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  height: calc(var(--fs-title) * 1.25);   /* fixed slot regardless of scale */
+}
+.fit-text span { display: inline-block; transform-origin: center; }
+
+/* ---- Scrollbars (web) — slim, themed, no OS-default chrome. ---- */
+.content-scroll,
+.modal-scroll {
+  scrollbar-width: thin;                          /* Firefox */
+  scrollbar-color: var(--c-stroke) transparent;
+}
+.content-scroll::-webkit-scrollbar,
+.modal-scroll::-webkit-scrollbar { width: 0.375rem; }
+.content-scroll::-webkit-scrollbar-track,
+.modal-scroll::-webkit-scrollbar-track { background: transparent; }
+.content-scroll::-webkit-scrollbar-thumb,
+.modal-scroll::-webkit-scrollbar-thumb {
+  background: var(--c-stroke);
+  border-radius: var(--radius-pill);
+}
+.content-scroll::-webkit-scrollbar-thumb:hover,
+.modal-scroll::-webkit-scrollbar-thumb:hover { background: var(--c-gold); }
+
+/* ---- Upgrades: dense mobile rows — icon | name+desc | compact buy. ---- */
+.upg-row {
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2);
+}
+.upg-mid { min-width: 0; display: grid; gap: calc(var(--sp-1) / 2); }
+.upg-mid .row-name { font-size: var(--fs-body); }
+.upg-mid .row-lvl { font-weight: 400; }
+.upg-desc {
+  font-size: var(--fs-caption);
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+.upg-buy {
+  width: auto;
+  min-width: 4.5rem;
+  min-height: var(--tap-min);
+  display: grid;
+  place-items: center;
+  gap: 0;
+  padding: var(--sp-1) var(--sp-2);
+  font-size: var(--fs-caption);
+}
+.upg-buy .row-cost-icon { width: 2rem; height: 2rem; }
+.upg-maxed { color: #c8a8ff; font: 700 var(--fs-caption) var(--font); padding: 0 var(--sp-2); }
+.upg-locked { grid-column: 1 / -1; padding: var(--sp-1); }
+
+.modal-title-sm { font-size: var(--fs-heading); }
+
+/* Upgrade popup: the COST resource icon on the buy button is big and
+   unmistakable — you should never squint at what you're paying with. */
+.modal-cost-icon { width: 3rem; height: 3rem; object-fit: contain; }
+
+/* Sticky shop balances — pinned while the list scrolls beneath. */
+.shop-header-sticky {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: rgba(13, 12, 7, 0.96);
+  border: var(--border) solid var(--c-stroke-dim);
+  border-radius: var(--radius);
+  padding: var(--sp-2) var(--sp-3);
+}
+
+/* ---- REWIND hero — the run-ending decision, styled like one. ---- */
+.rewind-hero {
+  display: grid;
+  gap: var(--sp-2);
+  text-align: center;
+  padding: var(--sp-4);
+  background: linear-gradient(rgba(40, 20, 60, 0.9), rgba(16, 8, 26, 0.95));
+  border: calc(1.5 * var(--border)) solid #663366;
+  border-radius: var(--radius);
+}
+.rewind-ready { animation: rewind-glow 1.6s ease-in-out infinite alternate; }
+@keyframes rewind-glow {
+  from { border-color: #663366; }
+  to { border-color: var(--c-purple); box-shadow: 0 0 16px rgba(204, 136, 255, 0.45); }
+}
+.rewind-title {
+  font: 700 var(--fs-title) var(--font);
+  color: var(--c-purple);
+  text-shadow: 0 3px 6px rgba(0, 0, 0, 0.9);
+}
+.rewind-reward { display: flex; align-items: center; justify-content: center; gap: var(--sp-2); }
+.rewind-frag-icon { width: 3.5rem; height: 3.5rem; object-fit: contain; }
+.rewind-amount {
+  font: 700 calc(1.4 * var(--fs-display)) var(--font);
+  color: var(--c-purple);
+  text-shadow: 0 3px 8px rgba(0, 0, 0, 0.9);
+}
+.rewind-reward-label { font: 700 var(--fs-caption) var(--font); color: var(--c-text-dim); letter-spacing: 0.1em; }
+.btn-rewind { background: linear-gradient(#6a3a9a, #3a1a5a); border-color: var(--c-purple); }
+
+/* Shard packs: compact tiles matching the dense row scale. */
+.pack-card { padding: var(--sp-2); gap: var(--sp-1); }
+.pack-head { font-size: var(--fs-caption); }
+.pack-head .row-icon { width: var(--sp-5); height: var(--sp-5); font-size: var(--fs-body); }
+.pack-card .btn { min-height: var(--tap-min); font-size: var(--fs-caption); padding: 0 var(--sp-2); }
+
+/* ---- Shop chooser + sub-shop switches ---- */
+.shop-choice {
+  position: relative;   /* anchors the notification pip */
+  display: grid;
+  justify-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-5) var(--sp-4);
+  background: var(--c-card);
+  border: var(--border) solid #6a4a8a;
+  border-radius: var(--radius);
+  color: var(--c-text);
+  font-family: var(--font);
+}
+.shop-choice-gold { border-color: var(--c-gold); }
+.shop-choice-icon { width: 3rem; height: 3rem; object-fit: contain; }
+.shop-choice-emoji { font-size: 2.5rem; color: var(--c-gold); display: grid; place-items: center; }
+.shop-choice-name { font-size: var(--fs-heading); font-weight: 700; }
+
+.shop-switch {
+  display: flex; align-items: center; gap: var(--sp-1);
+  min-height: var(--tap-min);
+  padding: 0 var(--sp-2);
+  background: none;
+  border: none;
+  border-bottom: var(--border) solid transparent;
+  color: var(--c-text-dim);
+  font: 700 var(--fs-body) var(--font);
+}
+.shop-switch b { color: var(--c-purple); }
+.shop-switch:last-child { color: var(--c-gold); }
+.shop-switch-active { border-bottom-color: var(--c-gold); color: var(--c-parchment); }
+
+/* ---- Node grade tags (MINT / QUALITY / EASY ACCESS) ----
+   Fixed-height slot above the art — appearing/disappearing never shifts. */
+.node-tags {
+  height: calc(var(--fs-caption) + var(--sp-2));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+}
+.node-tag {
+  font: 700 var(--fs-caption) var(--font);
+  text-shadow: 0 2px 4px rgba(0, 0, 0, 0.95);
+  animation: tag-pulse 0.6s ease-in-out infinite alternate;
+}
+.tag-mint { color: #5fffc4; }
+.tag-quality { color: #ffa500; }
+.tag-easy { color: #66ccff; }
+@keyframes tag-pulse {
+  from { transform: scale(1); }
+  to { transform: scale(1.1); }
+}
+
+/* Web: roomier buy buttons on the dense rows (mobile keeps them compact). */
+@media (min-width: 768px) {
+  .upg-buy {
+    min-width: 9rem;
+    grid-auto-flow: column;
+    gap: var(--sp-2);
+    font-size: var(--fs-body);
+    padding: var(--sp-2) var(--sp-3);
+  }
+  .upg-buy .row-cost-icon { width: 2.5rem; height: 2.5rem; }
+}
+
+/* ---- Gear slot groups ---- */
+.slot-group { display: grid; gap: var(--sp-1); }
+.slot-header {
+  display: flex; align-items: center; gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-2) 0;
+}
+.slot-icon { font-size: var(--fs-body); }
+.slot-label { font: 700 var(--fs-caption) var(--font); color: var(--c-text-dim); letter-spacing: 0.08em; }
+.slot-equipped { margin-left: auto; font-size: var(--fs-caption); color: var(--c-gold-soft); }
+.slot-empty { color: var(--c-text-faint); }
+
+/* Loadout totals line (gear screen). */
+.loadout-line {
+  text-align: center;
+  font-size: var(--fs-caption);
+  color: #9fd0a0;
+  padding: 0 var(--sp-2);
+}
+
+/* ---- Gear: loadout slot boxes / bag / craft section ----
+   Same design language as everything else: olive box fills, token strokes,
+   rounded corners, caption type — no raw grays. ---- */
+/* Phones: 3+2 over two rows so boxes stay big enough; one row on web. */
+.slot-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--sp-1); justify-items: center; }
+.slot-col { width: 100%; max-width: 8rem; }
+@media (min-width: 768px) {
+  .slot-grid { grid-template-columns: repeat(5, 1fr); }
+}
+.slot-col { display: grid; gap: var(--sp-1); justify-items: center; align-content: start; }
+.slot-box {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 1;
+  display: grid; place-items: center;
+  background: var(--c-box);
+  border: var(--border) solid var(--c-stroke-dim);
+  border-radius: var(--radius-sm);
+}
+.slot-box:not(:disabled) { color: inherit; }
+.slot-art {
+  width: 82%; height: 82%;
+  object-fit: contain;
+  filter: drop-shadow(0 3px 6px rgba(0, 0, 0, 0.6));
+  font-size: var(--fs-display);
+  display: grid; place-items: center;
+}
+.slot-dash { color: var(--c-text-faint); font-size: var(--fs-emphasis); }
+.slot-name {
+  min-height: calc(var(--fs-micro) * 2.4);
+  font-size: var(--fs-micro);
+  color: var(--c-text-dim);
+  text-align: center;
+  line-height: 1.2;
+}
+.gear-meta {
+  display: flex; align-items: center; justify-content: center;
+  font-size: var(--fs-body); color: var(--c-text);
+}
+.gear-meta b { color: var(--c-gold-soft); }
+.bag-label { text-align: center; font: 700 var(--fs-caption) var(--font); color: var(--c-text-dim); letter-spacing: 0.06em; }
+.bag-grid { display: grid; gap: var(--sp-2); }
+.bag-box { max-width: 5.5rem; margin: 0 auto; width: 100%; }
+
+.craft-divider {
+  display: flex; align-items: center; gap: var(--sp-2);
+  color: var(--c-parchment); font: 700 var(--fs-caption) var(--font);
+  letter-spacing: 0.08em;
+  margin-top: var(--sp-2);
+}
+.craft-divider::before, .craft-divider::after { content: ''; flex: 1; height: 1px; background: var(--c-stroke-dim); }
+/* 2-up on phones, fluid — cards never cramp below ~10.5rem. */
+.craft-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(10.5rem, 1fr)); gap: var(--sp-2); }
+.craft-card { align-content: start; }
+.craft-card-locked { opacity: 0.55; }
+.craft-head { display: flex; align-items: center; gap: var(--sp-1); }
+.craft-head .row-name { flex: 1; font-size: var(--fs-body); }
+.craft-slot-tag { font-size: var(--fs-micro); color: var(--c-purple); font-weight: 700; letter-spacing: 0.06em; }
+.craft-btn {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: center;
+  gap: var(--sp-2);
+  font-size: var(--fs-caption);
+  min-height: var(--tap-min);
+}
+.craft-cost { display: inline-flex; align-items: center; gap: calc(var(--sp-1) / 2); font-weight: 700; }
+/* Oversized relative to the text, but margin-less so they ride within the
+   button's fixed 44px height without growing it. */
+.craft-cost-icon { width: 2rem; height: 2rem; object-fit: contain; margin-block: calc(-1 * var(--sp-2)); }
+.cost-ok { color: #9fd06a; }
+.cost-short { color: #ff8888; }
+/* On a disabled (can't-afford) upgrade button the whole thing is already
+   dimmed — plain white reads better than red-on-dim. */
+.upg-buy:disabled .cost-short, .btn:disabled .cost-short { color: var(--c-text-dim); }
+.craft-locked-btn { display: grid; place-items: center; color: var(--c-gold); font-size: var(--fs-caption); min-height: var(--tap-min); }

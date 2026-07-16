@@ -1,0 +1,86 @@
+/* ==========================================================================
+   DESIGN TOKENS — the ONLY place layout/type/color values may be defined.
+   A hardcoded value in a component is a review-blocking defect (MIGRATION.md).
+   Mobile-first: authored for ~390px logical width, fluid to --layout-max.
+   ========================================================================== */
+
+:root {
+  /* ---- Palette (ported from the mockup language) ---- */
+  --c-bg: #111111;
+  --c-card: rgba(13, 12, 7, 0.85);
+  --c-card-solid: #141410;
+  --c-box: rgba(17, 16, 10, 0.85);
+  --c-stroke: #45412f;
+  --c-stroke-dim: #3d3a2c;
+  --c-gold: #ffd24a;
+  --c-gold-soft: #ffe28a;
+  --c-parchment: #ede4cf;
+  --c-text: #d8d2c0;
+  --c-text-dim: #aaa692;
+  --c-text-faint: #888372;
+  --c-green: #8fae5e;
+  --c-green-deep: #1c2f14;
+  --c-green-stroke: #6f8f4c;
+  --c-green-fill: #3f6a2a;
+  --c-green-track: #131c0d;
+  --c-amber: #ffcc44;
+  --c-amber-deep: #201709;
+  --c-danger: #ff6666;
+  --c-purple: #cc88ff;
+
+  /* ---- Type scale ----
+     FLUID DESIGN MODE: sizes interpolate continuously with viewport height
+     via clamp(floor, preferred, ceiling) — every device resolution lands on
+     a correct value; there are no breakpoints to fall between. Floors are
+     hard legibility minimums and never go lower. */
+  --fs-caption: 0.8125rem;   /* 13px — labels, badges only (fixed floor) */
+  --fs-body: clamp(0.875rem, 1.9dvh, 0.9375rem);
+  --fs-emphasis: clamp(1rem, 2.2dvh, 1.0625rem);
+  --fs-heading: clamp(1.125rem, 2.6dvh, 1.25rem);
+  --fs-title: clamp(1.125rem, 2.9dvh, 1.625rem);
+  --fs-display: clamp(1.5rem, 4.2dvh, 2rem);
+  --fs-micro: 0.75rem;       /* 12px — INSIDE thin bars only, never body text */
+
+  /* ---- Spacing (fluid unit: breathes with screen height, 3→4px) ---- */
+  --sp-unit: clamp(0.1875rem, 0.5dvh, 0.25rem);
+  --sp-1: var(--sp-unit);
+  --sp-2: calc(2 * var(--sp-unit));
+  --sp-3: calc(3 * var(--sp-unit));
+  --sp-4: calc(4 * var(--sp-unit));
+  --sp-5: calc(6 * var(--sp-unit));
+  --sp-6: calc(8 * var(--sp-unit));
+
+  /* ---- Bars & banner (fluid) ---- */
+  --bar-h: clamp(1rem, 2.2dvh, 1.5rem);
+  /* Exploration/descend banner — stays SLIM on phones even in its labeled
+     DESCEND! state; full width keeps it easy to tap. */
+  --banner-h: clamp(1.375rem, 3dvh, 2.5rem);
+
+  /* ---- Shape & interaction ---- */
+  --radius: 0.875rem;
+  --radius-sm: 0.625rem;
+  --radius-pill: 999px;
+  --tap-min: 2.75rem;        /* 44px minimum touch target */
+  --border: 2px;
+
+  /* ---- Layout ---- */
+  --layout-max: 32.5rem;     /* 520px max column on tablets/desktop */
+
+  /* ---- Font ---- */
+  --font: ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
+
+  /* Safe-area (host chrome / notch), set from the SDK at boot */
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+/* Desktop/web: the play column widens — same layout, more breathing room. */
+@media (min-width: 768px) {
+  :root {
+    --layout-max: 42rem;   /* 672px column on web vs 520px phone ceiling */
+  }
+}
+
+/* Touch targets NEVER scale down — --tap-min is a fixed physical floor.
+   Discrete visibility (e.g. hiding detail lines on short screens) is the only
+   thing media queries are still used for; all sizing is fluid above. */
